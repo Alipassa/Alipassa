@@ -31,6 +31,7 @@ Uso (4.0, multi-mercado):
     python market_ai_engine_v4.py markets                                              # ranking agora, não opera
     python market_ai_engine_v4.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
     python market_ai_engine_v4.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000   # estimativa de lucro OOS
+    python market_ai_engine_v4.py sweep --start 2026-01-01 --market US500        # piso de vantagem escolhido no treino de cada fold
     python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
     python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
 Uso (3.0, um mercado):
@@ -6848,6 +6849,149 @@ def estimate_profit(frames: dict, start: datetime, end: datetime, equity: float,
 
 
 # ============================================================================
+# SWEEP
+# ============================================================================
+
+"""SWEEP DE PISO — escolha do |score| mínimo de vantagem DENTRO do treino de cada fold (walk-forward).
+
+Duas saídas, com papéis diferentes:
+  1. SELEÇÃO IN-TRAIN (o número honesto): para cada fold, todos os pisos são testados no treino; o melhor
+     (por objetivo) é aplicado ao teste. O agregado fora da amostra não viu nenhum resultado de teste.
+  2. SENSIBILIDADE OOS POR PISO FIXO (descritiva): o mesmo piso em todos os folds de teste. Serve para
+     entender a forma da curva — NUNCA para escolher o piso, porque olha o teste.
+"""
+
+
+
+
+DEFAULT_FLOORS: tuple[float, ...] = (10, 12, 15, 17, 20, 22, 25, 30, 35, 40)
+
+
+@dataclass
+class FloorMetrics:
+    floor: float
+    n: int
+    days: float
+    expectancy: float
+    win_rate: float
+    profit_factor: Optional[float]
+    max_dd_pct: float
+    capture: Optional[float]
+    entry_rate: Optional[float]
+
+    @property
+    def per_day(self) -> float:
+        return self.n / self.days if self.days else 0.0
+
+    def row(self) -> str:
+        pf = "n/d" if self.profit_factor is None else ("∞" if self.profit_factor == float("inf") else f"{self.profit_factor:.2f}")
+        cap = "n/d" if self.capture is None else f"{self.capture:.0%}"
+        return f"{self.floor:>5.0f}{self.n:>10}{self.per_day:>10.2f}{cap:>9}{self.expectancy:>+12.2f}R{pf:>7}{self.max_dd_pct:>7.1f}%{self.win_rate:>6.0%}"
+
+
+def _metrics(results: list[BacktestResult], floor: float, strategy: str, equity: float, risk_pct: float) -> FloorMetrics:
+    rows = [r for res in results for r in res.trade_rows]
+    rs = [row["results"].get(strategy, row["results"].get("3R")) for row in rows]
+    rs = [x for x in rs if x is not None]
+    days = sum(((res.opportunity.period_hours if res.opportunity else 0.0) for res in results)) / 24.0
+    wins, losses = [x for x in rs if x > 0], [x for x in rs if x <= 0]
+    pf = (sum(wins) / -sum(losses)) if losses and sum(losses) < 0 else (float("inf") if wins else None)
+    trades = [TradeR(row["time"], "", (row["results"].get(strategy, row["results"].get("3R")) or 0.0), 0.0, strategy) for row in rows]
+    path = simulate_equity(trades, equity, risk_pct)
+    caps = [res.opportunity.capture_rate for res in results if res.opportunity and res.opportunity.capture_rate is not None]
+    ents = [res.opportunity.entry_rate for res in results if res.opportunity and res.opportunity.entry_rate is not None]
+    return FloorMetrics(floor, len(rs), days, statistics.fmean(rs) if rs else 0.0, (len(wins) / len(rs)) if rs else 0.0, pf, path.max_drawdown_pct,
+                        statistics.fmean(caps) if caps else None, statistics.fmean(ents) if ents else None)
+
+
+def objective(m: FloorMetrics, min_n: int = 5) -> float:
+    """Expectancy × √n (t-stat simplificado): premia edge com volume; amostra < min_n vale zero."""
+    if m.n < min_n:
+        return 0.0
+    return m.expectancy * math.sqrt(m.n)
+
+
+@dataclass
+class FoldChoice:
+    fold: int
+    floor: float
+    train: FloorMetrics
+    test: FloorMetrics
+    train_table: list[FloorMetrics] = field(default_factory=list)
+
+
+@dataclass
+class SweepResult:
+    floors: tuple[float, ...]
+    choices: list[FoldChoice]
+    oos_intrain: FloorMetrics                # agregado OOS com o piso escolhido no treino de cada fold
+    sensitivity: list[FloorMetrics]          # piso fixo em todos os folds de teste (descritivo)
+    strategy: str
+    default_floor: float
+
+    def render(self) -> str:
+        hdr = f"{'Piso':>5}{'Entradas':>10}{'Entr/dia':>10}{'Capture':>9}{'Expectancy':>13}{'PF':>7}{'DD':>8}{'Win':>6}"
+        lines = [f"🔬 SWEEP DE PISO DE VANTAGEM — walk-forward, estratégia {self.strategy}, pisos {', '.join(f'{f:g}' for f in self.floors)}",
+                 "", "1) SELEÇÃO IN-TRAIN (número honesto: o piso de cada fold foi escolhido só no treino)"]
+        for c in self.choices:
+            lines.append(f"  fold {c.fold}: treino escolheu piso {c.floor:g} (E={c.train.expectancy:+.2f}R, n={c.train.n}) → teste: n={c.test.n}, "
+                         f"E={c.test.expectancy:+.2f}R, DD {c.test.max_dd_pct:.1f}%")
+        m = self.oos_intrain
+        lines.append(f"  OOS agregado: entradas {m.n} ({m.per_day:.2f}/dia) · E={m.expectancy:+.2f}R · win {m.win_rate:.0%} · "
+                     f"PF {'n/d' if m.profit_factor is None else ('∞' if m.profit_factor == float('inf') else f'{m.profit_factor:.2f}')} · DD {m.max_dd_pct:.1f}%"
+                     + (f" · capture {m.capture:.0%}" if m.capture is not None else ""))
+        chosen = [c.floor for c in self.choices]
+        if chosen:
+            lines.append(f"  pisos escolhidos: {', '.join(f'{f:g}' for f in chosen)} · mediana {statistics.median(chosen):g} (padrão atual {self.default_floor:g})")
+        lines += ["", "2) SENSIBILIDADE OOS POR PISO FIXO (descritiva — olha o teste; NÃO usar para escolher o piso)", hdr]
+        for fm in self.sensitivity:
+            lines.append(fm.row() + ("  ◀ padrão" if fm.floor == self.default_floor else ""))
+        best = max((fm for fm in self.sensitivity if fm.n >= 10), key=lambda fm: objective(fm), default=None)
+        if best is not None:
+            lines.append(f"  maior expectancy×√n com n≥10: piso {best.floor:g} — confirme com a seleção in-train acima antes de adotar")
+        return "\n".join(lines)
+
+
+def threshold_sweep(bt: Backtester, floors: Sequence[float] = DEFAULT_FLOORS, n_folds: int = 4, train_folds: int = 2, strategy: str = "adaptive",
+                    equity: float = 10000.0, risk_pct: float = 0.5, base_cfg: Optional[EngineConfig] = None, log=None) -> SweepResult:
+    base = base_cfg or bt.cfg
+    n = len(bt.frame.xau)
+    usable = n - bt.warmup
+    fold_len = usable // (n_folds + train_folds)
+
+    def cfg_with(floor: float) -> EngineConfig:
+        d = {**base.__dict__, "weights": dict(base.weights), "factor_signs": dict(base.factor_signs), "min_edge_score": float(floor)}
+        return EngineConfig(**d)
+
+    choices: list[FoldChoice] = []
+    oos_by_floor: dict[float, list[BacktestResult]] = {f: [] for f in floors}
+    chosen_results: list[BacktestResult] = []
+    for k in range(n_folds):
+        train_end = bt.warmup + (train_folds + k) * fold_len
+        train_start = train_end - train_folds * fold_len
+        test_end = min(n, train_end + fold_len)
+        train_table: list[FloorMetrics] = []
+        for f in floors:
+            r = bt.run(train_start, train_end, cfg_with(f))
+            train_table.append(_metrics([r], f, strategy, equity, risk_pct))
+            if log:
+                log(f"fold {k + 1} treino piso {f:g}: n={train_table[-1].n} E={train_table[-1].expectancy:+.2f}R")
+        best = max(train_table, key=objective)
+        if objective(best) <= 0:
+            best = next((t for t in train_table if t.floor == base.min_edge_score), train_table[0])  # sem edge no treino → mantém o padrão
+        test_runs: dict[float, BacktestResult] = {}
+        for f in floors:
+            test_runs[f] = bt.run(train_end, test_end, cfg_with(f))
+            oos_by_floor[f].append(test_runs[f])
+        test_m = _metrics([test_runs[best.floor]], best.floor, strategy, equity, risk_pct)
+        chosen_results.append(test_runs[best.floor])
+        choices.append(FoldChoice(k + 1, best.floor, best, test_m, train_table))
+    oos_intrain = _metrics(chosen_results, float("nan"), strategy, equity, risk_pct)
+    sensitivity = [_metrics(oos_by_floor[f], f, strategy, equity, risk_pct) for f in floors]
+    return SweepResult(tuple(floors), choices, oos_intrain, sensitivity, strategy, base.min_edge_score)
+
+
+# ============================================================================
 # LIVE_ENGINE
 # ============================================================================
 
@@ -7695,6 +7839,23 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """SWEEP DE PISO: testa vários |score| mínimos de vantagem no walk-forward, escolhendo o piso NO TREINO de cada fold."""
+
+    cfg = _cfg_for(args)
+    frame = _load_frame(args)
+    floors = tuple(float(x) for x in args.floors.split(",")) if args.floors else DEFAULT_FLOORS
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    bt = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
+    rep = threshold_sweep(bt, floors, n_folds=args.folds, strategy=args.strategy, equity=args.equity, risk_pct=risk,
+                          log=(print if args.verbose else None))
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+    return 0
+
+
 def cmd_edge(args: argparse.Namespace) -> int:
     """LIVE EDGE: tabela por mercado a partir do que o sistema viveu (fora da amostra por construção) + evolução diária."""
 
@@ -8059,6 +8220,26 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
     es.add_argument("--out", default=None)
     es.set_defaults(func=cmd_estimate)
+
+    sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
+    sw.add_argument("--csv", default=None)
+    sw.add_argument("--dxy-csv", default=None)
+    sw.add_argument("--us10y-csv", default=None)
+    sw.add_argument("--symbol", default="GC=F")
+    sw.add_argument("--market", default=None, help="EURUSD, US500, XAUUSD, USDJPY, WTI")
+    sw.add_argument("--start", default=None)
+    sw.add_argument("--end", default=None)
+    sw.add_argument("--floors", default=None, help="ex.: 10,12,15,17,20,22,25,30,35,40 (padrão)")
+    sw.add_argument("--strategy", default="adaptive")
+    sw.add_argument("--folds", type=int, default=4)
+    sw.add_argument("--step", type=int, default=1)
+    sw.add_argument("--horizon", type=int, default=240)
+    sw.add_argument("--equity", type=float, default=10000.0)
+    sw.add_argument("--risk", type=float, default=None)
+    sw.add_argument("--no-fred", action="store_true")
+    sw.add_argument("--out", default=None)
+    sw.add_argument("-v", "--verbose", action="store_true")
+    sw.set_defaults(func=cmd_sweep)
 
     ed = sub.add_parser("edge", help="4.0: LIVE EDGE — tabela diária por mercado a partir do que foi vivido (o teste definitivo)")
     ed.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")

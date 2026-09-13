@@ -254,6 +254,26 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """SWEEP DE PISO: testa vários |score| mínimos de vantagem no walk-forward, escolhendo o piso NO TREINO de cada fold."""
+    from .evaluation import Backtester
+    from .sweep import DEFAULT_FLOORS, threshold_sweep
+    from .telegram import load_env_file
+
+    cfg = _cfg_for(args)
+    frame = _load_frame(args)
+    floors = tuple(float(x) for x in args.floors.split(",")) if args.floors else DEFAULT_FLOORS
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    bt = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
+    rep = threshold_sweep(bt, floors, n_folds=args.folds, strategy=args.strategy, equity=args.equity, risk_pct=risk,
+                          log=(print if args.verbose else None))
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+    return 0
+
+
 def cmd_edge(args: argparse.Namespace) -> int:
     """LIVE EDGE: tabela por mercado a partir do que o sistema viveu (fora da amostra por construção) + evolução diária."""
     from .edge_report import edge_trend, live_edge_report
@@ -637,6 +657,26 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
     es.add_argument("--out", default=None)
     es.set_defaults(func=cmd_estimate)
+
+    sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
+    sw.add_argument("--csv", default=None)
+    sw.add_argument("--dxy-csv", default=None)
+    sw.add_argument("--us10y-csv", default=None)
+    sw.add_argument("--symbol", default="GC=F")
+    sw.add_argument("--market", default=None, help="EURUSD, US500, XAUUSD, USDJPY, WTI")
+    sw.add_argument("--start", default=None)
+    sw.add_argument("--end", default=None)
+    sw.add_argument("--floors", default=None, help="ex.: 10,12,15,17,20,22,25,30,35,40 (padrão)")
+    sw.add_argument("--strategy", default="adaptive")
+    sw.add_argument("--folds", type=int, default=4)
+    sw.add_argument("--step", type=int, default=1)
+    sw.add_argument("--horizon", type=int, default=240)
+    sw.add_argument("--equity", type=float, default=10000.0)
+    sw.add_argument("--risk", type=float, default=None)
+    sw.add_argument("--no-fred", action="store_true")
+    sw.add_argument("--out", default=None)
+    sw.add_argument("-v", "--verbose", action="store_true")
+    sw.set_defaults(func=cmd_sweep)
 
     ed = sub.add_parser("edge", help="4.0: LIVE EDGE — tabela diária por mercado a partir do que foi vivido (o teste definitivo)")
     ed.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
