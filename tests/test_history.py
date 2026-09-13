@@ -156,23 +156,23 @@ class ImporterTests(unittest.TestCase):
         vol = {"timeline": [{"series": "Article Count", "data": [{"date": "20260114T120000Z", "value": 1.8}]}]}
         http = FakeHttp({"mode=artlist": arts, "mode=timelinetone": tone, "mode=timelinevolraw": vol})
         slept: list[float] = []
-        h = GDELTImporter(http, sleep=slept.append).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30, enrich=True)
-        self.assertGreaterEqual(len(slept), 2)                 # ritmo: pausa entre chamadas (limite do GDELT)
+        h = GDELTImporter(http, sleep=slept.append).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30, enrich=True, mode="artlist")
+        self.assertGreaterEqual(len(slept), 1)                 # ritmo: pausa entre chamadas (limite do GDELT)
         self.assertEqual(len(h), 2)
         strike = next(e for e in h.events if "Missile" in e.headline)
         self.assertEqual(strike.kind, "geopolitical_escalation")
         self.assertEqual(strike.sentiment, "NEGATIVE")
         self.assertEqual(strike.category, "GEOPOLITICAL")
-        self.assertAlmostEqual(strike.volume, 1.8)
+        self.assertIsNone(strike.volume)                       # volume vem do modo volinfo
         cease = next(e for e in h.events if "Ceasefire" in e.headline)
         self.assertEqual(cease.kind, "geopolitical_deescalation")
         self.assertEqual(cease.sentiment, "POSITIVE")
         # ids determinísticos entre execuções
-        h2 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30, enrich=True)
+        h2 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30, enrich=True, mode="artlist")
         self.assertEqual([e.event_id for e in h.events], [e.event_id for e in h2.events])
         # modo econômico (padrão): só artlist — manchete, data, tema, fonte; sem tom/volume
         http.calls.clear()
-        h3 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        h3 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30, mode="artlist")
         self.assertEqual(len(h3), 2)
         self.assertTrue(all("artlist" in c for c in http.calls))
         self.assertIsNone(h3.events[0].tone)
@@ -195,12 +195,12 @@ class ImporterTests(unittest.TestCase):
         http = Flaky({"mode=artlist": arts, "mode=timelinetone": {}, "mode=timelinevolraw": {}})
         slept, parts = [], []
         imp = GDELTImporter(http, retry_wait=60.0, sleep=slept.append, log=lambda m: None)
-        h = imp.fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, checkpoint=lambda p: parts.append(len(p)))
+        h = imp.fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, checkpoint=lambda p: parts.append(len(p)), mode="artlist")
         self.assertIn(60.0, slept)                              # esperou o limite e tentou de novo
         # bloqueio por rajada: espera exponencial; Retry-After do servidor tem prioridade
         http.fail_left = 2
         slept.clear()
-        GDELTImporter(http, retry_wait=60.0, sleep=slept.append, log=lambda m: None).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
+        GDELTImporter(http, retry_wait=60.0, sleep=slept.append, log=lambda m: None).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"], mode="artlist")
         self.assertEqual([w for w in slept if w >= 60.0], [60.0, 120.0])
 
         class RetryAfter(FakeHttp):
@@ -212,26 +212,46 @@ class ImporterTests(unittest.TestCase):
                     raise DataError("falha ao buscar x: HTTP Error 429: Too Many Requests (Retry-After 300s)")
                 return super().get_json(url, ttl)
         slept.clear()
-        GDELTImporter(RetryAfter({"mode=artlist": arts}), sleep=slept.append).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
+        GDELTImporter(RetryAfter({"mode=artlist": arts}), sleep=slept.append).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"], mode="artlist")
         self.assertIn(300.0, slept)
         self.assertEqual(len(h), 1)
         self.assertEqual(len(parts), 2)                         # um checkpoint por janela
         # falha persistente numa janela: registrada em `failed`, execução continua, nada levantado
         http.fail_left = 99
         imp2 = GDELTImporter(http, max_retries=1, sleep=lambda s: None)
-        h2 = imp2.fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
+        h2 = imp2.fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"], mode="artlist")
         self.assertEqual(len(h2), 0)
         self.assertEqual(len(imp2.failed), 1)
+
+    def test_gdelt_volinfo_spreads_headlines_over_every_day(self):
+        data = []
+        for d in range(1, 31):
+            data.append({"date": f"202601{d:02d}T000000Z", "value": 0.2 + d / 100,
+                         "toparts": [{"url": f"https://www.site{d}.com/a", "title": f"Missile strike day {d}"}, {"url": "https://x.org/b", "title": f"Ceasefire talks {d}"}]})
+        vol = {"timeline": [{"series": "Volume Intensity", "data": data}]}
+        http = FakeHttp({"mode=timelinevolinfo": vol})
+        h = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 1, 30), ["geopolitica"], chunk_days=30)
+        self.assertEqual(len(http.calls), 1)                       # 1 chamada por tema e janela
+        self.assertEqual(len(h), 60)
+        days = {e.timestamp.date() for e in h.events}
+        self.assertEqual(len(days), 30)                            # cobertura de todos os dias da janela
+        e = next(x for x in h.events if "day 7" in x.headline)
+        self.assertEqual((e.published_at.hour, e.published_at.minute), (23, 59))   # só o dia é conhecido → visível do fim do dia
+        self.assertEqual(e.source, "gdelt/site7.com")
+        self.assertAlmostEqual(e.volume, 0.27)
+        self.assertEqual(e.kind, "geopolitical_escalation")
+        cov = coverage(h, date(2026, 1, 1), date(2026, 1, 30))
+        self.assertAlmostEqual(cov.news_pct, 1.0)
 
     def test_gdelt_resume_skips_done_windows(self):
         arts = {"articles": [{"title": "OPEC cuts output", "seendate": "20260114T140000Z", "domain": "x.com"}]}
         http = FakeHttp({"mode=artlist": arts})
         with tempfile.TemporaryDirectory() as d:
             prog = FetchProgress(os.path.join(d, "n.csv"))
-            GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog)
+            GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog, mode="artlist")
             self.assertEqual(len(http.calls), 2)
             prog2 = FetchProgress(os.path.join(d, "n.csv"))       # relido do disco
-            GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog2)
+            GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog2, mode="artlist")
             self.assertEqual(len(http.calls), 2)                   # nada refeito
 
     def test_alfred_key_validation_and_400(self):

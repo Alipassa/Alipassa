@@ -330,7 +330,7 @@ def cmd_history(args: argparse.Namespace) -> int:
                 save_history(merge(hist, partial), path)
             imp = GDELTImporter(http, min_interval=args.pace, log=print)
             new = imp.fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint, enrich=args.enrich,
-                            progress=progress)
+                            progress=progress, mode=args.gdelt_mode)
             if imp.failed:
                 print(f"janelas com falha ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
                       "; ".join(f"{t} {w}" for t, w, _ in imp.failed))
@@ -847,7 +847,9 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--topics", default=None, help="GDELT: geopolitica,petroleo,china,fed,risco (padrão: todos)")
     hi.add_argument("--chunk-days", type=int, default=30, help="GDELT: dias por janela (menos janelas = menos chamadas; o GDELT limita a 1 a cada ~5 s)")
     hi.add_argument("--max-records", type=int, default=250, help="GDELT: manchetes por tema por janela (máx. 250)")
-    hi.add_argument("--enrich", action="store_true", help="GDELT: além das manchetes, baixar tom e volume (3× mais chamadas)")
+    hi.add_argument("--enrich", action="store_true", help="GDELT: além das manchetes/volume, baixar o tom (2× chamadas)")
+    hi.add_argument("--gdelt-mode", choices=["volinfo", "artlist"], default="volinfo",
+                    help="volinfo (padrão): manchetes mais relevantes de CADA DIA + volume, 1 chamada/janela; artlist: as mais recentes com hora exata")
     hi.add_argument("--pace", type=float, default=8.0, help="GDELT: segundos entre chamadas (aumente se receber 429 repetidos)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")

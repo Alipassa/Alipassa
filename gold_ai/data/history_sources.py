@@ -231,10 +231,11 @@ class GDELTImporter:
                 f"&startdatetime={start:%Y%m%d%H%M%S}&enddatetime={end:%Y%m%d%H%M%S}{extra}")
 
     def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 30, max_records: int = 250,
-              checkpoint=None, enrich: bool = False, progress=None) -> EventHistory:
-        """Modo econômico (padrão): só `artlist` (manchete, seendate, tema, fonte) — 1 chamada por tema e janela.
-        `enrich=True` acrescenta tom e volume (3 chamadas). Janelas já feitas (progress) são puladas; uma janela que
-        falhar depois das tentativas é registrada em `self.failed` e a execução continua."""
+              checkpoint=None, enrich: bool = False, progress=None, mode: str = "volinfo") -> EventHistory:
+        """1 chamada por tema e janela. `mode="volinfo"` (padrão): `timelinevolinfo` devolve, DIA A DIA, o volume e as manchetes
+        mais relevantes de cada dia — cobertura uniforme da janela. `mode="artlist"`: as `max_records` manchetes mais recentes
+        com hora exata (concentram-se no fim da janela; use janelas curtas). `enrich=True` acrescenta o tom (timelinetone).
+        Janelas já feitas (progress) são puladas; janela que falhar após as tentativas fica em `self.failed` e a execução continua."""
         from .http import DataError
         hist = EventHistory()
         self.failed: list[tuple[str, str, str]] = []
@@ -242,23 +243,26 @@ class GDELTImporter:
         t_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
         topics = topics or list(GDELT_TOPICS)
         n_chunks = max(1, -(-(t_end - t0).days // chunk_days))
-        calls = 3 if enrich else 1
+        calls = 2 if enrich else 1
         if self._log:
-            self._log(f"GDELT: {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × {calls} chamada(s) ≈ "
+            self._log(f"GDELT ({mode}): {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × {calls} chamada(s) ≈ "
                       f"{len(topics) * n_chunks * calls * self.min_interval / 60:.0f} min (limite do GDELT: ~1 requisição a cada 5 s)")
         for topic in topics:
             query, cat = GDELT_TOPICS[topic]
             t = t0
             while t < t_end:
                 t1 = min(t + timedelta(days=chunk_days), t_end)
-                key = f"gdelt:{topic}:{t:%Y%m%d}:{t1:%Y%m%d}:{'enrich' if enrich else 'headlines'}"
+                key = f"gdelt:{topic}:{t:%Y%m%d}:{t1:%Y%m%d}:{mode}{':enrich' if enrich else ''}"
                 if progress is not None and progress.has(key):
                     t = t1
                     continue
                 try:
-                    arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
+                    if mode == "artlist":
+                        arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
+                        vol = None
+                    else:
+                        arts = vol = self._get(self._url(query, "timelinevolinfo", t, t1))
                     tone = self._get(self._url(query, "timelinetone", t, t1)) if enrich else None
-                    vol = self._get(self._url(query, "timelinevolraw", t, t1)) if enrich else None
                 except DataError as e:
                     self.failed.append((topic, f"{t:%Y-%m-%d}→{t1:%Y-%m-%d}", str(e)[-120:]))
                     if self._log:
@@ -289,6 +293,30 @@ class GDELTImporter:
         return sorted(out)
 
     @staticmethod
+    def _articles(payload: dict) -> list[tuple[str, datetime, str]]:
+        """(título, instante, domínio) tanto de `artlist` (seendate exato) quanto de `timelinevolinfo` (toparts por dia).
+        No volinfo só se conhece o DIA: published_at = fim do dia (conservador — o cérebro nunca vê antes de existir)."""
+        out = []
+        for a in (payload or {}).get("articles", []):
+            try:
+                ts = datetime.strptime(a["seendate"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            except (KeyError, ValueError):
+                continue
+            out.append((str(a.get("title") or "").strip(), ts, str(a.get("domain") or "")))
+        for series in (payload or {}).get("timeline", []):
+            for pt in series.get("data", []):
+                try:
+                    day = datetime.strptime(pt["date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                except (KeyError, ValueError):
+                    continue
+                ts = day.replace(hour=23, minute=59) if day.hour == 0 and day.minute == 0 else day
+                for a in pt.get("toparts", []) or []:
+                    url = str(a.get("url") or "")
+                    dom = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
+                    out.append((str(a.get("title") or "").strip(), ts, dom))
+        return out
+
+    @staticmethod
     def parse(topic: str, category: str, artlist: dict, tone: Optional[dict] = None, volume: Optional[dict] = None) -> EventHistory:
         from ..news_engine import QUALITATIVE
         tones = GDELTImporter._timeline(tone or {})
@@ -304,13 +332,8 @@ class GDELTImporter:
             return best
         out: list[HistoricalEvent] = []
         seen: set[str] = set()
-        for a in (artlist or {}).get("articles", []):
-            title = str(a.get("title") or "").strip()
+        for title, ts, domain in GDELTImporter._articles(artlist):
             if not title:
-                continue
-            try:
-                ts = datetime.strptime(a["seendate"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-            except (KeyError, ValueError):
                 continue
             key = re.sub(r"\W+", " ", title.lower())[:60]
             if key in seen:
@@ -320,5 +343,5 @@ class GDELTImporter:
             tn, vl = nearest(tones, ts), nearest(vols, ts)
             sentiment = "" if tn is None else ("POSITIVE" if tn > 1.0 else "NEGATIVE" if tn < -1.0 else "NEUTRAL")
             out.append(HistoricalEvent(ts, ts, f"GDELT_{topic}_{ts:%Y%m%d%H%M}_{zlib.crc32(key.encode()) % 10000:04d}", f"{topic}: {title[:60]}", "GLOBAL", "", "MÉDIO",
-                                       None, None, None, None, None, category, kind, f"gdelt/{a.get('domain', '')}", title[:160], sentiment, tone=tn, volume=vl))
+                                       None, None, None, None, None, category, kind, f"gdelt/{domain}", title[:160], sentiment, tone=tn, volume=vl))
         return EventHistory(out)

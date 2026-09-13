@@ -117,7 +117,7 @@ sentiment, xau_effect, us500_effect, eurusd_effect, usdjpy_effect, wti_effect, e
 python market_ai_engine_v4.py history template                       # cria dados/noticias_historicas.csv (preencha ou importe)
 python market_ai_engine_v4.py history fetch-te --start 2026-01-01    # Trading Economics point-in-time (TE_API_KEY no .env)
 python market_ai_engine_v4.py history fetch-alfred                   # FRED/ALFRED: valor inicialmente publicado + revisões (FRED_API_KEY)
-python market_ai_engine_v4.py history fetch-gdelt                    # GDELT: manchetes por tema (aberto; 1 chamada/tema/janela; --enrich = tom e volume)
+python market_ai_engine_v4.py history fetch-gdelt                    # GDELT: manchetes mais relevantes de CADA DIA + volume por tema (1 chamada/tema/janela; --enrich = tom)
                                                                      #   continua de onde parou (dados/*.progress.json); janelas com falha são refeitas na próxima execução
 python market_ai_engine_v4.py history rules                          # efeito por ativo a partir das regras macro
 python market_ai_engine_v4.py history learn --markets XAUUSD,US500   # efeito empírico: o preço 60 min depois decide (≥ 8 eventos)
