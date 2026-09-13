@@ -97,14 +97,21 @@ def _load_frame(args: argparse.Namespace):
                         vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
 
 
-def ManagedTradeFactory(trade_id, plan, thesis):
-    from .monitor import ManagedTrade
-    return ManagedTrade(trade_id, plan, thesis)
-
-
 def cmd_live(args: argparse.Namespace) -> int:
-    """Ciclo com DADOS REAIS (Yahoo/FRED/CFTC/RSS) → MarketSnapshot → GOLD AI → Telegram/SQLite."""
+    """3.0 LIVE EXECUTION ENGINE: dados reais → predição → decisão → plano → risco → lote → MT5 → confirmação → monitor → resultado → capital."""
     from .data import DataEngine, DataEngineConfig
+    from .guard import GuardLimits, KillSwitch, TelegramCommands, TradingMode
+    from .live_engine import LiveExecutionEngine
+    from .telegram import load_env_file
+    from .validation import IsotonicCalibrator
+
+    env = load_env_file()
+    limits = GuardLimits.from_env(env)
+    mode = TradingMode(args.mode.upper().replace("-", "_"))
+    if mode == TradingMode.LIVE and not args.authorize:
+        print("modo LIVE exige --authorize explícito; rebaixando para SEMI_LIVE")
+        mode = TradingMode.SEMI_LIVE
+    ks = KillSwitch.from_env(env, file_path=args.kill_switch_file)
 
     dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot,
                             enable_fred=not args.no_fred, enable_news=not args.no_news)
@@ -112,122 +119,57 @@ def cmd_live(args: argparse.Namespace) -> int:
     source = data
     executor = None
     if args.source == "mt5":
-        from .data.mt5 import MT5Config, MT5Executor, MT5Source
-        from .telegram import load_env_file
+        from .data.mt5 import MT5Config, MT5Source
+        from .execution import ExecutionEngine
 
-        mcfg = MT5Config.from_env(load_env_file())
+        mcfg = MT5Config.from_env(env)
         if args.mt5_path:
             mcfg.path = args.mt5_path
         source = MT5Source(mcfg, data_engine=data)
-        if args.execute:
-            executor = MT5Executor(source.client, volume=args.volume)
-    from .report import render_dashboard
-    from .validation import IsotonicCalibrator
-
-    from .monitor import TradeMonitor, Thesis, render_evolution, render_monitor
-    from .telegram import format_decision, format_monitor, load_env_file
-    from .trading import PositionManager, RiskLimits, TradingMode
-
-    limits = RiskLimits.from_env(load_env_file())
-    mode = TradingMode(args.mode.upper())
-    if mode == TradingMode.LIVE and not args.authorize:
-        print("modo LIVE exige --authorize explícito; rebaixando para AUTHORIZE")
-        mode = TradingMode.AUTHORIZE
-    pm_executor = None
-    if mode != TradingMode.PAPER and args.source == "mt5":
-        from .data.mt5 import MT5Executor
-        pm_executor = MT5Executor(source.client, volume=args.volume)
-    print(f"modo de operação: {mode.value} · risco/trade {limits.risk_per_trade_pct}% · perda diária máx {limits.max_daily_loss_pct}% · "
-          f"posições máx {limits.max_positions} · lote máx {limits.max_lot}")
+        if mode != TradingMode.PAPER:
+            source.client.connect()
+            executor = ExecutionEngine(source.client, max_slippage=limits.max_slippage)
+    elif mode != TradingMode.PAPER:
+        print("execução real exige --source mt5; rebaixando para PAPER")
+        mode = TradingMode.PAPER
 
     calibrator = None
     if args.calibrator and os.path.exists(args.calibrator):
         with open(args.calibrator, encoding="utf-8") as f:
             calibrator = IsotonicCalibrator.from_dict(json.load(f))
         print(f"calibrador carregado: {args.calibrator}")
-    engine = GoldAIEngine(EngineConfig(), calibrator=calibrator)
     sender = TelegramSender(dry_run=not args.send)
+    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
-    pm = PositionManager(mode, limits, args.equity, mem.r_stats(), args.horizon, pm_executor)
-    pm.authorized = args.authorize
-    monitor = TradeMonitor(history=mem.r_stats())
-    managed = mem.managed_trades()
-    pm.risk.open_positions = len(managed)
-    if managed:
-        print(f"{len(managed)} operação(ões) aberta(s) retomada(s) pelo GOLD TRADE MONITOR")
+    live = LiveExecutionEngine(mem, limits, mode, args.equity, executor, sender, ks, commands, args.horizon,
+                               GoldAIEngine(EngineConfig(), calibrator=calibrator), authorized=args.authorize)
+    print(f"GOLD AI ENGINE 3.0 · modo {mode.value} · {live.perf.render()}")
+    print(f"limites: risco/trade {limits.risk_per_trade_pct}% · perda diária {limits.max_daily_loss_pct}% · drawdown {limits.max_drawdown_pct}% · "
+          f"posições {limits.max_positions} · lote máx {limits.max_lot} · spread máx {limits.max_spread} · kill switch: {ks.new_entries_allowed()[1]}")
+    if live.managed:
+        print(f"{len(live.managed)} operação(ões) aberta(s) retomada(s) pelo GOLD TRADE MONITOR")
     try:
         while True:
             snap = source.collect() if source is data else source.snapshot()
             print(data.coverage())
             if source is not data:
                 print(f"MT5: {source.status.get('mt5', 'n/d')}")
-            if not snap.candles:
-                print("sem candles XAU — ciclo abortado")
-            else:
-                # 2.1: confronta previsões pendentes com o preço real antes de prever de novo
-                fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
-                for pid, out in mem.auto_resolve(fine, snap.time, snap.atr or 5.0, args.horizon):
-                    print(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
-                for tid, sim in mem.auto_resolve_trades(fine, snap.time):
-                    pr = sim["profile"]
-                    print(f"[trade] operação #{tid} fechada → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R, "
-                          + ", ".join(f"{k} {v:+.2f}R" for k, v in sim["results"].items()))
-                    pm.risk.open_positions = max(0, pm.risk.open_positions - 1)
-                pm.mpe.history = monitor.history = mem.r_stats()
-                engine.expected_lead_min = mem.lead_time_stats()["media"]
-                assessment, signal = engine.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
-                print(render_dashboard(assessment, engine.expected_lead_min))
-                # 2.3: GOLD TRADE MONITOR — reavalia a tese de cada operação aberta com o cenário atual
-                for tr in list(managed):
-                    reading = monitor.check_path(tr, fine)
-                    if reading is None and tr.status == "OPEN":
-                        reading = monitor.evaluate(tr, assessment, snap)
-                    if reading is None:
-                        continue
-                    mem.log_monitor(tr.trade_id, reading)
-                    print(render_monitor(tr, reading))
-                    if tr.status == "CLOSED":
-                        mem.close_managed(tr.trade_id, tr.result_r, tr.close_reason, snap.time, tr.state_dict())
-                        print(render_evolution(tr))
-                        managed.remove(tr)
-                        pm.risk.close(tr.plan, tr.result_r, snap.time)
-                        if pm_executor is not None and mode == TradingMode.LIVE:
-                            print("LIVE: encerramento no broker deve ser confirmado manualmente nesta versão")
-                    else:
-                        mem.save_state(tr.trade_id, tr.state_dict())
-                    if args.send and reading.action != "MANTER":
-                        sender.send(format_monitor(tr, reading))
+            res = live.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
+            for n in res.notes:
+                print(n)
+            if res.assessment is not None:
+                from .report import render_dashboard
+                print(render_dashboard(res.assessment, live.engine.expected_lead_min))
                 if args.verbose:
-                    print(render_report(assessment))
-                if signal:
-                    sender.send(signal.text)
-                    pid = mem.record(assessment, signal.type.value, atr=snap.atr, horizon_min=args.horizon)
-                    decision = pm.decide(signal, snap)
-                    print(decision.render())
-                    if decision.action in ("PAPER", "SENT"):
-                        tid = mem.open_trade(decision.plan, mode.value, pid, args.horizon)
-                        thesis = Thesis.from_assessment(assessment, decision.plan.direction)
-                        tr = ManagedTradeFactory(tid, decision.plan, thesis)
-                        mem.save_thesis(tid, thesis, tr.state_dict())
-                        managed.append(tr)
-                        print(f"[monitor] operação #{tid:05d} sob acompanhamento — tese: score {thesis.score:+.0f}, pilares {', '.join(thesis.pillars) or 'nenhum'}")
-                    if args.send and decision.action != "NO_TRADE":
-                        sender.send(format_decision(decision))
-                    if executor is not None:
-                        plan = executor.plan(signal)
-                        if plan is not None:
-                            plan = executor.execute(plan, authorize=args.authorize)
-                            print(plan.render())
-                            if args.send:
-                                sender.send("🧾 " + plan.render())
-                else:
-                    print(">>> sem sinal — " + assessment.edge_status)
+                    print(render_report(res.assessment))
+            print(f">>> {res.decision}")
             if args.once:
                 break
             time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
     finally:
+        print(live.status_text())
         mem.close()
         if source is not data:
             source.client.close()
@@ -258,6 +200,22 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             path.append((t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["close"])))
     mem = PredictionMemory(args.db)
     print(mem.metrics(path, args.threshold, args.horizon).render())
+    mem.close()
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    mem = PredictionMemory(args.db)
+    print(mem.performance_summary())
+    curve = mem.equity_curve()
+    if curve:
+        print("  últimos pontos: " + " → ".join(f"{v:,.0f}" for _, v in curve[-8:]))
+    open_ = mem.managed_trades()
+    print(f"operações abertas sob monitor: {len(open_)}")
+    for tr in open_:
+        print(f"  #{tr.trade_id:05d} {tr.thesis.direction.value} entrada {tr.plan.entry:.2f} stop {tr.price_at_r(tr.stop_r):.2f} restante {tr.remaining:.0%}")
+    print(mem.r_stats().render())
+    print(mem.exit_learning())
     mem.close()
     return 0
 
@@ -395,58 +353,31 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--flow", type=float, default=0.0)
     e.set_defaults(func=cmd_event)
 
-    lv = sub.add_parser("live", help="ciclo com dados reais (Yahoo/FRED/CFTC/RSS)")
-    lv.add_argument("--symbol", default="GC=F", help="GC=F (futuro) ou XAUUSD=X (spot)")
+    lv = sub.add_parser("live", help="3.0 LIVE EXECUTION ENGINE — dados reais, decisão, execução no MT5 e gestão da posição")
+    lv.add_argument("--symbol", default="GC=F", help="GC=F (futuro) ou XAUUSD=X (spot) para o Data Engine web")
     lv.add_argument("--calendar", default=None, help="JSON de eventos econômicos")
     lv.add_argument("--interval", type=int, default=300)
     lv.add_argument("--db", default="gold_ai.db")
-    lv.add_argument("--send", action="store_true")
+    lv.add_argument("--send", action="store_true", help="envia ao Telegram e habilita comandos /STOP /PAUSE /RESUME /STATUS /CLOSE")
     lv.add_argument("--once", action="store_true")
     lv.add_argument("--no-cot", action="store_true")
     lv.add_argument("--no-fred", action="store_true")
     lv.add_argument("--no-news", action="store_true")
-    lv.add_argument("--source", choices=["web", "mt5"], default="web", help="mt5 = candles/preço do terminal MetaTrader 5")
+    lv.add_argument("--source", choices=["web", "mt5"], default="web", help="mt5 = preço/candles e execução no MetaTrader 5")
     lv.add_argument("--mt5-path", default=None, help="caminho do terminal64.exe (ou MT5_PATH no .env)")
-    lv.add_argument("--execute", action="store_true", help="gera plano de ordem no MT5 (simulado, salvo com --authorize)")
-    lv.add_argument("--authorize", action="store_true", help="AUTORIZA envio real de ordens ao broker")
-    lv.add_argument("--volume", type=float, default=0.01)
-    lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão")
-    lv.add_argument("--mode", choices=["paper", "authorize", "live"], default="paper", help="🟡 paper · 🟠 authorize · 🔴 live (exige --authorize)")
-    lv.add_argument("--equity", type=float, default=10000.0, help="capital de referência para o lote (USD)")
+    lv.add_argument("--mode", choices=["paper", "authorize", "semi-live", "live"], default="paper",
+                    help="🟢 paper (padrão) · 🟡 authorize · 🟠 semi-live · 🔴 live (exige --authorize)")
+    lv.add_argument("--authorize", action="store_true", help="autoriza a próxima entrada (AUTHORIZE) / habilita LIVE")
+    lv.add_argument("--equity", type=float, default=10000.0, help="capital inicial (PAPER); em LIVE vem do broker")
+    lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão/operação")
     lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")
-    lv.add_argument("-v", "--verbose", action="store_true", help="imprime o relatório completo além do painel")
+    lv.add_argument("--kill-switch-file", default="STOP_TRADING", help="se o arquivo existir, nenhuma entrada nova")
+    lv.add_argument("-v", "--verbose", action="store_true")
     lv.set_defaults(func=cmd_live)
 
-    va = sub.add_parser("validate", help="2.1 VALIDATION ENGINE: backtest + walk-forward + calibração + score por fator + auditoria")
-    va.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
-    va.add_argument("--dxy-csv", default=None)
-    va.add_argument("--us10y-csv", default=None)
-    va.add_argument("--symbol", default="GC=F")
-    va.add_argument("--folds", type=int, default=4)
-    va.add_argument("--step", type=int, default=1)
-    va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
-    va.add_argument("--threshold-atr", type=float, default=1.0)
-    va.add_argument("--horizon", type=int, default=240)
-    va.add_argument("--out", default=None, help="salva o relatório em arquivo")
-    va.set_defaults(func=cmd_validate)
-
-    si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy em R")
-    si.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
-    si.add_argument("--dxy-csv", default=None)
-    si.add_argument("--us10y-csv", default=None)
-    si.add_argument("--symbol", default="GC=F")
-    si.add_argument("--step", type=int, default=1)
-    si.add_argument("--folds", type=int, default=4)
-    si.add_argument("--threshold-atr", type=float, default=1.0)
-    si.add_argument("--horizon", type=int, default=240)
-    si.add_argument("--walk-forward", action="store_true")
-    si.set_defaults(func=cmd_simulate)
-
-    ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
-    ca.add_argument("--db", default="gold_ai.db")
-    ca.add_argument("--out", default="calibrator.json")
-    ca.add_argument("--min-n", type=int, default=30)
-    ca.set_defaults(func=cmd_calibrate)
+    st = sub.add_parser("status", help="capital, performance, operações abertas, aprendizado")
+    st.add_argument("--db", default="gold_ai.db")
+    st.set_defaults(func=cmd_status)
 
     bt = sub.add_parser("backtest", help="backtest / walk-forward sobre histórico H1 (CSV ou Yahoo)")
     bt.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")

@@ -130,6 +130,57 @@ OPERAÇÃO ABERTA → GOLD TRADE MONITOR → NOVO SCORE → COMPARAR COM TESE OR
 Sequência até o 3.0: 2.1 provou a previsão → 2.2 provou a operação → 2.3 prova o gerenciamento → 3.0 execução real
 (PAPER → BACKTEST → WALK-FORWARD → LIVE SEM ORDEM → AUTHORIZE → LIVE).
 
+## 3.0 — LIVE EXECUTION ENGINE
+
+Primeira versão preparada para execução autônoma, **nascendo em PAPER**. O núcleo preditivo (2.1–2.3) não muda;
+o 3.0 acrescenta o ciclo completo decisão → execução → confirmação → gestão → resultado → capital → novo lote.
+
+```text
+DADOS → SNAPSHOT → 🧠 PREDICTOR → PRE-MOVE → DECISION ENGINE → TRADE PLAN → RISK ENGINE → POSITION SIZE
+→ MT5 EXECUTOR → BROKER → CONFIRMAÇÃO (ticket · preço · SL · TP reais) → 🔄 TRADE MONITOR
+→ MANTER / PROTEGER / REDUZIR / ESTENDER / ENCERRAR → RESULTADO → SQLITE → PERFORMANCE → NOVO CAPITAL → PRÓXIMO
+```
+
+| Módulo | Função |
+| --- | --- |
+| `execution.ExecutionEngine` | envia a ordem e **só considera executada após confirmar a posição no broker**; compara volume, preço, SL e TP com o pedido → ⚠️ EXECUTION MISMATCH (corrige SL/TP; sem SL correto, encerra por segurança); parciais, modificação de SL/TP, resultado por deals do histórico |
+| `guard.PerformanceEngine` | capital → risco financeiro (`RISK_PER_TRADE` %) → lote. O percentual nunca muda; o valor cresce com o capital. Em LIVE o capital é sincronizado com o broker |
+| `guard.size_lots` | CAPITAL + RISCO + STOP + CONTRATO. Nunca confiança |
+| `guard.GuardLimits` | + `MAX_DRAWDOWN`, `MIN_RR_TO_STRUCTURE`; perda diária ≥ `MAX_DAILY_LOSS` → 🚨 TRADING STOP até o dia seguinte |
+| `guard.KillSwitch` | `TRADING_ENABLED=false`, arquivo `STOP_TRADING`, `/STOP`, `/PAUSE`, `/RESUME` |
+| `guard.TelegramCommands` | `/STOP` · `/PAUSE` · `/RESUME` · `/STATUS` · `/CLOSE` (exige `/CLOSE CONFIRM`) |
+| `trading.StopEngine` (3.0) | stop inteligente: invalidação, suporte/resistência, candle anterior H1, banda VWAP, ATR — sempre em [0.6, 2.5] ATR |
+| `trading.MaxProfitEngine` (3.0) | viabilidade do alvo: resistência/suporte forte (H4/D1) antes de `MIN_RR_TO_STRUCTURE` → 🟡 NÃO OPERAR |
+| `monitor.adaptive_trail_r` | trailing inteligente: mercado forte → mais largo; perdendo força → mais apertado |
+| `live_engine.LiveExecutionEngine` | os três cérebros num ciclo: monitor primeiro, depois nova decisão; uma posição por ativo (memória + broker); retoma operações do SQLite; Telegram com toda a vida da operação (entrada, monitor, proteção, cenário alterado, resultado com previsão correta e lead time) |
+
+### Modos
+
+| Modo | Comportamento |
+| --- | --- |
+| 🟢 `paper` (padrão) | tudo simulado, capital virtual |
+| 🟡 `authorize` | monta a operação, envia o plano e espera `--authorize` para a próxima entrada |
+| 🟠 `semi-live` | entra por regras pré-autorizadas; encerramento com lucro por decisão do monitor pede `/CLOSE CONFIRM` (stop vai ao zero a zero enquanto espera) |
+| 🔴 `live` | execução totalmente automática; exige `--authorize` na linha de comando |
+
+### Regras fundamentais (na diretriz)
+
+1. A IA nunca aumenta o risco percentual para recuperar perdas: −1R, −1R, −1R não vira uma operação de 3R.
+2. Nenhuma nova posição enquanto existir posição ativa em XAUUSD.
+3. O lote não depende da confiança; a confiança decide OPERA / NÃO OPERA.
+4. Ordem enviada ≠ ordem executada: só a posição confirmada no broker conta.
+
+```bash
+python -m gold_ai live --source mt5 --mode paper --send            # 🟢 começa aqui
+python -m gold_ai live --source mt5 --mode authorize --send        # 🟡 plano + espera; --authorize libera uma entrada
+python -m gold_ai live --source mt5 --mode semi-live --send        # 🟠 microvolume com confirmação nas ações críticas
+python -m gold_ai live --source mt5 --mode live --authorize --send # 🔴 automático dentro dos limites do .env
+python -m gold_ai status                                           # capital, performance, posições, aprendizado
+touch STOP_TRADING                                                 # kill switch por arquivo
+```
+
+Caminho recomendado: PAPER → estatística positiva (`stats`, `validate`, `simulate`) → AUTHORIZE → microvolume em SEMI-LIVE → LIVE.
+
 ## Uso rápido
 
 ```bash

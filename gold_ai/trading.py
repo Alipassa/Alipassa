@@ -93,6 +93,8 @@ class TradePlan:
     evidence_level: int = 0
     confidence: float = 0.0
     notes: list[str] = field(default_factory=list)
+    viable: bool = True                   # False = resistência/suporte forte antes do alvo mínimo
+    structure_rr: Optional[float] = None
 
     @property
     def r_value(self) -> float:
@@ -114,7 +116,8 @@ class TradePlan:
         lines += ["", f"Alvo estrutural: {self.structural_target:.2f}" if self.structural_target else "Alvo estrutural: n/d",
                   f"Alvo de volatilidade: {self.volatility_target:.2f}" if self.volatility_target else "Alvo de volatilidade: n/d",
                   f"Alvo estatístico: {self.statistical_target_r:.1f}R" if self.statistical_target_r else "Alvo estatístico: n/d",
-                  "", f"TP ótimo = {self.recommended}  ({self.recommended_reason})"]
+                  "", f"TP ótimo = {self.recommended}  ({self.recommended_reason})",
+                  f"R:R = 1:{self.recommended[0] if self.recommended[:1].isdigit() else '3'}"]
         if self.lots is not None:
             lines.append(f"Lote = {self.lots:.2f}  (risco {self.risk_usd:.2f} USD)")
         lines += [f"  • {n}" for n in self.notes]
@@ -127,19 +130,44 @@ class StopEngine:
     def __init__(self, limits: Optional[RiskLimits] = None) -> None:
         self.limits = limits or RiskLimits()
 
-    def compute(self, a: Assessment, direction: Direction, atr: float) -> tuple[float, str]:
+    def candidates(self, a: Assessment, direction: Direction, atr: float, s: Optional[MarketSnapshot] = None) -> list[tuple[float, str]]:
+        """STOP INTELIGENTE: estrutura (invalidação/suporte/resistência), candle anterior, VWAP e banda de ATR."""
         entry = a.price
         sign = 1.0 if direction == Direction.ALTA else -1.0
+        out: list[tuple[float, str]] = []
         inval = a.zone.get("invalidation")
-        lo, hi = self.limits.min_stop_atr * atr, self.limits.max_stop_atr * atr
         if inval is not None and sign * (entry - inval) > 0:
-            dist = abs(entry - inval)
-            if dist < lo:
-                return entry - sign * lo, f"invalidação ({inval:.2f}) muito próxima → stop em {self.limits.min_stop_atr:.1f} ATR"
-            if dist > hi:
-                return entry - sign * hi, f"invalidação ({inval:.2f}) muito distante → stop em {self.limits.max_stop_atr:.1f} ATR"
-            return inval, "stop na invalidação estrutural"
-        return entry - sign * 1.2 * atr, "sem invalidação válida → stop em 1.2 ATR"
+            out.append((inval, "invalidação estrutural"))
+        lvl = a.zone.get("support") if direction == Direction.ALTA else a.zone.get("resistance")
+        if lvl is not None and sign * (entry - lvl) > 0:
+            out.append((lvl - sign * 0.15 * atr, "suporte/resistência + margem"))
+        if s is not None:
+            ref = s.candles.get("H1") or s.candles.get("M30") or []
+            if len(ref) >= 2:
+                prev = ref[-2]
+                lvl_c = prev.low if direction == Direction.ALTA else prev.high
+                out.append((lvl_c - sign * 0.1 * atr, "candle anterior (H1)"))
+        for r in a.technical:
+            if r.timeframe == "H1" and r.vwap_position is not None and r.atr:
+                vwap = entry - r.vwap_position * r.atr
+                band = vwap - sign * 1.0 * r.atr
+                if sign * (entry - band) > 0:
+                    out.append((band, "banda VWAP −1 ATR"))
+        out.append((entry - sign * 1.2 * atr, "1.2 ATR (volatilidade)"))
+        return out
+
+    def compute(self, a: Assessment, direction: Direction, atr: float, s: Optional[MarketSnapshot] = None) -> tuple[float, str]:
+        """Escolhe o candidato estrutural mais próximo da entrada que respeite MIN_STOP_ATR; limita a MAX_STOP_ATR."""
+        entry = a.price
+        sign = 1.0 if direction == Direction.ALTA else -1.0
+        lo, hi = self.limits.min_stop_atr * atr, self.limits.max_stop_atr * atr
+        valid = [(lvl, why) for lvl, why in self.candidates(a, direction, atr, s) if abs(entry - lvl) >= lo]
+        if not valid:
+            return entry - sign * lo, f"todos os níveis muito próximos → stop em {self.limits.min_stop_atr:.1f} ATR"
+        lvl, why = min(valid, key=lambda x: abs(entry - x[0]))
+        if abs(entry - lvl) > hi:
+            return entry - sign * hi, f"{why} muito distante → stop em {self.limits.max_stop_atr:.1f} ATR"
+        return lvl, f"stop: {why} ({abs(entry - lvl) / atr:.2f} ATR)"
 
 
 # --------------------------------------------------------------------------- simulação
@@ -312,14 +340,16 @@ class MaxProfitEngine:
     ESTRUTURAL (próximo S/R), ALVO DE VOLATILIDADE (ATR × horizonte) e ALVO POR RISCO/RETORNO,
     estima a probabilidade de cada R e recomenda o TP com melhor expectativa histórica."""
 
-    def __init__(self, stop_engine: Optional[StopEngine] = None, history: Optional[RStats] = None, horizon_min: int = 240) -> None:
+    def __init__(self, stop_engine: Optional[StopEngine] = None, history: Optional[RStats] = None, horizon_min: int = 240,
+                 min_rr_to_structure: float = 2.0) -> None:
         self.stop_engine = stop_engine or StopEngine()
         self.history = history
         self.horizon_min = horizon_min
+        self.min_rr_to_structure = min_rr_to_structure
 
     def plan(self, a: Assessment, s: MarketSnapshot, direction: Direction, signal_type: str = "") -> TradePlan:
         atr = s.atr or (a.price * 0.003)
-        stop, why = self.stop_engine.compute(a, direction, atr)
+        stop, why = self.stop_engine.compute(a, direction, atr, s)
         plan = TradePlan(direction, a.price, stop, atr, a.time, signal_type=signal_type, evidence_level=int(a.evidence_level), confidence=a.confidence)
         plan.notes.append(why)
         for k in (1, 2, 3, 4):
@@ -328,7 +358,19 @@ class MaxProfitEngine:
         lvl = a.zone.get("resistance") if direction == Direction.ALTA else a.zone.get("support")
         if lvl is not None and plan.sign * (lvl - a.price) > 0:
             plan.structural_target = lvl
-            plan.notes.append(f"alvo estrutural a {plan.sign * (lvl - a.price) / (plan.r_value or 1):.1f}R")
+            rr = plan.sign * (lvl - a.price) / (plan.r_value or 1)
+            plan.structure_rr = round(rr, 2)
+            plan.notes.append(f"alvo estrutural a {rr:.1f}R")
+        # viabilidade do alvo: nível FORTE (H4/D1) antes do R:R mínimo → sem espaço estatístico
+        strong = [(r.resistance if direction == Direction.ALTA else r.support) for r in a.technical if r.timeframe in ("H4", "D1")]
+        # níveis a menos de 0.5 ATR já estão sendo testados/rompidos — não contam como barreira
+        strong = [x for x in strong if x is not None and plan.sign * (x - a.price) > 0.5 * atr]
+        if strong:
+            near = min(strong, key=lambda x: abs(x - a.price))
+            rr_strong = plan.sign * (near - a.price) / (plan.r_value or 1)
+            if rr_strong < self.min_rr_to_structure:
+                plan.viable = False
+                plan.notes.append(f"⚠️ resistência/suporte forte (H4/D1) em {near:.2f} = {rr_strong:.1f}R, antes de {self.min_rr_to_structure:.0f}R → sem espaço estatístico para o alvo")
         # volatilidade: ATR H1 × sqrt(horas do horizonte)
         plan.volatility_target = round(a.price + plan.sign * atr * (self.horizon_min / 60) ** 0.5, 2)
         # estatístico + probabilidades por R (histórico)
@@ -451,6 +493,8 @@ class PositionManager:
         if reasons:
             return Decision("NO_TRADE", None, reasons, self.mode)
         plan = self.mpe.plan(a, s, sig.direction, sig.type.value)
+        if not plan.viable:
+            return Decision("NO_TRADE", plan, [n for n in plan.notes if n.startswith("⚠️")], self.mode)
         self.risk.size(plan)
         blocked = self.risk.check(plan)
         if blocked:

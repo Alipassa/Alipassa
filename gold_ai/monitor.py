@@ -120,10 +120,23 @@ class MonitorConfig:
     extend_score_gain: float = 5.0      # trade score ≥ tese + isto → ESTENDER
 
 
+def adaptive_trail_r(trade_score: float, thesis_score: float, base_r: float = 1.0) -> float:
+    """TRAILING INTELIGENTE: mercado forte → trailing mais largo; perdendo força → mais apertado."""
+    strength = (max(-100.0, min(100.0, trade_score)) / 100.0 + thesis_score / 100.0) / 2.0  # -0.5..1
+    if strength >= 0.7:
+        return round(base_r * 1.5, 2)
+    if strength >= 0.4:
+        return base_r
+    if strength >= 0.2:
+        return round(base_r * 0.75, 2)
+    return round(base_r * 0.5, 2)
+
+
 class TradeMonitor:
-    def __init__(self, cfg: Optional[MonitorConfig] = None, history: Optional[RStats] = None) -> None:
+    def __init__(self, cfg: Optional[MonitorConfig] = None, history: Optional[RStats] = None, adaptive_trailing: bool = True) -> None:
         self.cfg = cfg or MonitorConfig()
         self.history = history
+        self.adaptive_trailing = adaptive_trailing
 
     # ------------------------------------------------------------------ 1. caminho do preço (stop/trailing)
     def check_path(self, tr: ManagedTrade, candles: Sequence[Candle]) -> Optional[MonitorReading]:
@@ -255,9 +268,11 @@ class TradeMonitor:
             tr.extending, tr.trail_r = True, c.extend_trail_r
             note = f"cenário mais forte que a tese ({trade:+.0f} vs {tr.thesis.score:+.0f}) e potencial {pot:.0f} → buscar {int(cur) + 2}R/{int(cur) + 3}R com trailing {c.extend_trail_r:.1f}R"
         else:
+            if self.adaptive_trailing and not tr.extending:
+                tr.trail_r = adaptive_trail_r(trade, thesis, c.trail_r)
             if tr.peak_r >= 1.0:
                 tr.stop_r = max(tr.stop_r, tr.peak_r - tr.trail_r)
-            note = "tese preservada" if thesis >= 60 else "tese parcialmente preservada — observar"
+            note = ("tese preservada" if thesis >= 60 else "tese parcialmente preservada — observar") + f" · trailing {tr.trail_r:.2f}R"
         reading = MonitorReading(a.time, price, round(cur, 3), trade, thesis, ex, pot, action, note, self.target_labels(cur, pot))
         tr.history.append(reading)
         return reading

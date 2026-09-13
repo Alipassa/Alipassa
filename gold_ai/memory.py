@@ -70,7 +70,28 @@ CREATE TABLE IF NOT EXISTS trades (
     estado TEXT,
     motivo_saida TEXT,
     resultado_r REAL,
-    gerenciada_em TEXT
+    gerenciada_em TEXT,
+    capital REAL,
+    risco_pct REAL,
+    ticket INTEGER,
+    preco_execucao REAL,
+    sl_real REAL,
+    tp_real REAL,
+    slippage REAL,
+    execucao TEXT,
+    resultado_financeiro REAL,
+    tempo_operacao_min REAL,
+    lead_time_min REAL,
+    score_entrada REAL,
+    probabilidade REAL,
+    confianca REAL
+);
+CREATE TABLE IF NOT EXISTS account (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hora TEXT NOT NULL,
+    capital REAL NOT NULL,
+    pnl REAL,
+    nota TEXT
 );
 CREATE TABLE IF NOT EXISTS trade_monitor (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,6 +276,51 @@ class PredictionMemory:
 
     def open_trades(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM trades WHERE status IN ('OPEN','MANAGED_CLOSED') ORDER BY id").fetchall()
+
+    # ------------------------------------------------------------------ 3.0: execução, capital, resultado
+    def save_execution(self, trade_id: int, report, capital: float, risk_pct: float, assessment=None) -> None:
+        self.conn.execute(
+            """UPDATE trades SET ticket=?, preco_execucao=?, sl_real=?, tp_real=?, slippage=?, execucao=?, capital=?, risco_pct=?,
+               score_entrada=?, probabilidade=?, confianca=? WHERE id=?""",
+            (report.ticket if report else None, report.fill_price if report else None, report.real_sl if report else None,
+             report.real_tp if report else None, report.slippage if report else None, report.render() if report else None, capital, risk_pct,
+             assessment.score if assessment else None, max(assessment.prob_up, assessment.prob_down) if assessment else None,
+             assessment.confidence if assessment else None, trade_id))
+        self.conn.commit()
+
+    def save_financial_result(self, trade_id: int, pnl_usd: float, minutes: Optional[float], lead_time_min: Optional[float] = None) -> None:
+        self.conn.execute("UPDATE trades SET resultado_financeiro=?, tempo_operacao_min=?, lead_time_min=? WHERE id=?", (pnl_usd, minutes, lead_time_min, trade_id))
+        self.conn.commit()
+
+    def record_equity(self, t: datetime, equity: float, pnl: Optional[float] = None, note: str = "") -> None:
+        self.conn.execute("INSERT INTO account (hora, capital, pnl, nota) VALUES (?,?,?,?)", (t.isoformat(), equity, pnl, note))
+        self.conn.commit()
+
+    def last_equity(self) -> Optional[float]:
+        r = self.conn.execute("SELECT capital FROM account ORDER BY id DESC LIMIT 1").fetchone()
+        return float(r["capital"]) if r else None
+
+    def equity_curve(self) -> list[tuple[datetime, float]]:
+        return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
+
+    def performance_summary(self) -> str:
+        rows = self.conn.execute("SELECT resultado_financeiro AS p, resultado_r AS r, modo FROM trades WHERE resultado_financeiro IS NOT NULL").fetchall()
+        curve = self.equity_curve()
+        if not rows and not curve:
+            return "📈 PERFORMANCE — sem operações com resultado financeiro"
+        pnl = sum(r["p"] for r in rows)
+        wins = [r["p"] for r in rows if r["p"] > 0]
+        lines = ["📈 PERFORMANCE ENGINE"]
+        if curve:
+            lines.append(f"  capital inicial {curve[0][1]:,.2f} → atual {curve[-1][1]:,.2f} USD ({(curve[-1][1] / curve[0][1] - 1) * 100:+.2f}%)")
+        if rows:
+            lines.append(f"  operações {len(rows)} · resultado {pnl:+,.2f} USD · win rate {len(wins) / len(rows):.0%} · média {pnl / len(rows):+,.2f} USD")
+            by_mode = {}
+            for r in rows:
+                by_mode.setdefault(r["modo"], []).append(r["p"])
+            for m, v in by_mode.items():
+                lines.append(f"    {m}: n={len(v)} {sum(v):+,.2f} USD")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ 2.3: trade monitor
     def save_thesis(self, trade_id: int, thesis, state: dict) -> None:

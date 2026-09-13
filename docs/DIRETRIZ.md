@@ -368,3 +368,26 @@ Quatro indicadores por operação aberta: TRADE SCORE · THESIS SCORE · EXIT SC
 POTENTIAL. Tese invalidada → fechar, mesmo com lucro. Cenário mais forte → proteger metade e
 estender o restante. Toda decisão e a evolução do score são registradas para descobrir,
 empiricamente, qual nível de deterioração realmente indica que é melhor sair.
+
+
+---
+
+# ADENDO 3.0 — LIVE EXECUTION ENGINE
+
+Objetivo: transformar uma previsão validada em operação real no MT5, controlá-la continuamente,
+reagir a mudanças de cenário, proteger o capital, realizar lucro, atualizar o patrimônio e
+recalcular o tamanho das próximas posições.
+
+Três cérebros: PREDICTION ENGINE (para onde o ouro vai) · TRADE ENGINE (como estruturar a
+operação) · TRADE MONITOR (a operação aberta ainda faz sentido?).
+
+Regras literais da especificação:
+1. **A IA nunca poderá aumentar o risco percentual da conta para recuperar perdas.**
+2. **Nenhuma nova posição será aberta enquanto existir uma posição ativa no mesmo ativo.**
+3. **O lote é determinado por CAPITAL + RISCO + STOP + ESPECIFICAÇÃO DO CONTRATO — nunca pela confiança.**
+4. **O sistema não considera a ordem executada porque a requisição foi enviada:** REQUEST → MT5 →
+   BROKER → TICKET → POSITION → PREÇO REAL → SL REAL → TP REAL; divergência = EXECUTION MISMATCH.
+5. Limites absolutos: RISK_PER_TRADE · MAX_DAILY_LOSS · MAX_DRAWDOWN · MAX_LOT · MAX_POSITIONS ·
+   MAX_SPREAD · MAX_SLIPPAGE. Perda diária atingida → 🚨 TRADING STOP.
+6. Kill switch obrigatório: TRADING_ENABLED=false · /STOP · /PAUSE · /STATUS · /CLOSE (com confirmação).
+7. O 3.0 nasce em PAPER. PAPER → estatística positiva → AUTHORIZE → microvolume → LIVE.

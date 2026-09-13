@@ -107,13 +107,14 @@ class DecisionTests(unittest.TestCase):
         up = [Candle(t + timedelta(minutes=5 * i), 2650 + 2.5 * (i - 1), 2650 + 2.5 * i, 2650 + 2.5 * (i - 1) - 0.5, 2650 + 2.5 * i, 10) for i in range(1, 9)]  # até +2R, mínimas subindo
         self.assertIsNone(m.check_path(tr, up))
         self.assertGreaterEqual(tr.peak_r, 1.9)
-        self.assertGreaterEqual(tr.stop_r, 0.9)  # trailing 1R abaixo do pico
+        self.assertAlmostEqual(tr.stop_r, tr.peak_r - tr.trail_r, places=6)  # trailing adaptativo abaixo do pico
+        self.assertGreater(tr.stop_r, 0.0)
         down = [Candle(t + timedelta(minutes=60), 2670, 2670, 2655, 2656, 10)]
         r = m.check_path(tr, down)
         self.assertIsNotNone(r)
         self.assertEqual(r.action, "STOP")
         self.assertEqual(tr.status, "CLOSED")
-        self.assertGreater(tr.result_r, 0.5)   # trailing salvou lucro
+        self.assertGreaterEqual(tr.result_r, 0.5)   # trailing salvou lucro
         tr2, a, s = open_long()
         crash = [Candle(s.time + timedelta(minutes=5), 2650, 2651, 2635, 2636, 10)]
         r2 = TradeMonitor().check_path(tr2, crash)

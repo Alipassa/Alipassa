@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GOLD AI ENGINE 2.3 — arquivo único (VALIDATION · TRADE SIMULATOR · TRADE MONITOR) (XAU/USD).
+"""GOLD AI ENGINE 3.0 — arquivo único (LIVE EXECUTION ENGINE) (XAU/USD).
 
 🌎 MUNDO → 📡 DATA ENGINE (Yahoo · FRED · CFTC · RSS · calendário · MetaTrader 5)
 → MARKET SNAPSHOT → 🧠 GOLD AI ENGINE (score · probabilidade · confiança)
@@ -22,7 +22,8 @@ Uso:
     python gold_ai_engine_v2.py validate --csv xau_h1.csv --folds 4   # auditoria + walk-forward + calibração + score por fator + VEREDITO
     python gold_ai_engine_v2.py calibrate --min-n 30                   # gera calibrator.json usado por `live`
     python gold_ai_engine_v2.py simulate --csv xau_h1.csv --dxy-csv dxy_h1.csv --us10y-csv tnx_h1.csv   # 1R/2R/3R antes do stop, melhor saída
-    python gold_ai_engine_v2.py live --mode paper|authorize|live [--authorize] --equity 10000          # 🟡 🟠 🔴 com limites do .env
+    python gold_ai_engine_v2.py live --source mt5 --mode paper|authorize|semi-live|live [--authorize] --send   # 🟢 🟡 🟠 🔴
+    python gold_ai_engine_v2.py status                                 # capital, performance, posições abertas, aprendizado
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ try:  # MetaTrader5 só existe no Windows com o terminal instalado
 except Exception:  # noqa: BLE001
     _mt5 = None
 
-__version__ = "2.3.0"
+__version__ = "3.0.0"
 
 
 # ============================================================================
@@ -1691,7 +1692,28 @@ CREATE TABLE IF NOT EXISTS trades (
     estado TEXT,
     motivo_saida TEXT,
     resultado_r REAL,
-    gerenciada_em TEXT
+    gerenciada_em TEXT,
+    capital REAL,
+    risco_pct REAL,
+    ticket INTEGER,
+    preco_execucao REAL,
+    sl_real REAL,
+    tp_real REAL,
+    slippage REAL,
+    execucao TEXT,
+    resultado_financeiro REAL,
+    tempo_operacao_min REAL,
+    lead_time_min REAL,
+    score_entrada REAL,
+    probabilidade REAL,
+    confianca REAL
+);
+CREATE TABLE IF NOT EXISTS account (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hora TEXT NOT NULL,
+    capital REAL NOT NULL,
+    pnl REAL,
+    nota TEXT
 );
 CREATE TABLE IF NOT EXISTS trade_monitor (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1875,6 +1897,51 @@ class PredictionMemory:
 
     def open_trades(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM trades WHERE status IN ('OPEN','MANAGED_CLOSED') ORDER BY id").fetchall()
+
+    # ------------------------------------------------------------------ 3.0: execução, capital, resultado
+    def save_execution(self, trade_id: int, report, capital: float, risk_pct: float, assessment=None) -> None:
+        self.conn.execute(
+            """UPDATE trades SET ticket=?, preco_execucao=?, sl_real=?, tp_real=?, slippage=?, execucao=?, capital=?, risco_pct=?,
+               score_entrada=?, probabilidade=?, confianca=? WHERE id=?""",
+            (report.ticket if report else None, report.fill_price if report else None, report.real_sl if report else None,
+             report.real_tp if report else None, report.slippage if report else None, report.render() if report else None, capital, risk_pct,
+             assessment.score if assessment else None, max(assessment.prob_up, assessment.prob_down) if assessment else None,
+             assessment.confidence if assessment else None, trade_id))
+        self.conn.commit()
+
+    def save_financial_result(self, trade_id: int, pnl_usd: float, minutes: Optional[float], lead_time_min: Optional[float] = None) -> None:
+        self.conn.execute("UPDATE trades SET resultado_financeiro=?, tempo_operacao_min=?, lead_time_min=? WHERE id=?", (pnl_usd, minutes, lead_time_min, trade_id))
+        self.conn.commit()
+
+    def record_equity(self, t: datetime, equity: float, pnl: Optional[float] = None, note: str = "") -> None:
+        self.conn.execute("INSERT INTO account (hora, capital, pnl, nota) VALUES (?,?,?,?)", (t.isoformat(), equity, pnl, note))
+        self.conn.commit()
+
+    def last_equity(self) -> Optional[float]:
+        r = self.conn.execute("SELECT capital FROM account ORDER BY id DESC LIMIT 1").fetchone()
+        return float(r["capital"]) if r else None
+
+    def equity_curve(self) -> list[tuple[datetime, float]]:
+        return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
+
+    def performance_summary(self) -> str:
+        rows = self.conn.execute("SELECT resultado_financeiro AS p, resultado_r AS r, modo FROM trades WHERE resultado_financeiro IS NOT NULL").fetchall()
+        curve = self.equity_curve()
+        if not rows and not curve:
+            return "📈 PERFORMANCE — sem operações com resultado financeiro"
+        pnl = sum(r["p"] for r in rows)
+        wins = [r["p"] for r in rows if r["p"] > 0]
+        lines = ["📈 PERFORMANCE ENGINE"]
+        if curve:
+            lines.append(f"  capital inicial {curve[0][1]:,.2f} → atual {curve[-1][1]:,.2f} USD ({(curve[-1][1] / curve[0][1] - 1) * 100:+.2f}%)")
+        if rows:
+            lines.append(f"  operações {len(rows)} · resultado {pnl:+,.2f} USD · win rate {len(wins) / len(rows):.0%} · média {pnl / len(rows):+,.2f} USD")
+            by_mode = {}
+            for r in rows:
+                by_mode.setdefault(r["modo"], []).append(r["p"])
+            for m, v in by_mode.items():
+                lines.append(f"    {m}: n={len(v)} {sum(v):+,.2f} USD")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ 2.3: trade monitor
     def save_thesis(self, trade_id: int, thesis, state: dict) -> None:
@@ -2144,15 +2211,20 @@ class TelegramSender:
     (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, ou TOKEN_TELEGRAM / CHAT_ID) ou arquivo .env.
     Sem token/chat_id, apenas imprime (modo dry-run)."""
 
-    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, dry_run: bool = False, env_file: str = ".env") -> None:
+    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, dry_run: bool = False, env_file: str = ".env",
+                 quiet: bool = False) -> None:
         env = {**load_env_file(env_file), **os.environ}
         self.token = token or env.get("TELEGRAM_BOT_TOKEN") or env.get("TOKEN_TELEGRAM")
         self.chat_id = str(chat_id or env.get("TELEGRAM_CHAT_ID") or env.get("CHAT_ID") or "") or None
         self.dry_run = dry_run or not (self.token and self.chat_id)
+        self.quiet = quiet
+        self.sent: list[str] = []
 
     def send(self, text: str) -> bool:
         if self.dry_run:
-            print("\n[TELEGRAM dry-run]\n" + text + "\n")
+            self.sent.append(text)
+            if not self.quiet:
+                print("\n[TELEGRAM dry-run]\n" + text + "\n")
             return True
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         data = urllib.parse.urlencode({"chat_id": self.chat_id, "text": text, "disable_web_page_preview": "true"}).encode()
@@ -2169,6 +2241,59 @@ def format_decision(decision) -> str:
 
 def format_monitor(tr, reading) -> str:
     return "📡 " + render_monitor(tr, reading)
+
+
+# --------------------------------------------------------------------------- 3.0: TELEGRAM TRADE MANAGER
+def format_entry(plan, assessment, mode: str, execution=None) -> str:
+    side = "🟢 BUY" if plan.direction.value == "ALTA" else "🔴 SELL"
+    tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
+    rr = plan.recommended[0] if plan.recommended[:1].isdigit() else "3"
+    lines = ["🚨 GOLD AI", "", f"{side} XAUUSD", "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
+             f"Confiança: {assessment.confidence:.0f}", "", f"Entrada: {plan.entry:.2f}", f"Stop: {plan.stop:.2f}", f"TP: {tp:.2f}" if tp else "TP: trailing",
+             "", f"R:R = 1:{rr}", "", f"Lote: {plan.lots:.2f}" if plan.lots else "Lote: n/d", f"Risco: {plan.risk_usd:.2f} USD" if plan.risk_usd else "",
+             "", "PRE-MOVE CONFIRMADO" if "CONFIRM" in plan.signal_type.upper() or "BUY" in plan.signal_type or "SELL" in plan.signal_type else plan.signal_type,
+             f"Modo: {mode}"]
+    if execution is not None:
+        lines += ["", execution.render()]
+    return "\n".join(x for x in lines if x is not None)
+
+
+def format_protection(tr, reading) -> str:
+    return "\n".join(["🛡️ GOLD AI", "", f"+{reading.current_r:.1f}R atingido", "", f"{1 - tr.remaining:.0%} realizado", "",
+                       f"Stop: {'BREAK EVEN' if abs(tr.stop_r) < 1e-9 else f'{tr.stop_r:+.2f}R'}", "", f"{tr.remaining:.0%} restante:", "TRAILING", "", reading.note])
+
+
+def format_scenario_change(tr, reading) -> str:
+    first = tr.history[0] if len(tr.history) > 1 else SimpleNamespace(thesis_score=100.0, exit_score=0.0)
+    return "\n".join(["⚠️ GOLD AI", "", "CENÁRIO ALTERADO", "", f"Score:\n{tr.thesis.score:+.0f} → {reading.trade_score:+.0f}", "",
+                       f"Thesis:\n{first.thesis_score:.0f} → {reading.thesis_score:.0f}", "", f"Exit:\n{first.exit_score:.0f} → {reading.exit_score:.0f}", "",
+                       "AÇÃO:", "🔴 ENCERRAR" if reading.action == "ENCERRAR" else f"🟠 {reading.action}", "", f"Motivo:\n{tr.close_reason or reading.note}"])
+
+
+def format_result(tr, pnl_usd=None, prediction_correct=None, lead_time_min=None, minutes=None) -> str:
+    lines = ["🏆 GOLD AI" if (tr.result_r or 0) > 0 else "📉 GOLD AI", "", "TRADE ENCERRADO", "", f"Resultado:\n{tr.result_r:+.2f}R"]
+    if pnl_usd is not None:
+        lines.append(f"{pnl_usd:+,.2f} USD")
+    reason = {"TESE INVALIDADA": "Saída adaptativa (tese invalidada)", "EXIT SCORE": "Saída adaptativa", "STOP": "Stop", "TRAILING/PROTEÇÃO": "Trailing / proteção",
+              "HORIZON": "Horizonte", "FIM": "Fim do período", "BROKER": "Fechada no broker", "MANUAL": "Encerramento manual (/CLOSE)"}.get(tr.close_reason, tr.close_reason)
+    lines += ["", f"Motivo:\n{reason}"]
+    if prediction_correct is not None:
+        lines += ["", f"Previsão:\n{'CORRETA' if prediction_correct else 'INCORRETA'}"]
+    if lead_time_min is not None:
+        lines += ["", f"Lead time:\n{lead_time_min:.0f} minutos"]
+    if minutes is not None:
+        lines += ["", f"Duração:\n{minutes:.0f} minutos"]
+    return "\n".join(lines)
+
+
+def format_status(perf, ks, managed, mode: str) -> str:
+    allowed, why = ks.new_entries_allowed()
+    lines = ["📋 GOLD AI STATUS", f"Modo: {mode}", f"Novas entradas: {'✅' if allowed else '⛔ ' + why}", perf.render(), f"Posições sob monitor: {len(managed)}"]
+    for tr in managed:
+        last = tr.history[-1] if tr.history else None
+        lines.append(f"  #{tr.trade_id:05d} {tr.thesis.direction.value} entrada {tr.plan.entry:.2f} stop {tr.price_at_r(tr.stop_r):.2f} "
+                     + (f"{last.current_r:+.2f}R {last.action}" if last else ""))
+    return "\n".join(lines)
 
 
 # ============================================================================
@@ -3557,7 +3682,7 @@ Hipótese inicial: RISCO = 1R, ALVO = 3R. O simulador comprova ou rejeita.
 
 
 # --------------------------------------------------------------------------- modos e limites
-class TradingMode(str, Enum):
+class TradingMode22(str, Enum):  # modos do 2.2 (PositionManager); o 3.0 usa guard.TradingMode
     PAPER = "PAPER"          # 🟡 simula tudo, não envia ordem
     AUTHORIZE = "AUTHORIZE"  # 🟠 prepara a ordem e espera autorização
     LIVE = "LIVE"            # 🔴 envia automaticamente ao MT5
@@ -3630,6 +3755,8 @@ class TradePlan:
     evidence_level: int = 0
     confidence: float = 0.0
     notes: list[str] = field(default_factory=list)
+    viable: bool = True                   # False = resistência/suporte forte antes do alvo mínimo
+    structure_rr: Optional[float] = None
 
     @property
     def r_value(self) -> float:
@@ -3651,7 +3778,8 @@ class TradePlan:
         lines += ["", f"Alvo estrutural: {self.structural_target:.2f}" if self.structural_target else "Alvo estrutural: n/d",
                   f"Alvo de volatilidade: {self.volatility_target:.2f}" if self.volatility_target else "Alvo de volatilidade: n/d",
                   f"Alvo estatístico: {self.statistical_target_r:.1f}R" if self.statistical_target_r else "Alvo estatístico: n/d",
-                  "", f"TP ótimo = {self.recommended}  ({self.recommended_reason})"]
+                  "", f"TP ótimo = {self.recommended}  ({self.recommended_reason})",
+                  f"R:R = 1:{self.recommended[0] if self.recommended[:1].isdigit() else '3'}"]
         if self.lots is not None:
             lines.append(f"Lote = {self.lots:.2f}  (risco {self.risk_usd:.2f} USD)")
         lines += [f"  • {n}" for n in self.notes]
@@ -3664,19 +3792,44 @@ class StopEngine:
     def __init__(self, limits: Optional[RiskLimits] = None) -> None:
         self.limits = limits or RiskLimits()
 
-    def compute(self, a: Assessment, direction: Direction, atr: float) -> tuple[float, str]:
+    def candidates(self, a: Assessment, direction: Direction, atr: float, s: Optional[MarketSnapshot] = None) -> list[tuple[float, str]]:
+        """STOP INTELIGENTE: estrutura (invalidação/suporte/resistência), candle anterior, VWAP e banda de ATR."""
         entry = a.price
         sign = 1.0 if direction == Direction.ALTA else -1.0
+        out: list[tuple[float, str]] = []
         inval = a.zone.get("invalidation")
-        lo, hi = self.limits.min_stop_atr * atr, self.limits.max_stop_atr * atr
         if inval is not None and sign * (entry - inval) > 0:
-            dist = abs(entry - inval)
-            if dist < lo:
-                return entry - sign * lo, f"invalidação ({inval:.2f}) muito próxima → stop em {self.limits.min_stop_atr:.1f} ATR"
-            if dist > hi:
-                return entry - sign * hi, f"invalidação ({inval:.2f}) muito distante → stop em {self.limits.max_stop_atr:.1f} ATR"
-            return inval, "stop na invalidação estrutural"
-        return entry - sign * 1.2 * atr, "sem invalidação válida → stop em 1.2 ATR"
+            out.append((inval, "invalidação estrutural"))
+        lvl = a.zone.get("support") if direction == Direction.ALTA else a.zone.get("resistance")
+        if lvl is not None and sign * (entry - lvl) > 0:
+            out.append((lvl - sign * 0.15 * atr, "suporte/resistência + margem"))
+        if s is not None:
+            ref = s.candles.get("H1") or s.candles.get("M30") or []
+            if len(ref) >= 2:
+                prev = ref[-2]
+                lvl_c = prev.low if direction == Direction.ALTA else prev.high
+                out.append((lvl_c - sign * 0.1 * atr, "candle anterior (H1)"))
+        for r in a.technical:
+            if r.timeframe == "H1" and r.vwap_position is not None and r.atr:
+                vwap = entry - r.vwap_position * r.atr
+                band = vwap - sign * 1.0 * r.atr
+                if sign * (entry - band) > 0:
+                    out.append((band, "banda VWAP −1 ATR"))
+        out.append((entry - sign * 1.2 * atr, "1.2 ATR (volatilidade)"))
+        return out
+
+    def compute(self, a: Assessment, direction: Direction, atr: float, s: Optional[MarketSnapshot] = None) -> tuple[float, str]:
+        """Escolhe o candidato estrutural mais próximo da entrada que respeite MIN_STOP_ATR; limita a MAX_STOP_ATR."""
+        entry = a.price
+        sign = 1.0 if direction == Direction.ALTA else -1.0
+        lo, hi = self.limits.min_stop_atr * atr, self.limits.max_stop_atr * atr
+        valid = [(lvl, why) for lvl, why in self.candidates(a, direction, atr, s) if abs(entry - lvl) >= lo]
+        if not valid:
+            return entry - sign * lo, f"todos os níveis muito próximos → stop em {self.limits.min_stop_atr:.1f} ATR"
+        lvl, why = min(valid, key=lambda x: abs(entry - x[0]))
+        if abs(entry - lvl) > hi:
+            return entry - sign * hi, f"{why} muito distante → stop em {self.limits.max_stop_atr:.1f} ATR"
+        return lvl, f"stop: {why} ({abs(entry - lvl) / atr:.2f} ATR)"
 
 
 # --------------------------------------------------------------------------- simulação
@@ -3849,14 +4002,16 @@ class MaxProfitEngine:
     ESTRUTURAL (próximo S/R), ALVO DE VOLATILIDADE (ATR × horizonte) e ALVO POR RISCO/RETORNO,
     estima a probabilidade de cada R e recomenda o TP com melhor expectativa histórica."""
 
-    def __init__(self, stop_engine: Optional[StopEngine] = None, history: Optional[RStats] = None, horizon_min: int = 240) -> None:
+    def __init__(self, stop_engine: Optional[StopEngine] = None, history: Optional[RStats] = None, horizon_min: int = 240,
+                 min_rr_to_structure: float = 2.0) -> None:
         self.stop_engine = stop_engine or StopEngine()
         self.history = history
         self.horizon_min = horizon_min
+        self.min_rr_to_structure = min_rr_to_structure
 
     def plan(self, a: Assessment, s: MarketSnapshot, direction: Direction, signal_type: str = "") -> TradePlan:
         atr = s.atr or (a.price * 0.003)
-        stop, why = self.stop_engine.compute(a, direction, atr)
+        stop, why = self.stop_engine.compute(a, direction, atr, s)
         plan = TradePlan(direction, a.price, stop, atr, a.time, signal_type=signal_type, evidence_level=int(a.evidence_level), confidence=a.confidence)
         plan.notes.append(why)
         for k in (1, 2, 3, 4):
@@ -3865,7 +4020,19 @@ class MaxProfitEngine:
         lvl = a.zone.get("resistance") if direction == Direction.ALTA else a.zone.get("support")
         if lvl is not None and plan.sign * (lvl - a.price) > 0:
             plan.structural_target = lvl
-            plan.notes.append(f"alvo estrutural a {plan.sign * (lvl - a.price) / (plan.r_value or 1):.1f}R")
+            rr = plan.sign * (lvl - a.price) / (plan.r_value or 1)
+            plan.structure_rr = round(rr, 2)
+            plan.notes.append(f"alvo estrutural a {rr:.1f}R")
+        # viabilidade do alvo: nível FORTE (H4/D1) antes do R:R mínimo → sem espaço estatístico
+        strong = [(r.resistance if direction == Direction.ALTA else r.support) for r in a.technical if r.timeframe in ("H4", "D1")]
+        # níveis a menos de 0.5 ATR já estão sendo testados/rompidos — não contam como barreira
+        strong = [x for x in strong if x is not None and plan.sign * (x - a.price) > 0.5 * atr]
+        if strong:
+            near = min(strong, key=lambda x: abs(x - a.price))
+            rr_strong = plan.sign * (near - a.price) / (plan.r_value or 1)
+            if rr_strong < self.min_rr_to_structure:
+                plan.viable = False
+                plan.notes.append(f"⚠️ resistência/suporte forte (H4/D1) em {near:.2f} = {rr_strong:.1f}R, antes de {self.min_rr_to_structure:.0f}R → sem espaço estatístico para o alvo")
         # volatilidade: ATR H1 × sqrt(horas do horizonte)
         plan.volatility_target = round(a.price + plan.sign * atr * (self.horizon_min / 60) ** 0.5, 2)
         # estatístico + probabilidades por R (histórico)
@@ -3958,7 +4125,7 @@ class Decision:
     action: str                 # NO_TRADE | PAPER | AWAIT_AUTHORIZATION | SENT | BLOCKED
     plan: Optional[TradePlan]
     reasons: list[str] = field(default_factory=list)
-    mode: TradingMode = TradingMode.PAPER
+    mode: TradingMode22 = TradingMode22.PAPER
 
     def render(self) -> str:
         head = {"NO_TRADE": "🟡 NÃO OPERAR", "PAPER": "🟡 PAPER — operação simulada registrada", "AWAIT_AUTHORIZATION": "🟠 AGUARDANDO AUTORIZAÇÃO",
@@ -3970,7 +4137,7 @@ class Decision:
 
 
 class PositionManager:
-    def __init__(self, mode: TradingMode, limits: RiskLimits, equity: float, history: Optional[RStats] = None,
+    def __init__(self, mode: TradingMode22, limits: RiskLimits, equity: float, history: Optional[RStats] = None,
                  horizon_min: int = 240, executor=None) -> None:
         self.mode = mode
         self.risk = RiskManager(limits, equity)
@@ -3988,14 +4155,16 @@ class PositionManager:
         if reasons:
             return Decision("NO_TRADE", None, reasons, self.mode)
         plan = self.mpe.plan(a, s, sig.direction, sig.type.value)
+        if not plan.viable:
+            return Decision("NO_TRADE", plan, [n for n in plan.notes if n.startswith("⚠️")], self.mode)
         self.risk.size(plan)
         blocked = self.risk.check(plan)
         if blocked:
             return Decision("BLOCKED", plan, blocked, self.mode)
-        if self.mode == TradingMode.PAPER:
+        if self.mode == TradingMode22.PAPER:
             self.risk.register(plan)
             return Decision("PAPER", plan, [], self.mode)
-        if self.mode == TradingMode.AUTHORIZE and not self.authorized:
+        if self.mode == TradingMode22.AUTHORIZE and not self.authorized:
             return Decision("AWAIT_AUTHORIZATION", plan, ["responda com autorização para enviar"], self.mode)
         if self.executor is None:
             return Decision("BLOCKED", plan, ["sem executor MT5 configurado"], self.mode)
@@ -4129,10 +4298,23 @@ class MonitorConfig:
     extend_score_gain: float = 5.0      # trade score ≥ tese + isto → ESTENDER
 
 
+def adaptive_trail_r(trade_score: float, thesis_score: float, base_r: float = 1.0) -> float:
+    """TRAILING INTELIGENTE: mercado forte → trailing mais largo; perdendo força → mais apertado."""
+    strength = (max(-100.0, min(100.0, trade_score)) / 100.0 + thesis_score / 100.0) / 2.0  # -0.5..1
+    if strength >= 0.7:
+        return round(base_r * 1.5, 2)
+    if strength >= 0.4:
+        return base_r
+    if strength >= 0.2:
+        return round(base_r * 0.75, 2)
+    return round(base_r * 0.5, 2)
+
+
 class TradeMonitor:
-    def __init__(self, cfg: Optional[MonitorConfig] = None, history: Optional[RStats] = None) -> None:
+    def __init__(self, cfg: Optional[MonitorConfig] = None, history: Optional[RStats] = None, adaptive_trailing: bool = True) -> None:
         self.cfg = cfg or MonitorConfig()
         self.history = history
+        self.adaptive_trailing = adaptive_trailing
 
     # ------------------------------------------------------------------ 1. caminho do preço (stop/trailing)
     def check_path(self, tr: ManagedTrade, candles: Sequence[Candle]) -> Optional[MonitorReading]:
@@ -4264,9 +4446,11 @@ class TradeMonitor:
             tr.extending, tr.trail_r = True, c.extend_trail_r
             note = f"cenário mais forte que a tese ({trade:+.0f} vs {tr.thesis.score:+.0f}) e potencial {pot:.0f} → buscar {int(cur) + 2}R/{int(cur) + 3}R com trailing {c.extend_trail_r:.1f}R"
         else:
+            if self.adaptive_trailing and not tr.extending:
+                tr.trail_r = adaptive_trail_r(trade, thesis, c.trail_r)
             if tr.peak_r >= 1.0:
                 tr.stop_r = max(tr.stop_r, tr.peak_r - tr.trail_r)
-            note = "tese preservada" if thesis >= 60 else "tese parcialmente preservada — observar"
+            note = ("tese preservada" if thesis >= 60 else "tese parcialmente preservada — observar") + f" · trailing {tr.trail_r:.2f}R"
         reading = MonitorReading(a.time, price, round(cur, 3), trade, thesis, ex, pot, action, note, self.target_labels(cur, pot))
         tr.history.append(reading)
         return reading
@@ -4321,6 +4505,676 @@ def exit_learning(rows: Sequence[dict]) -> str:
         saved = [r["result_r"] - r["min_r_after"] for r in early if r.get("min_r_after") is not None]
         lines.append(f"  saídas antecipadas: n={len(early)} resultado médio {avg:+.2f}R" + (f", evitado {sum(saved) / len(saved):+.2f}R de queda posterior" if saved else ""))
     return "\n".join(lines)
+
+
+# ============================================================================
+# EXECUTION
+# ============================================================================
+
+"""GOLD AI ENGINE 3.0 — EXECUTION ENGINE + BROKER CONFIRMATION.
+
+REQUEST → MT5 → BROKER → TICKET → POSITION → PREÇO REAL → SL REAL → TP REAL.
+Uma ordem só é considerada executada depois de confirmada no broker; qualquer divergência
+entre o que foi pedido e o que foi aberto é ⚠️ EXECUTION MISMATCH.
+"""
+
+
+
+
+MAGIC = 20260914
+
+
+@dataclass
+class ExecutionReport:
+    requested_volume: float
+    requested_sl: float
+    requested_tp: Optional[float]
+    requested_price: float
+    retcode: Optional[int] = None
+    order: Optional[int] = None
+    deal: Optional[int] = None
+    ticket: Optional[int] = None          # ticket da posição no broker
+    fill_price: Optional[float] = None
+    real_volume: Optional[float] = None
+    real_sl: Optional[float] = None
+    real_tp: Optional[float] = None
+    slippage: Optional[float] = None
+    confirmed: bool = False
+    mismatches: list[str] = field(default_factory=list)
+    corrected: bool = False
+    error: str = ""
+    time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def ok(self) -> bool:
+        return self.confirmed and not self.mismatches
+
+    def render(self) -> str:
+        if self.error:
+            return f"❌ EXECUÇÃO FALHOU: {self.error} (retcode {self.retcode})"
+        lines = [f"{'✅ EXECUÇÃO CONFIRMADA' if self.ok else '⚠️ EXECUTION MISMATCH'} — ticket {self.ticket}",
+                 f"pedido: {self.requested_volume} @ {self.requested_price:.2f} SL {self.requested_sl:.2f} TP {self.requested_tp}",
+                 f"real:   {self.real_volume} @ {self.fill_price} SL {self.real_sl} TP {self.real_tp} · slippage {self.slippage}"]
+        lines += [f"  • {m}" for m in self.mismatches]
+        if self.corrected:
+            lines.append("  • SL/TP corrigidos automaticamente no broker")
+        return "\n".join(lines)
+
+
+@dataclass
+class BrokerPosition:
+    ticket: int
+    symbol: str
+    direction: Direction
+    volume: float
+    price_open: float
+    sl: float
+    tp: float
+    profit: float
+    time: datetime
+
+
+class ExecutionEngine:
+    """Executa e confirma ordens no MT5 (o objeto `mt5` é injetável para testes)."""
+
+    def __init__(self, client, price_tol: float = 0.05, sl_tol: float = 0.05, max_slippage: float = 0.30, deviation: int = 20) -> None:
+        self.client = client
+        self.mt5 = client.mt5
+        self.price_tol, self.sl_tol, self.max_slippage, self.deviation = price_tol, sl_tol, max_slippage, deviation
+
+    # ------------------------------------------------------------------ leitura
+    def positions(self, symbol: Optional[str] = None) -> list[BrokerPosition]:
+        symbol = symbol or self.client.cfg.symbol
+        raw = self.mt5.positions_get(symbol=symbol) or []
+        out = []
+        for p in raw:
+            direction = Direction.ALTA if getattr(p, "type", 0) == getattr(self.mt5, "POSITION_TYPE_BUY", 0) else Direction.BAIXA
+            out.append(BrokerPosition(int(p.ticket), p.symbol, direction, float(p.volume), float(p.price_open), float(p.sl or 0.0),
+                                      float(p.tp or 0.0), float(getattr(p, "profit", 0.0)), datetime.fromtimestamp(int(p.time), tz=timezone.utc)))
+        return out
+
+    def position(self, ticket: int) -> Optional[BrokerPosition]:
+        return next((p for p in self.positions() if p.ticket == ticket), None)
+
+    def account_equity(self) -> Optional[float]:
+        info = self.mt5.account_info()
+        return float(info.equity) if info is not None else None
+
+    # ------------------------------------------------------------------ envio + confirmação
+    def open(self, plan: TradePlan, comment: str = "GoldAI") -> ExecutionReport:
+        mt5 = self.mt5
+        bid, ask = self.client.tick()
+        buy = plan.direction == Direction.ALTA
+        price = ask if buy else bid
+        tp = plan.targets.get(plan.recommended) if plan.recommended in plan.targets else plan.targets.get("3R")
+        rep = ExecutionReport(plan.lots or 0.0, round(plan.stop, 2), round(tp, 2) if tp else None, price)
+        if not plan.lots:
+            rep.error = "lote zero"
+            return rep
+        req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": self.client.cfg.symbol, "volume": plan.lots,
+               "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": price, "sl": rep.requested_sl, "tp": rep.requested_tp or 0.0,
+               "deviation": self.deviation, "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC}
+        res = mt5.order_send(req)
+        if res is None:
+            rep.error = f"order_send devolveu None: {mt5.last_error()}"
+            return rep
+        rep.retcode, rep.order, rep.deal = getattr(res, "retcode", None), getattr(res, "order", None), getattr(res, "deal", None)
+        if rep.retcode != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
+            rep.error = f"broker recusou: {getattr(res, 'comment', '')}"
+            return rep
+        return self.confirm(rep, plan)
+
+    def confirm(self, rep: ExecutionReport, plan: TradePlan) -> ExecutionReport:
+        """Confirma a POSIÇÃO no broker (não a requisição) e compara com o pedido."""
+        pos = None
+        for p in self.positions():
+            if (rep.order and p.ticket == rep.order) or abs(p.volume - rep.requested_volume) < 1e-9 and p.direction == plan.direction:
+                pos = p
+                break
+        if pos is None:
+            rep.error = "posição não encontrada no broker após o envio"
+            return rep
+        rep.ticket, rep.fill_price, rep.real_volume, rep.real_sl, rep.real_tp = pos.ticket, pos.price_open, pos.volume, pos.sl, pos.tp
+        rep.slippage = round(abs(pos.price_open - rep.requested_price), 2)
+        rep.confirmed = True
+        if abs(pos.volume - rep.requested_volume) > 1e-9:
+            rep.mismatches.append(f"volume {pos.volume} ≠ pedido {rep.requested_volume}")
+        if rep.slippage > self.max_slippage:
+            rep.mismatches.append(f"slippage {rep.slippage} > máximo {self.max_slippage}")
+        sl_bad = abs((pos.sl or 0.0) - rep.requested_sl) > self.sl_tol
+        tp_bad = rep.requested_tp is not None and abs((pos.tp or 0.0) - rep.requested_tp) > self.sl_tol
+        if sl_bad:
+            rep.mismatches.append(f"SL real {pos.sl} ≠ pedido {rep.requested_sl}")
+        if tp_bad:
+            rep.mismatches.append(f"TP real {pos.tp} ≠ pedido {rep.requested_tp}")
+        if sl_bad or tp_bad:
+            if self.modify(pos.ticket, rep.requested_sl, rep.requested_tp):
+                again = self.position(pos.ticket)
+                if again and abs((again.sl or 0.0) - rep.requested_sl) <= self.sl_tol and (rep.requested_tp is None or abs((again.tp or 0.0) - rep.requested_tp) <= self.sl_tol):
+                    rep.real_sl, rep.real_tp, rep.corrected = again.sl, again.tp, True
+                    rep.mismatches = [m for m in rep.mismatches if not m.startswith(("SL real", "TP real"))]
+        return rep
+
+    # ------------------------------------------------------------------ gestão no broker
+    def modify(self, ticket: int, sl: Optional[float], tp: Optional[float]) -> bool:
+        mt5 = self.mt5
+        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": self.client.cfg.symbol, "sl": round(sl, 2) if sl else 0.0, "tp": round(tp, 2) if tp else 0.0}
+        res = mt5.order_send(req)
+        return res is not None and getattr(res, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009)
+
+    def close(self, ticket: int, volume: Optional[float] = None, comment: str = "GoldAI close") -> tuple[bool, Optional[float]]:
+        """Fecha total ou parcialmente. Devolve (ok, preço de fechamento)."""
+        mt5 = self.mt5
+        pos = self.position(ticket)
+        if pos is None:
+            return False, None
+        bid, ask = self.client.tick()
+        buy = pos.direction == Direction.ALTA
+        vol = round(min(volume or pos.volume, pos.volume), 2)
+        req = {"action": mt5.TRADE_ACTION_DEAL, "position": ticket, "symbol": pos.symbol, "volume": vol,
+               "type": mt5.ORDER_TYPE_SELL if buy else mt5.ORDER_TYPE_BUY, "price": bid if buy else ask, "deviation": self.deviation,
+               "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC}
+        res = mt5.order_send(req)
+        ok = res is not None and getattr(res, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009)
+        return ok, (float(getattr(res, "price", 0.0)) or (bid if buy else ask)) if ok else None
+
+    def closed_result(self, ticket: int) -> Optional[dict]:
+        """Se a posição sumiu do broker (stop/TP), busca o resultado nos deals do histórico."""
+        if self.position(ticket) is not None:
+            return None
+        deals = self.mt5.history_deals_get(position=ticket) or []
+        if not deals:
+            return None
+        profit = sum(float(getattr(d, "profit", 0.0)) for d in deals)
+        exits = [d for d in deals if getattr(d, "entry", 1) == getattr(self.mt5, "DEAL_ENTRY_OUT", 1)]
+        price = float(exits[-1].price) if exits else None
+        t = datetime.fromtimestamp(int(exits[-1].time), tz=timezone.utc) if exits else None
+        return {"profit": profit, "price": price, "time": t, "deals": len(deals)}
+
+
+# ============================================================================
+# GUARD
+# ============================================================================
+
+"""GOLD AI ENGINE 3.0 — RISK GUARD · KILL SWITCH · PERFORMANCE ENGINE · COMANDOS.
+
+Regras fundamentais (literalmente na especificação):
+  • A IA nunca poderá aumentar o risco percentual da conta para recuperar perdas.
+  • Nenhuma nova posição será aberta enquanto existir posição ativa no mesmo ativo.
+  • O lote nasce de CAPITAL + RISCO + STOP + CONTRATO — nunca da confiança.
+  • Perda diária ≥ MAX_DAILY_LOSS ou drawdown ≥ MAX_DRAWDOWN → 🚨 TRADING STOP.
+  • TRADING_ENABLED=false (ou arquivo kill switch, ou /STOP) bloqueia novas entradas.
+"""
+
+
+
+
+
+class TradingMode(str, Enum):
+    PAPER = "PAPER"           # 🟢 tudo simulado (padrão)
+    AUTHORIZE = "AUTHORIZE"   # 🟡 monta a operação e pede autorização
+    SEMI_LIVE = "SEMI_LIVE"   # 🟠 entra por regras pré-autorizadas; ações críticas pedem confirmação
+    LIVE = "LIVE"             # 🔴 execução totalmente automática
+
+
+@dataclass
+class GuardLimits(RiskLimits):
+    max_drawdown_pct: float = 10.0
+    min_rr_to_structure: float = 2.0     # se a resistência/suporte forte estiver antes disto (em R), não há expectativa
+
+    @classmethod
+    def from_env(cls, env: dict[str, str]) -> "GuardLimits":
+        base = RiskLimits.from_env(env)
+        g = cls(**base.__dict__)
+        g.max_drawdown_pct = float(env.get("MAX_DRAWDOWN", g.max_drawdown_pct))
+        g.min_rr_to_structure = float(env.get("MIN_RR_TO_STRUCTURE", g.min_rr_to_structure))
+        return g
+
+
+@dataclass
+class KillSwitch:
+    """TRADING_ENABLED no ambiente/.env, arquivo sentinela e comandos /STOP /PAUSE /RESUME."""
+
+    enabled_env: bool = True
+    file_path: Optional[str] = None
+    stopped: bool = False     # /STOP → sem novas entradas
+    paused: bool = False      # /PAUSE → sem novas entradas nem gestão automática crítica
+
+    @classmethod
+    def from_env(cls, env: dict[str, str], file_path: Optional[str] = None) -> "KillSwitch":
+        val = str(env.get("TRADING_ENABLED", "true")).strip().lower()
+        return cls(enabled_env=val in ("1", "true", "yes", "on"), file_path=file_path)
+
+    def new_entries_allowed(self) -> tuple[bool, str]:
+        if not self.enabled_env:
+            return False, "TRADING_ENABLED=false"
+        if self.file_path and os.path.exists(self.file_path):
+            return False, f"kill switch ativo ({self.file_path})"
+        if self.paused:
+            return False, "sistema pausado (/PAUSE)"
+        if self.stopped:
+            return False, "novas entradas bloqueadas (/STOP)"
+        return True, "ok"
+
+
+@dataclass
+class PerformanceEngine:
+    """Capital → risco financeiro permitido → lote. O percentual nunca muda; o valor cresce com o capital."""
+
+    limits: GuardLimits
+    equity: float
+    peak_equity: float = 0.0
+    day: Optional[str] = None
+    daily_pnl: float = 0.0
+    trading_stop: bool = False
+    history: list[dict] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.peak_equity = max(self.peak_equity, self.equity)
+
+    def roll_day(self, t: datetime) -> None:
+        d = t.strftime("%Y-%m-%d")
+        if d != self.day:
+            self.day, self.daily_pnl, self.trading_stop = d, 0.0, False
+
+    @property
+    def risk_usd(self) -> float:
+        """Risco financeiro por operação = capital × RISK_PER_TRADE. Único ponto de cálculo — nunca ajustado por confiança ou perdas."""
+        return round(self.equity * self.limits.risk_per_trade_pct / 100.0, 2)
+
+    @property
+    def drawdown_pct(self) -> float:
+        return round(100.0 * (self.peak_equity - self.equity) / self.peak_equity, 2) if self.peak_equity else 0.0
+
+    def record_result(self, pnl_usd: float, t: datetime, note: str = "") -> None:
+        self.roll_day(t)
+        self.equity = round(self.equity + pnl_usd, 2)
+        self.peak_equity = max(self.peak_equity, self.equity)
+        self.daily_pnl = round(self.daily_pnl + pnl_usd, 2)
+        self.history.append({"time": t.isoformat(), "pnl": pnl_usd, "equity": self.equity, "note": note})
+        if self.daily_pnl <= -self.equity_start_of_day() * self.limits.max_daily_loss_pct / 100.0:
+            self.trading_stop = True
+
+    def equity_start_of_day(self) -> float:
+        return self.equity - self.daily_pnl
+
+    def sync_equity(self, broker_equity: float, t: datetime) -> None:
+        """Em LIVE o capital vem do broker; a variação entra como resultado do dia."""
+        self.roll_day(t)
+        delta = round(broker_equity - self.equity, 2)
+        if abs(delta) > 0.005:
+            self.record_result(delta, t, "sync broker")
+
+    def blocks(self, t: datetime) -> list[str]:
+        self.roll_day(t)
+        out: list[str] = []
+        if self.trading_stop or self.daily_pnl <= -self.equity_start_of_day() * self.limits.max_daily_loss_pct / 100.0:
+            self.trading_stop = True
+            out.append(f"🚨 TRADING STOP — perda diária {self.daily_pnl:+.2f} USD atingiu {self.limits.max_daily_loss_pct:.1f}% do capital")
+        if self.drawdown_pct >= self.limits.max_drawdown_pct:
+            out.append(f"🚨 drawdown {self.drawdown_pct:.1f}% ≥ MAX_DRAWDOWN {self.limits.max_drawdown_pct:.1f}%")
+        return out
+
+    def render(self) -> str:
+        return (f"💼 CAPITAL {self.equity:,.2f} USD · pico {self.peak_equity:,.2f} · drawdown {self.drawdown_pct:.1f}% · "
+                f"dia {self.daily_pnl:+.2f} · risco/operação {self.limits.risk_per_trade_pct}% = {self.risk_usd:.2f} USD"
+                + (" · 🚨 TRADING STOP" if self.trading_stop else ""))
+
+
+def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float) -> tuple[float, float]:
+    """(lote, risco real em USD). CAPITAL + RISCO + STOP + CONTRATO — nada mais."""
+    per_lot = stop_distance * limits.contract_size
+    if per_lot <= 0:
+        return 0.0, 0.0
+    lots = min(limits.max_lot, risk_usd / per_lot)
+    lots = round(int(lots / limits.lot_step + 1e-9) * limits.lot_step, 2)
+    if lots < limits.min_lot:
+        return 0.0, 0.0
+    return lots, round(lots * per_lot, 2)
+
+
+@dataclass
+class TelegramCommands:
+    """Lê /STOP /PAUSE /RESUME /STATUS /CLOSE (com confirmação) via getUpdates. Sem token → inativo."""
+
+    token: Optional[str]
+    chat_id: Optional[str]
+    offset: int = 0
+    pending_close: bool = False
+
+    def poll(self) -> list[str]:  # pragma: no cover - rede
+        if not self.token:
+            return []
+        url = f"https://api.telegram.org/bot{self.token}/getUpdates?" + urllib.parse.urlencode({"offset": self.offset, "timeout": 0})
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode())
+        except Exception:  # noqa: BLE001
+            return []
+        cmds: list[str] = []
+        for upd in data.get("result", []):
+            self.offset = max(self.offset, int(upd["update_id"]) + 1)
+            msg = upd.get("message") or {}
+            if str((msg.get("chat") or {}).get("id")) != str(self.chat_id):
+                continue
+            text = (msg.get("text") or "").strip()
+            if text.startswith("/"):
+                cmds.append(text.upper())
+        return cmds
+
+    def apply(self, cmds: list[str], ks: KillSwitch) -> list[str]:
+        """Aplica ao kill switch; devolve ações que o loop deve executar: STATUS, CLOSE_CONFIRMED."""
+        actions: list[str] = []
+        for c in cmds:
+            if c.startswith("/STOP"):
+                ks.stopped = True
+                actions.append("STOP")
+            elif c.startswith("/PAUSE"):
+                ks.paused = True
+                actions.append("PAUSE")
+            elif c.startswith("/RESUME"):
+                ks.stopped = ks.paused = False
+                actions.append("RESUME")
+            elif c.startswith("/STATUS"):
+                actions.append("STATUS")
+            elif c.startswith("/CLOSE"):
+                if "CONFIRM" in c or self.pending_close:
+                    self.pending_close = False
+                    actions.append("CLOSE_CONFIRMED")
+                else:
+                    self.pending_close = True
+                    actions.append("CLOSE_REQUESTED")
+        return actions
+
+
+# ============================================================================
+# LIVE_ENGINE
+# ============================================================================
+
+"""GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE (ciclo completo).
+
+DADOS → SNAPSHOT → PREDICTOR → PRE-MOVE → DECISION ENGINE → TRADE PLAN → RISK ENGINE → POSITION SIZE
+→ MT5 EXECUTOR → BROKER → CONFIRMAÇÃO → 🔄 TRADE MONITOR → MANTER/PROTEGER/ENCERRAR → RESULTADO
+→ SQLITE → PERFORMANCE → NOVO CAPITAL → NOVO POSITION SIZE → PRÓXIMO.
+
+Três cérebros: PREDICTION ENGINE (GoldAIEngine) · TRADE ENGINE (MaxProfitEngine/StopEngine/sizing) ·
+TRADE MONITOR (monitor.TradeMonitor). O núcleo preditivo (2.1–2.3) não é alterado.
+Nasce em PAPER. LIVE exige autorização explícita.
+"""
+
+
+
+
+
+@dataclass
+class CycleResult:
+    assessment: Optional[Assessment]
+    signal: Optional[Signal]
+    decision: str = ""
+    plan: Optional[TradePlan] = None
+    readings: list[tuple[ManagedTrade, MonitorReading]] = field(default_factory=list)
+    messages: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+class LiveExecutionEngine:
+    EXECUTABLE = {SignalType.BUY, SignalType.STRONG_BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE}
+
+    def __init__(self, mem: PredictionMemory, limits: GuardLimits, mode: TradingMode = TradingMode.PAPER, equity: float = 10000.0,
+                 executor=None, sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None,
+                 commands: Optional[TelegramCommands] = None, horizon_min: int = 240, engine: Optional[GoldAIEngine] = None,
+                 log: Callable[[str], None] = print, authorized: bool = False) -> None:
+        self.mem, self.limits, self.mode = mem, limits, mode
+        self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
+        self.sender = sender or TelegramSender(dry_run=True)
+        self.ks = kill_switch or KillSwitch()
+        self.commands = commands
+        self.horizon = horizon_min
+        self.engine = engine or GoldAIEngine()
+        self.log = log
+        self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
+        start_equity = mem.last_equity() or equity
+        self.perf = PerformanceEngine(limits, start_equity)
+        if mem.last_equity() is None:
+            mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
+        self.monitor = TradeMonitor(history=mem.r_stats())
+        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(), horizon_min, limits.min_rr_to_structure)
+        self.managed: list[ManagedTrade] = mem.managed_trades()
+        self.tickets: dict[int, int] = {}             # trade_id → ticket no broker
+        for tr in self.managed:
+            row = mem.conn.execute("SELECT ticket FROM trades WHERE id=?", (tr.trade_id,)).fetchone()
+            if row and row["ticket"]:
+                self.tickets[tr.trade_id] = int(row["ticket"])
+        self.pending_close_confirm: list[int] = []
+
+    # ------------------------------------------------------------------ util
+    def _send(self, text: str, res: CycleResult) -> None:
+        res.messages.append(text)
+        self.sender.send(text)
+
+    def status_text(self) -> str:
+        return format_status(self.perf, self.ks, self.managed, self.mode.value)
+
+    # ------------------------------------------------------------------ comandos
+    def handle_commands(self, res: CycleResult, now: datetime) -> None:
+        if self.commands is None:
+            return
+        for action in self.commands.apply(self.commands.poll(), self.ks):
+            if action == "STATUS":
+                self._send(self.status_text(), res)
+            elif action in ("STOP", "PAUSE", "RESUME"):
+                self._send(f"🔧 comando /{action} aplicado — " + self.ks.new_entries_allowed()[1], res)
+            elif action == "CLOSE_REQUESTED":
+                self._send(f"⚠️ /CLOSE solicitado para {len(self.managed)} posição(ões). Responda /CLOSE CONFIRM para encerrar.", res)
+            elif action == "CLOSE_CONFIRMED":
+                for tr in list(self.managed):
+                    self._close_trade(tr, tr.r_at(tr.plan.entry), "MANUAL", now, res, price_hint=None)
+                self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
+
+    # ------------------------------------------------------------------ ciclo
+    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None) -> CycleResult:
+        res = CycleResult(None, None)
+        now = snap.time
+        self.handle_commands(res, now)
+        if not snap.candles:
+            res.notes.append("sem candles XAU — ciclo abortado")
+            return res
+        fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
+        # capital: em LIVE/SEMI_LIVE vem do broker
+        if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
+            eq = self.executor.account_equity()
+            if eq:
+                before = self.perf.equity
+                self.perf.sync_equity(eq, now)
+                if abs(eq - before) > 0.005:
+                    self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
+        # resolve previsões e operações simuladas pendentes; atualiza histórico
+        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):
+            res.notes.append(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
+        for tid, sim in self.mem.auto_resolve_trades(fine, now):
+            pr = sim["profile"]
+            res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
+        self.mpe.history = self.monitor.history = self.mem.r_stats()
+        self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
+
+        a, sig = self.engine.run_cycle(snap, new_event_key=new_event_key)
+        res.assessment, res.signal = a, sig
+        # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
+        for tr in list(self.managed):
+            self._monitor_trade(tr, a, snap, fine, res)
+        # DECISION ENGINE
+        if sig is not None:
+            self._send(sig.text, res)
+            pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon)
+            res.decision = self._decide_entry(sig, a, snap, pid, res)
+        else:
+            res.decision = "SEM SINAL — " + a.edge_status
+        return res
+
+    # ------------------------------------------------------------------ entrada
+    def _decide_entry(self, sig: Signal, a: Assessment, snap: MarketSnapshot, pid: int, res: CycleResult) -> str:
+        if sig.type not in self.EXECUTABLE or sig.direction == Direction.LATERAL:
+            return f"NO_TRADE — sinal {sig.type.value} não é operacional"
+        allowed, why = self.ks.new_entries_allowed()
+        if not allowed:
+            return f"BLOQUEADA — {why}"
+        blocks = self.perf.blocks(a.time)
+        if blocks:
+            self._send("\n".join(blocks), res)
+            return "BLOQUEADA — " + "; ".join(blocks)
+        spread = None
+        if self.executor is not None:
+            try:
+                bid, ask = self.executor.client.tick()
+                spread = round(ask - bid, 2)
+            except Exception:  # noqa: BLE001
+                spread = None
+        reasons = no_trade_check(a, self.limits, spread)
+        if reasons:
+            return "🟡 NÃO OPERAR — " + "; ".join(reasons)
+        # uma posição por ativo (memória + broker)
+        if self.managed or (self.executor is not None and self.executor.positions()):
+            return "BLOQUEADA — já existe posição ativa em XAUUSD (MAX_POSITIONS)"
+        plan = self.mpe.plan(a, snap, sig.direction, sig.type.value)
+        res.plan = plan
+        if not plan.viable:
+            return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
+        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value)   # capital + risco + stop + contrato
+        if not plan.lots:
+            return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+        self.log(plan.render())
+        if self.mode == TradingMode.AUTHORIZE and not self.authorized:
+            self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render(), res)
+            return "AGUARDANDO AUTORIZAÇÃO"
+        execution = None
+        if self.mode != TradingMode.PAPER:
+            if self.executor is None:
+                return "BLOQUEADA — sem executor MT5 configurado"
+            execution = self.executor.open(plan, comment=f"GoldAI {sig.type.value}"[:31])
+            self.log(execution.render())
+            if execution.error:
+                self._send("❌ " + execution.render(), res)
+                return "FALHA DE EXECUÇÃO — " + execution.error
+            if execution.mismatches:
+                self._send("⚠️ " + execution.render(), res)
+                if any(m.startswith("SL real") for m in execution.mismatches):
+                    self.executor.close(execution.ticket)
+                    return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
+            self.authorized = False
+        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon)
+        thesis = Thesis.from_assessment(a, plan.direction)
+        tr = ManagedTrade(tid, plan, thesis)
+        if execution is not None:
+            self.tickets[tid] = execution.ticket
+            tr.plan.entry = execution.fill_price or plan.entry
+        self.mem.save_thesis(tid, thesis, tr.state_dict())
+        self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
+        self.managed.append(tr)
+        self._send(format_entry(plan, a, self.mode.value, execution), res)
+        return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
+
+    # ------------------------------------------------------------------ monitor
+    def _monitor_trade(self, tr: ManagedTrade, a: Assessment, snap: MarketSnapshot, fine, res: CycleResult) -> None:
+        now = snap.time
+        ticket = self.tickets.get(tr.trade_id)
+        # 1) o broker fechou (stop/TP)?
+        if ticket and self.executor is not None:
+            closed = self.executor.closed_result(ticket)
+            if closed is not None:
+                r_exit = tr.r_at(closed["price"]) if closed.get("price") else tr.stop_r
+                tr.close(r_exit, "BROKER", closed.get("time") or now)
+                self._finalize(tr, now, res, pnl_usd=closed.get("profit"))
+                return
+        # 2) caminho do preço desde a última leitura (stop/trailing) + reavaliação da tese
+        before = (tr.remaining, tr.stop_r)
+        reading = self.monitor.check_path(tr, fine)
+        from_path = reading is not None
+        if reading is None and tr.status == "OPEN":
+            reading = self.monitor.evaluate(tr, a, snap)
+        if reading is None:
+            return
+        if from_path:
+            if tr.status == "CLOSED" and ticket and self.executor is not None and self.executor.position(ticket) is not None:
+                self.executor.close(ticket)                    # stop lógico tocado antes de sincronizar com o broker
+            elif tr.status == "OPEN" and ticket and self.executor is not None and abs(tr.stop_r - before[1]) > 1e-9:
+                self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
+        else:
+            self._apply_to_broker(tr, reading, before, res)   # ENCERRAR / parcial / trailing / zero a zero chegam ao broker
+        self.mem.log_monitor(tr.trade_id, reading)
+        res.readings.append((tr, reading))
+        self.log(render_monitor(tr, reading))
+        if tr.status == "CLOSED":
+            self._finalize(tr, now, res)
+        else:
+            self.mem.save_state(tr.trade_id, tr.state_dict())
+            if reading.action == "PROTEGER":
+                self._send(format_protection(tr, reading), res)
+            elif reading.action in ("REDUZIR", "ESTENDER"):
+                self._send("📊 GOLD AI MONITOR\n" + render_monitor(tr, reading), res)
+
+    def _apply_to_broker(self, tr: ManagedTrade, reading: MonitorReading, before: tuple[float, float], res: CycleResult) -> None:
+        """Traduz a decisão do monitor em ações no broker (LIVE / SEMI_LIVE)."""
+        ticket = self.tickets.get(tr.trade_id)
+        if not ticket or self.executor is None:
+            return
+        remaining_before, stop_before = before
+        if reading.action == "ENCERRAR" and tr.status == "CLOSED":
+            in_profit = reading.current_r > 0
+            if self.mode == TradingMode.SEMI_LIVE and in_profit and not self.ks.paused:
+                # ação crítica em SEMI_LIVE: pede confirmação, mas protege com stop no zero a zero
+                self.executor.modify(ticket, tr.plan.entry, None)
+                tr.status, tr.close_reason, tr.result_r, tr.closed_at = "OPEN", "", None, None
+                tr.remaining = remaining_before
+                tr.stop_r = max(stop_before, 0.0)
+                self.pending_close_confirm.append(tr.trade_id)
+                self._send(f"🟠 SEMI-LIVE: monitor pede ENCERRAR #{tr.trade_id:05d} com lucro ({reading.current_r:+.2f}R). Stop movido ao zero a zero. Responda /CLOSE CONFIRM.", res)
+                reading.action, reading.note = "PROTEGER", reading.note + " (aguardando confirmação para encerrar)"
+                return
+            ok, price = self.executor.close(ticket)
+            if ok and price is not None:
+                tr.result_r = round(tr.realized_r + (remaining_before) * tr.r_at(price), 3) if tr.result_r is None else tr.result_r
+            return
+        if tr.remaining < remaining_before:  # parcial (PROTEGER/REDUZIR)
+            pos = self.executor.position(ticket)
+            if pos is not None:
+                vol = round(pos.volume * (1 - tr.remaining / remaining_before), 2)
+                vol = max(self.limits.min_lot, vol)
+                if vol < pos.volume:
+                    self.executor.close(ticket, vol, "GoldAI partial")
+        if abs(tr.stop_r - stop_before) > 1e-9:
+            self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
+
+    def _close_trade(self, tr: ManagedTrade, r_exit: float, reason: str, now: datetime, res: CycleResult, price_hint: Optional[float]) -> None:
+        ticket = self.tickets.get(tr.trade_id)
+        if ticket and self.executor is not None:
+            ok, price = self.executor.close(ticket)
+            if ok and price is not None:
+                r_exit = tr.r_at(price)
+        tr.close(r_exit, reason, now)
+        self._finalize(tr, now, res)
+
+    def _finalize(self, tr: ManagedTrade, now: datetime, res: CycleResult, pnl_usd: Optional[float] = None) -> None:
+        risk = tr.plan.risk_usd or 0.0
+        pnl = pnl_usd if pnl_usd is not None else round((tr.result_r or 0.0) * risk, 2)
+        minutes = (now - tr.plan.time).total_seconds() / 60
+        self.mem.close_managed(tr.trade_id, tr.result_r or 0.0, tr.close_reason, now, tr.state_dict())
+        # previsão correta? lead time?
+        correct = (tr.result_r or 0.0) > 0
+        lead = next((h.time for h in tr.history if h.current_r >= 1.0), None)
+        lead_min = (lead - tr.plan.time).total_seconds() / 60 if lead else None
+        self.mem.save_financial_result(tr.trade_id, pnl, round(minutes, 1), lead_min)
+        self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
+        self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
+        self.log(render_evolution(tr))
+        self.log(self.perf.render())
+        if tr.close_reason in ("TESE INVALIDADA", "EXIT SCORE"):
+            self._send(format_scenario_change(tr, tr.history[-1]), res)
+        self._send(format_result(tr, pnl, correct, lead_min, minutes), res)
+        if tr in self.managed:
+            self.managed.remove(tr)
+        self.tickets.pop(tr.trade_id, None)
+        if self.perf.trading_stop:
+            self._send("🚨 TRADING STOP — perda diária máxima atingida; sem novas entradas hoje", res)
 
 
 # ============================================================================
@@ -5097,12 +5951,16 @@ def _load_frame(args: argparse.Namespace):
                         vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
 
 
-def ManagedTradeFactory(trade_id, plan, thesis):
-    return ManagedTrade(trade_id, plan, thesis)
-
-
 def cmd_live(args: argparse.Namespace) -> int:
-    """Ciclo com DADOS REAIS (Yahoo/FRED/CFTC/RSS) → MarketSnapshot → GOLD AI → Telegram/SQLite."""
+    """3.0 LIVE EXECUTION ENGINE: dados reais → predição → decisão → plano → risco → lote → MT5 → confirmação → monitor → resultado → capital."""
+
+    env = load_env_file()
+    limits = GuardLimits.from_env(env)
+    mode = TradingMode(args.mode.upper().replace("-", "_"))
+    if mode == TradingMode.LIVE and not args.authorize:
+        print("modo LIVE exige --authorize explícito; rebaixando para SEMI_LIVE")
+        mode = TradingMode.SEMI_LIVE
+    ks = KillSwitch.from_env(env, file_path=args.kill_switch_file)
 
     dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot,
                             enable_fred=not args.no_fred, enable_news=not args.no_news)
@@ -5111,113 +5969,53 @@ def cmd_live(args: argparse.Namespace) -> int:
     executor = None
     if args.source == "mt5":
 
-        mcfg = MT5Config.from_env(load_env_file())
+        mcfg = MT5Config.from_env(env)
         if args.mt5_path:
             mcfg.path = args.mt5_path
         source = MT5Source(mcfg, data_engine=data)
-        if args.execute:
-            executor = MT5Executor(source.client, volume=args.volume)
-
-
-    limits = RiskLimits.from_env(load_env_file())
-    mode = TradingMode(args.mode.upper())
-    if mode == TradingMode.LIVE and not args.authorize:
-        print("modo LIVE exige --authorize explícito; rebaixando para AUTHORIZE")
-        mode = TradingMode.AUTHORIZE
-    pm_executor = None
-    if mode != TradingMode.PAPER and args.source == "mt5":
-        pm_executor = MT5Executor(source.client, volume=args.volume)
-    print(f"modo de operação: {mode.value} · risco/trade {limits.risk_per_trade_pct}% · perda diária máx {limits.max_daily_loss_pct}% · "
-          f"posições máx {limits.max_positions} · lote máx {limits.max_lot}")
+        if mode != TradingMode.PAPER:
+            source.client.connect()
+            executor = ExecutionEngine(source.client, max_slippage=limits.max_slippage)
+    elif mode != TradingMode.PAPER:
+        print("execução real exige --source mt5; rebaixando para PAPER")
+        mode = TradingMode.PAPER
 
     calibrator = None
     if args.calibrator and os.path.exists(args.calibrator):
         with open(args.calibrator, encoding="utf-8") as f:
             calibrator = IsotonicCalibrator.from_dict(json.load(f))
         print(f"calibrador carregado: {args.calibrator}")
-    engine = GoldAIEngine(EngineConfig(), calibrator=calibrator)
     sender = TelegramSender(dry_run=not args.send)
+    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
-    pm = PositionManager(mode, limits, args.equity, mem.r_stats(), args.horizon, pm_executor)
-    pm.authorized = args.authorize
-    monitor = TradeMonitor(history=mem.r_stats())
-    managed = mem.managed_trades()
-    pm.risk.open_positions = len(managed)
-    if managed:
-        print(f"{len(managed)} operação(ões) aberta(s) retomada(s) pelo GOLD TRADE MONITOR")
+    live = LiveExecutionEngine(mem, limits, mode, args.equity, executor, sender, ks, commands, args.horizon,
+                               GoldAIEngine(EngineConfig(), calibrator=calibrator), authorized=args.authorize)
+    print(f"GOLD AI ENGINE 3.0 · modo {mode.value} · {live.perf.render()}")
+    print(f"limites: risco/trade {limits.risk_per_trade_pct}% · perda diária {limits.max_daily_loss_pct}% · drawdown {limits.max_drawdown_pct}% · "
+          f"posições {limits.max_positions} · lote máx {limits.max_lot} · spread máx {limits.max_spread} · kill switch: {ks.new_entries_allowed()[1]}")
+    if live.managed:
+        print(f"{len(live.managed)} operação(ões) aberta(s) retomada(s) pelo GOLD TRADE MONITOR")
     try:
         while True:
             snap = source.collect() if source is data else source.snapshot()
             print(data.coverage())
             if source is not data:
                 print(f"MT5: {source.status.get('mt5', 'n/d')}")
-            if not snap.candles:
-                print("sem candles XAU — ciclo abortado")
-            else:
-                # 2.1: confronta previsões pendentes com o preço real antes de prever de novo
-                fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
-                for pid, out in mem.auto_resolve(fine, snap.time, snap.atr or 5.0, args.horizon):
-                    print(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
-                for tid, sim in mem.auto_resolve_trades(fine, snap.time):
-                    pr = sim["profile"]
-                    print(f"[trade] operação #{tid} fechada → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R, "
-                          + ", ".join(f"{k} {v:+.2f}R" for k, v in sim["results"].items()))
-                    pm.risk.open_positions = max(0, pm.risk.open_positions - 1)
-                pm.mpe.history = monitor.history = mem.r_stats()
-                engine.expected_lead_min = mem.lead_time_stats()["media"]
-                assessment, signal = engine.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
-                print(render_dashboard(assessment, engine.expected_lead_min))
-                # 2.3: GOLD TRADE MONITOR — reavalia a tese de cada operação aberta com o cenário atual
-                for tr in list(managed):
-                    reading = monitor.check_path(tr, fine)
-                    if reading is None and tr.status == "OPEN":
-                        reading = monitor.evaluate(tr, assessment, snap)
-                    if reading is None:
-                        continue
-                    mem.log_monitor(tr.trade_id, reading)
-                    print(render_monitor(tr, reading))
-                    if tr.status == "CLOSED":
-                        mem.close_managed(tr.trade_id, tr.result_r, tr.close_reason, snap.time, tr.state_dict())
-                        print(render_evolution(tr))
-                        managed.remove(tr)
-                        pm.risk.close(tr.plan, tr.result_r, snap.time)
-                        if pm_executor is not None and mode == TradingMode.LIVE:
-                            print("LIVE: encerramento no broker deve ser confirmado manualmente nesta versão")
-                    else:
-                        mem.save_state(tr.trade_id, tr.state_dict())
-                    if args.send and reading.action != "MANTER":
-                        sender.send(format_monitor(tr, reading))
+            res = live.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
+            for n in res.notes:
+                print(n)
+            if res.assessment is not None:
+                print(render_dashboard(res.assessment, live.engine.expected_lead_min))
                 if args.verbose:
-                    print(render_report(assessment))
-                if signal:
-                    sender.send(signal.text)
-                    pid = mem.record(assessment, signal.type.value, atr=snap.atr, horizon_min=args.horizon)
-                    decision = pm.decide(signal, snap)
-                    print(decision.render())
-                    if decision.action in ("PAPER", "SENT"):
-                        tid = mem.open_trade(decision.plan, mode.value, pid, args.horizon)
-                        thesis = Thesis.from_assessment(assessment, decision.plan.direction)
-                        tr = ManagedTradeFactory(tid, decision.plan, thesis)
-                        mem.save_thesis(tid, thesis, tr.state_dict())
-                        managed.append(tr)
-                        print(f"[monitor] operação #{tid:05d} sob acompanhamento — tese: score {thesis.score:+.0f}, pilares {', '.join(thesis.pillars) or 'nenhum'}")
-                    if args.send and decision.action != "NO_TRADE":
-                        sender.send(format_decision(decision))
-                    if executor is not None:
-                        plan = executor.plan(signal)
-                        if plan is not None:
-                            plan = executor.execute(plan, authorize=args.authorize)
-                            print(plan.render())
-                            if args.send:
-                                sender.send("🧾 " + plan.render())
-                else:
-                    print(">>> sem sinal — " + assessment.edge_status)
+                    print(render_report(res.assessment))
+            print(f">>> {res.decision}")
             if args.once:
                 break
             time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
     finally:
+        print(live.status_text())
         mem.close()
         if source is not data:
             source.client.close()
@@ -5245,6 +6043,22 @@ def cmd_metrics(args: argparse.Namespace) -> int:
             path.append((t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["close"])))
     mem = PredictionMemory(args.db)
     print(mem.metrics(path, args.threshold, args.horizon).render())
+    mem.close()
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    mem = PredictionMemory(args.db)
+    print(mem.performance_summary())
+    curve = mem.equity_curve()
+    if curve:
+        print("  últimos pontos: " + " → ".join(f"{v:,.0f}" for _, v in curve[-8:]))
+    open_ = mem.managed_trades()
+    print(f"operações abertas sob monitor: {len(open_)}")
+    for tr in open_:
+        print(f"  #{tr.trade_id:05d} {tr.thesis.direction.value} entrada {tr.plan.entry:.2f} stop {tr.price_at_r(tr.stop_r):.2f} restante {tr.remaining:.0%}")
+    print(mem.r_stats().render())
+    print(mem.exit_learning())
     mem.close()
     return 0
 
@@ -5380,58 +6194,31 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--flow", type=float, default=0.0)
     e.set_defaults(func=cmd_event)
 
-    lv = sub.add_parser("live", help="ciclo com dados reais (Yahoo/FRED/CFTC/RSS)")
-    lv.add_argument("--symbol", default="GC=F", help="GC=F (futuro) ou XAUUSD=X (spot)")
+    lv = sub.add_parser("live", help="3.0 LIVE EXECUTION ENGINE — dados reais, decisão, execução no MT5 e gestão da posição")
+    lv.add_argument("--symbol", default="GC=F", help="GC=F (futuro) ou XAUUSD=X (spot) para o Data Engine web")
     lv.add_argument("--calendar", default=None, help="JSON de eventos econômicos")
     lv.add_argument("--interval", type=int, default=300)
     lv.add_argument("--db", default="gold_ai.db")
-    lv.add_argument("--send", action="store_true")
+    lv.add_argument("--send", action="store_true", help="envia ao Telegram e habilita comandos /STOP /PAUSE /RESUME /STATUS /CLOSE")
     lv.add_argument("--once", action="store_true")
     lv.add_argument("--no-cot", action="store_true")
     lv.add_argument("--no-fred", action="store_true")
     lv.add_argument("--no-news", action="store_true")
-    lv.add_argument("--source", choices=["web", "mt5"], default="web", help="mt5 = candles/preço do terminal MetaTrader 5")
+    lv.add_argument("--source", choices=["web", "mt5"], default="web", help="mt5 = preço/candles e execução no MetaTrader 5")
     lv.add_argument("--mt5-path", default=None, help="caminho do terminal64.exe (ou MT5_PATH no .env)")
-    lv.add_argument("--execute", action="store_true", help="gera plano de ordem no MT5 (simulado, salvo com --authorize)")
-    lv.add_argument("--authorize", action="store_true", help="AUTORIZA envio real de ordens ao broker")
-    lv.add_argument("--volume", type=float, default=0.01)
-    lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão")
-    lv.add_argument("--mode", choices=["paper", "authorize", "live"], default="paper", help="🟡 paper · 🟠 authorize · 🔴 live (exige --authorize)")
-    lv.add_argument("--equity", type=float, default=10000.0, help="capital de referência para o lote (USD)")
+    lv.add_argument("--mode", choices=["paper", "authorize", "semi-live", "live"], default="paper",
+                    help="🟢 paper (padrão) · 🟡 authorize · 🟠 semi-live · 🔴 live (exige --authorize)")
+    lv.add_argument("--authorize", action="store_true", help="autoriza a próxima entrada (AUTHORIZE) / habilita LIVE")
+    lv.add_argument("--equity", type=float, default=10000.0, help="capital inicial (PAPER); em LIVE vem do broker")
+    lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão/operação")
     lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")
-    lv.add_argument("-v", "--verbose", action="store_true", help="imprime o relatório completo além do painel")
+    lv.add_argument("--kill-switch-file", default="STOP_TRADING", help="se o arquivo existir, nenhuma entrada nova")
+    lv.add_argument("-v", "--verbose", action="store_true")
     lv.set_defaults(func=cmd_live)
 
-    va = sub.add_parser("validate", help="2.1 VALIDATION ENGINE: backtest + walk-forward + calibração + score por fator + auditoria")
-    va.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
-    va.add_argument("--dxy-csv", default=None)
-    va.add_argument("--us10y-csv", default=None)
-    va.add_argument("--symbol", default="GC=F")
-    va.add_argument("--folds", type=int, default=4)
-    va.add_argument("--step", type=int, default=1)
-    va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
-    va.add_argument("--threshold-atr", type=float, default=1.0)
-    va.add_argument("--horizon", type=int, default=240)
-    va.add_argument("--out", default=None, help="salva o relatório em arquivo")
-    va.set_defaults(func=cmd_validate)
-
-    si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy em R")
-    si.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
-    si.add_argument("--dxy-csv", default=None)
-    si.add_argument("--us10y-csv", default=None)
-    si.add_argument("--symbol", default="GC=F")
-    si.add_argument("--step", type=int, default=1)
-    si.add_argument("--folds", type=int, default=4)
-    si.add_argument("--threshold-atr", type=float, default=1.0)
-    si.add_argument("--horizon", type=int, default=240)
-    si.add_argument("--walk-forward", action="store_true")
-    si.set_defaults(func=cmd_simulate)
-
-    ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
-    ca.add_argument("--db", default="gold_ai.db")
-    ca.add_argument("--out", default="calibrator.json")
-    ca.add_argument("--min-n", type=int, default=30)
-    ca.set_defaults(func=cmd_calibrate)
+    st = sub.add_parser("status", help="capital, performance, operações abertas, aprendizado")
+    st.add_argument("--db", default="gold_ai.db")
+    st.set_defaults(func=cmd_status)
 
     bt = sub.add_parser("backtest", help="backtest / walk-forward sobre histórico H1 (CSV ou Yahoo)")
     bt.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")

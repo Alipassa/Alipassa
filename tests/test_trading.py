@@ -114,13 +114,17 @@ class StopAndTargetTests(unittest.TestCase):
         stop, why = se.compute(a, Direction.ALTA, 9.0)
         self.assertLess(stop, a.price)
         self.assertTrue(0.6 * 9 - 1e-6 <= a.price - stop <= 2.5 * 9 + 1e-6)
-        a.zone["invalidation"] = a.price - 0.5
+        a.zone["invalidation"] = a.price - 0.5   # invalidação muito próxima → outro candidato estrutural, nunca < 0.6 ATR
         stop, why = se.compute(a, Direction.ALTA, 9.0)
-        self.assertAlmostEqual(a.price - stop, 0.6 * 9)
-        self.assertIn("muito próxima", why)
-        a.zone["invalidation"] = a.price + 5  # invalidação do lado errado
+        self.assertGreaterEqual(a.price - stop, 0.6 * 9 - 1e-6)
+        self.assertLessEqual(a.price - stop, 2.5 * 9 + 1e-6)
+        self.assertNotIn("invalidação estrutural", why)
+        a.zone = {"invalidation": a.price + 5, "support": None, "resistance": None}  # nada válido → volatilidade
+        a.technical = []
         stop, why = se.compute(a, Direction.ALTA, 9.0)
-        self.assertIn("sem invalidação", why)
+        self.assertIn("1.2 ATR", why)
+        cands = se.candidates(a, Direction.ALTA, 9.0)
+        self.assertTrue(cands)
 
     def test_max_profit_engine_hypothesis_and_history(self):
         s = SampleSource("premove_alta").snapshot()

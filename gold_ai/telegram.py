@@ -133,15 +133,20 @@ class TelegramSender:
     (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, ou TOKEN_TELEGRAM / CHAT_ID) ou arquivo .env.
     Sem token/chat_id, apenas imprime (modo dry-run)."""
 
-    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, dry_run: bool = False, env_file: str = ".env") -> None:
+    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, dry_run: bool = False, env_file: str = ".env",
+                 quiet: bool = False) -> None:
         env = {**load_env_file(env_file), **os.environ}
         self.token = token or env.get("TELEGRAM_BOT_TOKEN") or env.get("TOKEN_TELEGRAM")
         self.chat_id = str(chat_id or env.get("TELEGRAM_CHAT_ID") or env.get("CHAT_ID") or "") or None
         self.dry_run = dry_run or not (self.token and self.chat_id)
+        self.quiet = quiet
+        self.sent: list[str] = []
 
     def send(self, text: str) -> bool:
         if self.dry_run:
-            print("\n[TELEGRAM dry-run]\n" + text + "\n")
+            self.sent.append(text)
+            if not self.quiet:
+                print("\n[TELEGRAM dry-run]\n" + text + "\n")
             return True
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         data = urllib.parse.urlencode({"chat_id": self.chat_id, "text": text, "disable_web_page_preview": "true"}).encode()
@@ -159,3 +164,57 @@ def format_decision(decision) -> str:
 def format_monitor(tr, reading) -> str:
     from .monitor import render_monitor
     return "📡 " + render_monitor(tr, reading)
+
+
+# --------------------------------------------------------------------------- 3.0: TELEGRAM TRADE MANAGER
+def format_entry(plan, assessment, mode: str, execution=None) -> str:
+    side = "🟢 BUY" if plan.direction.value == "ALTA" else "🔴 SELL"
+    tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
+    rr = plan.recommended[0] if plan.recommended[:1].isdigit() else "3"
+    lines = ["🚨 GOLD AI", "", f"{side} XAUUSD", "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
+             f"Confiança: {assessment.confidence:.0f}", "", f"Entrada: {plan.entry:.2f}", f"Stop: {plan.stop:.2f}", f"TP: {tp:.2f}" if tp else "TP: trailing",
+             "", f"R:R = 1:{rr}", "", f"Lote: {plan.lots:.2f}" if plan.lots else "Lote: n/d", f"Risco: {plan.risk_usd:.2f} USD" if plan.risk_usd else "",
+             "", "PRE-MOVE CONFIRMADO" if "CONFIRM" in plan.signal_type.upper() or "BUY" in plan.signal_type or "SELL" in plan.signal_type else plan.signal_type,
+             f"Modo: {mode}"]
+    if execution is not None:
+        lines += ["", execution.render()]
+    return "\n".join(x for x in lines if x is not None)
+
+
+def format_protection(tr, reading) -> str:
+    return "\n".join(["🛡️ GOLD AI", "", f"+{reading.current_r:.1f}R atingido", "", f"{1 - tr.remaining:.0%} realizado", "",
+                       f"Stop: {'BREAK EVEN' if abs(tr.stop_r) < 1e-9 else f'{tr.stop_r:+.2f}R'}", "", f"{tr.remaining:.0%} restante:", "TRAILING", "", reading.note])
+
+
+def format_scenario_change(tr, reading) -> str:
+    from types import SimpleNamespace
+    first = tr.history[0] if len(tr.history) > 1 else SimpleNamespace(thesis_score=100.0, exit_score=0.0)
+    return "\n".join(["⚠️ GOLD AI", "", "CENÁRIO ALTERADO", "", f"Score:\n{tr.thesis.score:+.0f} → {reading.trade_score:+.0f}", "",
+                       f"Thesis:\n{first.thesis_score:.0f} → {reading.thesis_score:.0f}", "", f"Exit:\n{first.exit_score:.0f} → {reading.exit_score:.0f}", "",
+                       "AÇÃO:", "🔴 ENCERRAR" if reading.action == "ENCERRAR" else f"🟠 {reading.action}", "", f"Motivo:\n{tr.close_reason or reading.note}"])
+
+
+def format_result(tr, pnl_usd=None, prediction_correct=None, lead_time_min=None, minutes=None) -> str:
+    lines = ["🏆 GOLD AI" if (tr.result_r or 0) > 0 else "📉 GOLD AI", "", "TRADE ENCERRADO", "", f"Resultado:\n{tr.result_r:+.2f}R"]
+    if pnl_usd is not None:
+        lines.append(f"{pnl_usd:+,.2f} USD")
+    reason = {"TESE INVALIDADA": "Saída adaptativa (tese invalidada)", "EXIT SCORE": "Saída adaptativa", "STOP": "Stop", "TRAILING/PROTEÇÃO": "Trailing / proteção",
+              "HORIZON": "Horizonte", "FIM": "Fim do período", "BROKER": "Fechada no broker", "MANUAL": "Encerramento manual (/CLOSE)"}.get(tr.close_reason, tr.close_reason)
+    lines += ["", f"Motivo:\n{reason}"]
+    if prediction_correct is not None:
+        lines += ["", f"Previsão:\n{'CORRETA' if prediction_correct else 'INCORRETA'}"]
+    if lead_time_min is not None:
+        lines += ["", f"Lead time:\n{lead_time_min:.0f} minutos"]
+    if minutes is not None:
+        lines += ["", f"Duração:\n{minutes:.0f} minutos"]
+    return "\n".join(lines)
+
+
+def format_status(perf, ks, managed, mode: str) -> str:
+    allowed, why = ks.new_entries_allowed()
+    lines = ["📋 GOLD AI STATUS", f"Modo: {mode}", f"Novas entradas: {'✅' if allowed else '⛔ ' + why}", perf.render(), f"Posições sob monitor: {len(managed)}"]
+    for tr in managed:
+        last = tr.history[-1] if tr.history else None
+        lines.append(f"  #{tr.trade_id:05d} {tr.thesis.direction.value} entrada {tr.plan.entry:.2f} stop {tr.price_at_r(tr.stop_r):.2f} "
+                     + (f"{last.current_r:+.2f}R {last.action}" if last else ""))
+    return "\n".join(lines)
