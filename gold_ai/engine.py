@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import HORIZONS, EngineConfig
 from .factors import SCORERS, accumulation_distribution, score_tecnico, sentiment_label, systemic_risk_index
@@ -17,10 +17,12 @@ from .telegram import format_signal
 
 
 class GoldAIEngine:
-    def __init__(self, cfg: Optional[EngineConfig] = None) -> None:
+    def __init__(self, cfg: Optional[EngineConfig] = None, calibrator: Optional[Callable[[float], float]] = None) -> None:
         self.cfg = cfg or EngineConfig()
         self.gate = SignalGate(self.cfg)
         self.history: list[Assessment] = []
+        self.calibrator = calibrator  # mapa prob. prevista → observada (validation.IsotonicCalibrator)
+        self.expected_lead_min: Optional[float] = None  # lead time histórico (métricas), exibido no painel
 
     # ------------------------------------------------------------------ score
     def score_factors(self, s: MarketSnapshot) -> tuple[list[FactorScore], list[TechnicalReading]]:
@@ -77,6 +79,24 @@ class GoldAIEngine:
             conf *= 0.85  # movimento já esticado
         return round(max(0.0, min(100.0, conf)), 0)
 
+    # ------------------------------------------------------------------ regime
+    @staticmethod
+    def regime_for(readings: list[TechnicalReading]) -> str:
+        """BULLISH / BEARISH / RANGE / VOLATILE a partir de H4+D1 (tendência × ADX)."""
+        swing = [r for r in readings if r.timeframe in ("H4", "D1") and "dados insuficientes" not in r.notes]
+        if not swing:
+            return "INDEFINIDO"
+        score = sum(r.score for r in swing) / len(swing)
+        adxs = [r.adx for r in swing if r.adx is not None]
+        adx = sum(adxs) / len(adxs) if adxs else 20.0
+        if adx < 18 and abs(score) < 0.35:
+            return "RANGE"
+        if score > 0.25:
+            return "BULLISH" if adx >= 18 else "BULLISH (fraco)"
+        if score < -0.25:
+            return "BEARISH" if adx >= 18 else "BEARISH (fraco)"
+        return "VOLATILE" if adx >= 30 else "RANGE"
+
     # ------------------------------------------------------------------ horizonte e zona
     @staticmethod
     def horizon_for(readings: list[TechnicalReading], stage: Stage) -> str:
@@ -128,6 +148,12 @@ class GoldAIEngine:
         accum = accumulation_distribution(s)
         event = next_high_impact_event(s.events, s.time, self.cfg.event_window_minutes)
         p_up, p_down, p_flat = self.probabilities(score, readings, systemic)
+        if self.calibrator is not None and (p_up + p_down) > 0:
+            # calibra a probabilidade da direção dominante e redistribui o restante
+            dom_up = p_up >= p_down
+            p_dom = self.calibrator(max(p_up, p_down) / (p_up + p_down)) * (p_up + p_down)
+            p_dom = max(0.0, min(p_up + p_down, p_dom))
+            p_up, p_down = (round(p_dom, 3), round(p_up + p_down - p_dom, 3)) if dom_up else (round(p_up + p_down - p_dom, 3), round(p_dom, 3))
         conf = self.confidence(factors, score, s, event)
         premove = analyze_premove(s, factors, readings, accum, self.cfg)
         reversal = analyze_reversal(s, factors, readings, accum)
@@ -136,6 +162,7 @@ class GoldAIEngine:
         h4 = next((r for r in readings if r.timeframe == "H4"), None)
         trend_src = d1 or h4
         trend = Direction(trend_src.trend) if trend_src and trend_src.trend in Direction.__members__ else Direction.LATERAL
+        regime = self.regime_for(readings)
 
         direction = Direction.ALTA if p_up > p_down and p_up >= p_flat else Direction.BAIXA if p_down > p_up and p_down >= p_flat else Direction.LATERAL
         horizon = self.horizon_for(readings, premove.stage)
@@ -154,7 +181,7 @@ class GoldAIEngine:
             time=s.time, price=s.price, score=score, factors=factors, prob_up=p_up, prob_down=p_down, prob_flat=p_flat,
             confidence=conf, trend=trend, horizon=horizon, premove=premove, reversal=reversal, systemic_risk=systemic,
             sentiment_label=sentiment_label(s.sentiment), dominant_pressure=dominant, next_event=event, technical=readings,
-            conclusion="", confirmations=[], zone=zone,
+            conclusion="", confirmations=[], zone=zone, regime=regime,
         )
         a.confirmations = confirmations(a, a.direction if a.direction != Direction.LATERAL else premove.direction, self.cfg)
         a.evidence_level = evidence_level(a, s)

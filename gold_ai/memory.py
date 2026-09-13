@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from .models import Assessment, Direction
@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS predictions (
     evento TEXT,
     sinal_tipo TEXT,
     nivel_evidencia INTEGER DEFAULT 0,
+    fatores_ratio TEXT,
+    tecnico_detalhe TEXT,
+    atr REAL,
+    horizonte_min INTEGER DEFAULT 240,
     resultado TEXT,
     tempo_ate_reacao_min REAL,
     maxima_favoravel REAL,
@@ -74,20 +78,25 @@ class PredictionMemory:
         self.conn.executescript(SCHEMA)
 
     # ------------------------------------------------------------------ registro
-    def record(self, a: Assessment, signal_type: Optional[str] = None) -> int:
+    def record(self, a: Assessment, signal_type: Optional[str] = None, atr: Optional[float] = None, horizon_min: int = 240) -> int:
+        from .evaluation import technical_details
+
         t = a.time.astimezone(timezone.utc)
         direction = a.direction.value
         prob = {"ALTA": a.prob_up, "BAIXA": a.prob_down, "LATERAL": a.prob_flat}[direction]
         fund = {f.name: f.score for f in a.factors}
         cur = self.conn.execute(
             """INSERT INTO predictions (data, hora, sessao, preco, previsao, probabilidade, confianca, score,
-               horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo, nivel_evidencia)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo, nivel_evidencia,
+               fatores_ratio, tecnico_detalhe, atr, horizonte_min)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 t.strftime("%Y-%m-%d"), t.strftime("%H:%M:%S"), session_label(t), a.price, direction, prob,
                 a.confidence, a.score, a.horizon, a.premove.stage.value, json.dumps(fund, ensure_ascii=False),
                 json.dumps([], ensure_ascii=False), fund.get("dolar"), fund.get("juros_reais"), fund.get("fluxo"),
                 fund.get("tecnico"), a.next_event.name if a.next_event else None, signal_type, int(a.evidence_level),
+                json.dumps({f.name: round(f.ratio, 3) for f in a.factors if f.available}), json.dumps(technical_details(a)),
+                atr, horizon_min,
             ),
         )
         self.conn.commit()
@@ -173,6 +182,59 @@ class PredictionMemory:
             me = sum(d["ERRO"]) / len(d["ERRO"]) if d["ERRO"] else 0.0
             out.append({"fator": name, "media_acertos": round(ma, 2), "media_erros": round(me, 2), "poder": round(ma - me, 2), "n": len(d["ACERTO"]) + len(d["ERRO"])})
         return sorted(out, key=lambda x: -x["poder"])
+
+    # ------------------------------------------------------------------ 2.1: resolução automática no loop live
+    def auto_resolve(self, candles: Iterable, now: datetime, default_threshold: float, horizon_min: int = 240) -> list[tuple[int, Outcome]]:
+        """Resolve previsões pendentes usando os candles mais recentes (M1/M5): ACERTO/ERRO quando o preço
+        tocar ±limiar (1 ATR da previsão, ou `default_threshold`) dentro do horizonte; LATERAL ao expirar."""
+        cs = sorted(candles, key=lambda c: c.time)
+        done: list[tuple[int, Outcome]] = []
+        for row in self.pending():
+            start = datetime.fromisoformat(f"{row['data']}T{row['hora']}").replace(tzinfo=timezone.utc)
+            horizon = row["horizonte_min"] or horizon_min
+            path = [(c.time, c.close) for c in cs if start < c.time <= start + timedelta(minutes=horizon)]
+            if not path:
+                continue
+            thr = row["atr"] or default_threshold
+            out = self.evaluate_path(row["previsao"], row["preco"], path, start, thr)
+            expired = now >= start + timedelta(minutes=horizon)
+            if out.result in ("ACERTO", "ERRO") or expired:
+                self.conn.execute(
+                    """UPDATE predictions SET resultado=?, tempo_ate_reacao_min=?, maxima_favoravel=?, maxima_adversa=?,
+                       preco_final=?, resolvido_em=? WHERE id=?""",
+                    (out.result, out.time_to_reaction_min, out.mfe, out.mae, out.final_price, now.isoformat(), row["id"]))
+                done.append((row["id"], out))
+        if done:
+            self.conn.commit()
+        return done
+
+    def resolved_records(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM predictions WHERE resultado IN ('ACERTO','ERRO') AND previsao IN ('ALTA','BAIXA')").fetchall()
+        return [{"direction": r["previsao"], "hit": r["resultado"] == "ACERTO", "probability": r["probabilidade"],
+                 "factors": json.loads(r["fatores_ratio"] or "{}"), "technical": json.loads(r["tecnico_detalhe"] or "{}"),
+                 "lead": r["tempo_ate_reacao_min"], "type": r["sinal_tipo"]} for r in rows]
+
+    def calibration(self):
+        from .validation import calibration_table
+        return calibration_table((r["probability"], r["hit"]) for r in self.resolved_records())
+
+    def scoreboard(self):
+        from .validation import factor_scoreboard
+        return factor_scoreboard(self.resolved_records())
+
+    def fit_calibrator(self):
+        from .validation import IsotonicCalibrator
+        return IsotonicCalibrator().fit((r["probability"], r["hit"]) for r in self.resolved_records())
+
+    def lead_time_stats(self) -> dict:
+        """⏱️ lead time das previsões que acertaram, por tipo de sinal."""
+        rows = self.conn.execute("SELECT sinal_tipo, tempo_ate_reacao_min FROM predictions WHERE resultado='ACERTO' AND tempo_ate_reacao_min IS NOT NULL").fetchall()
+        by: dict[str, list[float]] = {}
+        for r in rows:
+            by.setdefault(r["sinal_tipo"] or "?", []).append(r["tempo_ate_reacao_min"])
+        allv = [v for vs in by.values() for v in vs]
+        return {"media": (sum(allv) / len(allv)) if allv else None, "n": len(allv),
+                "por_tipo": {k: sum(v) / len(v) for k, v in by.items()}}
 
     def metrics(self, path: Iterable[tuple[datetime, float]], threshold: float, horizon_min: int = 240):
         """Precisão, recall, MFE/MAE, lead time e GOLD LEAD SCORE das previsões direcionais registradas,

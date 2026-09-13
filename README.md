@@ -43,6 +43,33 @@ Python 3.10+, sem dependências externas.
              📲 TELEGRAM ──► 📚 SQLite ──► RESULTADO REAL ──► 📊 precisão · recall · MFE/MAE · lead time
 ```
 
+## 2.1 — VALIDATION ENGINE
+
+A 2.1 não adiciona funcionalidades de sinal: ela **prova ou refuta** que o 2.0 antecipa o XAU/USD.
+
+| Item | Onde | O que faz |
+| --- | --- | --- |
+| 1. Backtest temporal rigoroso | `validation.lookahead_audit`, `HistoryFrame.snapshot_at` | cada snapshot é reconstruído só com o passado; a auditoria varre snapshots e lista qualquer candle/notícia/resultado futuro |
+| 2. Walk-forward | `evaluation.walk_forward(mode="rolling")` | treina → testa → avança janela → treina de novo → testa; parâmetros escolhidos só no treino |
+| 3. Lead time | `evaluation.evaluate`, `memory.lead_time_stats` | minutos entre o sinal e o momento em que o movimento ficou evidente |
+| 4. MFE / MAE | `evaluation.evaluate`, `memory.auto_resolve` | excursão favorável e adversa após cada previsão |
+| 5. Probabilidade calibrada | `validation.calibration_table`, `IsotonicCalibrator`, comando `calibrate` | Brier, ECE, tabela previsto→observado e um mapa isotônico que o motor aplica (`live --calibrator`) |
+| 6. Score por fator | `validation.factor_scoreboard` | taxa de acerto quando cada fator (DXY, juros reais, COT…) e cada indicador (RSI, VWAP, EMA, MACD) apontava na direção do sinal, com barras e *lift* |
+| Painel | `report.render_dashboard` | REGIME · SCORE · PROBABILIDADE · CONFIANÇA · PRE-MOVE · LEAD TIME · fatores · STATUS · DECISÃO |
+| Loop de aprendizado | `live` | a cada ciclo resolve as previsões pendentes com os candles reais antes de prever de novo |
+
+```bash
+python -m gold_ai validate --csv xau_h1.csv --folds 4          # relatório completo + VEREDITO
+python -m gold_ai validate --symbol GC=F --mode anchored       # histórico Yahoo (~3 meses H1)
+python -m gold_ai live --interval 300 --send                   # roda dias/semanas; resolve e aprende sozinho
+python -m gold_ai stats                                        # lead time, calibração, score por fator do que foi vivido
+python -m gold_ai calibrate --min-n 30                         # gera calibrator.json; `live` passa a usá-lo
+```
+
+O veredito só sai de "INCONCLUSIVO" com pelo menos 20 sinais resolvidos fora da amostra. A pergunta
+que ele responde: *quando o motor diz PRE-MOVE, o XAU/USD anda na direção prevista, com quantos
+minutos de antecedência, e a probabilidade declarada bate com a observada?*
+
 ## Uso rápido
 
 ```bash

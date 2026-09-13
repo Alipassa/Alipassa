@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GOLD AI ENGINE 2.0 — arquivo único (XAU/USD).
+"""GOLD AI ENGINE 2.1 — arquivo único (VALIDATION ENGINE) (XAU/USD).
 
 🌎 MUNDO → 📡 DATA ENGINE (Yahoo · FRED · CFTC · RSS · calendário · MetaTrader 5)
 → MARKET SNAPSHOT → 🧠 GOLD AI ENGINE (score · probabilidade · confiança)
@@ -19,6 +19,8 @@ Uso:
     python gold_ai_engine_v2.py backtest [--csv xau_h1.csv] [--walk-forward]
     python gold_ai_engine_v2.py metrics --db gold_ai.db --path-csv precos.csv
     python gold_ai_engine_v2.py stats --db gold_ai.db
+    python gold_ai_engine_v2.py validate --csv xau_h1.csv --folds 4   # auditoria + walk-forward + calibração + score por fator + VEREDITO
+    python gold_ai_engine_v2.py calibrate --min-n 30                   # gera calibrator.json usado por `live`
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ try:  # MetaTrader5 só existe no Windows com o terminal instalado
 except Exception:  # noqa: BLE001
     _mt5 = None
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 # ============================================================================
@@ -435,6 +437,7 @@ class Assessment:
     edge_status: str = ""          # "VANTAGEM ESTATÍSTICA: ALTA" | "🟡 SEM VANTAGEM ESTATÍSTICA"
     has_edge: bool = False
     chain: str = ""                # raciocínio em cadeia do evento (9 passos)
+    regime: str = "INDEFINIDO"     # BULLISH | BEARISH | RANGE | VOLATILE
 
     @property
     def direction(self) -> Direction:
@@ -1649,6 +1652,10 @@ CREATE TABLE IF NOT EXISTS predictions (
     evento TEXT,
     sinal_tipo TEXT,
     nivel_evidencia INTEGER DEFAULT 0,
+    fatores_ratio TEXT,
+    tecnico_detalhe TEXT,
+    atr REAL,
+    horizonte_min INTEGER DEFAULT 240,
     resultado TEXT,
     tempo_ate_reacao_min REAL,
     maxima_favoravel REAL,
@@ -1690,20 +1697,24 @@ class PredictionMemory:
         self.conn.executescript(SCHEMA)
 
     # ------------------------------------------------------------------ registro
-    def record(self, a: Assessment, signal_type: Optional[str] = None) -> int:
+    def record(self, a: Assessment, signal_type: Optional[str] = None, atr: Optional[float] = None, horizon_min: int = 240) -> int:
+
         t = a.time.astimezone(timezone.utc)
         direction = a.direction.value
         prob = {"ALTA": a.prob_up, "BAIXA": a.prob_down, "LATERAL": a.prob_flat}[direction]
         fund = {f.name: f.score for f in a.factors}
         cur = self.conn.execute(
             """INSERT INTO predictions (data, hora, sessao, preco, previsao, probabilidade, confianca, score,
-               horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo, nivel_evidencia)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo, nivel_evidencia,
+               fatores_ratio, tecnico_detalhe, atr, horizonte_min)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 t.strftime("%Y-%m-%d"), t.strftime("%H:%M:%S"), session_label(t), a.price, direction, prob,
                 a.confidence, a.score, a.horizon, a.premove.stage.value, json.dumps(fund, ensure_ascii=False),
                 json.dumps([], ensure_ascii=False), fund.get("dolar"), fund.get("juros_reais"), fund.get("fluxo"),
                 fund.get("tecnico"), a.next_event.name if a.next_event else None, signal_type, int(a.evidence_level),
+                json.dumps({f.name: round(f.ratio, 3) for f in a.factors if f.available}), json.dumps(technical_details(a)),
+                atr, horizon_min,
             ),
         )
         self.conn.commit()
@@ -1789,6 +1800,56 @@ class PredictionMemory:
             me = sum(d["ERRO"]) / len(d["ERRO"]) if d["ERRO"] else 0.0
             out.append({"fator": name, "media_acertos": round(ma, 2), "media_erros": round(me, 2), "poder": round(ma - me, 2), "n": len(d["ACERTO"]) + len(d["ERRO"])})
         return sorted(out, key=lambda x: -x["poder"])
+
+    # ------------------------------------------------------------------ 2.1: resolução automática no loop live
+    def auto_resolve(self, candles: Iterable, now: datetime, default_threshold: float, horizon_min: int = 240) -> list[tuple[int, Outcome]]:
+        """Resolve previsões pendentes usando os candles mais recentes (M1/M5): ACERTO/ERRO quando o preço
+        tocar ±limiar (1 ATR da previsão, ou `default_threshold`) dentro do horizonte; LATERAL ao expirar."""
+        cs = sorted(candles, key=lambda c: c.time)
+        done: list[tuple[int, Outcome]] = []
+        for row in self.pending():
+            start = datetime.fromisoformat(f"{row['data']}T{row['hora']}").replace(tzinfo=timezone.utc)
+            horizon = row["horizonte_min"] or horizon_min
+            path = [(c.time, c.close) for c in cs if start < c.time <= start + timedelta(minutes=horizon)]
+            if not path:
+                continue
+            thr = row["atr"] or default_threshold
+            out = self.evaluate_path(row["previsao"], row["preco"], path, start, thr)
+            expired = now >= start + timedelta(minutes=horizon)
+            if out.result in ("ACERTO", "ERRO") or expired:
+                self.conn.execute(
+                    """UPDATE predictions SET resultado=?, tempo_ate_reacao_min=?, maxima_favoravel=?, maxima_adversa=?,
+                       preco_final=?, resolvido_em=? WHERE id=?""",
+                    (out.result, out.time_to_reaction_min, out.mfe, out.mae, out.final_price, now.isoformat(), row["id"]))
+                done.append((row["id"], out))
+        if done:
+            self.conn.commit()
+        return done
+
+    def resolved_records(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM predictions WHERE resultado IN ('ACERTO','ERRO') AND previsao IN ('ALTA','BAIXA')").fetchall()
+        return [{"direction": r["previsao"], "hit": r["resultado"] == "ACERTO", "probability": r["probabilidade"],
+                 "factors": json.loads(r["fatores_ratio"] or "{}"), "technical": json.loads(r["tecnico_detalhe"] or "{}"),
+                 "lead": r["tempo_ate_reacao_min"], "type": r["sinal_tipo"]} for r in rows]
+
+    def calibration(self):
+        return calibration_table((r["probability"], r["hit"]) for r in self.resolved_records())
+
+    def scoreboard(self):
+        return factor_scoreboard(self.resolved_records())
+
+    def fit_calibrator(self):
+        return IsotonicCalibrator().fit((r["probability"], r["hit"]) for r in self.resolved_records())
+
+    def lead_time_stats(self) -> dict:
+        """⏱️ lead time das previsões que acertaram, por tipo de sinal."""
+        rows = self.conn.execute("SELECT sinal_tipo, tempo_ate_reacao_min FROM predictions WHERE resultado='ACERTO' AND tempo_ate_reacao_min IS NOT NULL").fetchall()
+        by: dict[str, list[float]] = {}
+        for r in rows:
+            by.setdefault(r["sinal_tipo"] or "?", []).append(r["tempo_ate_reacao_min"])
+        allv = [v for vs in by.values() for v in vs]
+        return {"media": (sum(allv) / len(allv)) if allv else None, "n": len(allv),
+                "por_tipo": {k: sum(v) / len(v) for k, v in by.items()}}
 
     def metrics(self, path: Iterable[tuple[datetime, float]], threshold: float, horizon_min: int = 240):
         """Precisão, recall, MFE/MAE, lead time e GOLD LEAD SCORE das previsões direcionais registradas,
@@ -1966,10 +2027,12 @@ class TelegramSender:
 
 
 class GoldAIEngine:
-    def __init__(self, cfg: Optional[EngineConfig] = None) -> None:
+    def __init__(self, cfg: Optional[EngineConfig] = None, calibrator: Optional[Callable[[float], float]] = None) -> None:
         self.cfg = cfg or EngineConfig()
         self.gate = SignalGate(self.cfg)
         self.history: list[Assessment] = []
+        self.calibrator = calibrator  # mapa prob. prevista → observada (validation.IsotonicCalibrator)
+        self.expected_lead_min: Optional[float] = None  # lead time histórico (métricas), exibido no painel
 
     # ------------------------------------------------------------------ score
     def score_factors(self, s: MarketSnapshot) -> tuple[list[FactorScore], list[TechnicalReading]]:
@@ -2026,6 +2089,24 @@ class GoldAIEngine:
             conf *= 0.85  # movimento já esticado
         return round(max(0.0, min(100.0, conf)), 0)
 
+    # ------------------------------------------------------------------ regime
+    @staticmethod
+    def regime_for(readings: list[TechnicalReading]) -> str:
+        """BULLISH / BEARISH / RANGE / VOLATILE a partir de H4+D1 (tendência × ADX)."""
+        swing = [r for r in readings if r.timeframe in ("H4", "D1") and "dados insuficientes" not in r.notes]
+        if not swing:
+            return "INDEFINIDO"
+        score = sum(r.score for r in swing) / len(swing)
+        adxs = [r.adx for r in swing if r.adx is not None]
+        adx = sum(adxs) / len(adxs) if adxs else 20.0
+        if adx < 18 and abs(score) < 0.35:
+            return "RANGE"
+        if score > 0.25:
+            return "BULLISH" if adx >= 18 else "BULLISH (fraco)"
+        if score < -0.25:
+            return "BEARISH" if adx >= 18 else "BEARISH (fraco)"
+        return "VOLATILE" if adx >= 30 else "RANGE"
+
     # ------------------------------------------------------------------ horizonte e zona
     @staticmethod
     def horizon_for(readings: list[TechnicalReading], stage: Stage) -> str:
@@ -2077,6 +2158,12 @@ class GoldAIEngine:
         accum = accumulation_distribution(s)
         event = next_high_impact_event(s.events, s.time, self.cfg.event_window_minutes)
         p_up, p_down, p_flat = self.probabilities(score, readings, systemic)
+        if self.calibrator is not None and (p_up + p_down) > 0:
+            # calibra a probabilidade da direção dominante e redistribui o restante
+            dom_up = p_up >= p_down
+            p_dom = self.calibrator(max(p_up, p_down) / (p_up + p_down)) * (p_up + p_down)
+            p_dom = max(0.0, min(p_up + p_down, p_dom))
+            p_up, p_down = (round(p_dom, 3), round(p_up + p_down - p_dom, 3)) if dom_up else (round(p_up + p_down - p_dom, 3), round(p_dom, 3))
         conf = self.confidence(factors, score, s, event)
         premove = analyze_premove(s, factors, readings, accum, self.cfg)
         reversal = analyze_reversal(s, factors, readings, accum)
@@ -2085,6 +2172,7 @@ class GoldAIEngine:
         h4 = next((r for r in readings if r.timeframe == "H4"), None)
         trend_src = d1 or h4
         trend = Direction(trend_src.trend) if trend_src and trend_src.trend in Direction.__members__ else Direction.LATERAL
+        regime = self.regime_for(readings)
 
         direction = Direction.ALTA if p_up > p_down and p_up >= p_flat else Direction.BAIXA if p_down > p_up and p_down >= p_flat else Direction.LATERAL
         horizon = self.horizon_for(readings, premove.stage)
@@ -2103,7 +2191,7 @@ class GoldAIEngine:
             time=s.time, price=s.price, score=score, factors=factors, prob_up=p_up, prob_down=p_down, prob_flat=p_flat,
             confidence=conf, trend=trend, horizon=horizon, premove=premove, reversal=reversal, systemic_risk=systemic,
             sentiment_label=sentiment_label(s.sentiment), dominant_pressure=dominant, next_event=event, technical=readings,
-            conclusion="", confirmations=[], zone=zone,
+            conclusion="", confirmations=[], zone=zone, regime=regime,
         )
         a.confirmations = confirmations(a, a.direction if a.direction != Direction.LATERAL else premove.direction, self.cfg)
         a.evidence_level = evidence_level(a, s)
@@ -2148,6 +2236,7 @@ class GoldAIEngine:
 # ============================================================================
 
 """Saída interna de cada ciclo (Diretriz §36)."""
+
 
 
 
@@ -2203,6 +2292,52 @@ def render_report(a: Assessment) -> str:
         f"Conclusão: {a.conclusion}",
     ]
     return "\n".join(lines)
+
+
+def render_dashboard(a: Assessment, expected_lead_min: Optional[float] = None) -> str:
+    """Painel GOLD MARKET PREDICTION SYSTEM (caixa de largura fixa)."""
+
+    f = {x.name: x for x in a.factors}
+
+    def lab(name: str) -> str:
+        x = f.get(name)
+        if x is None or not x.available:
+            return "N/D"
+        return "ALTISTA" if x.ratio >= 0.3 else "BAIXISTA" if x.ratio <= -0.3 else "NEUTRO"
+
+    p_dom = max(a.prob_up, a.prob_down)
+    decision = classify(a.score, EngineConfig()).value
+    if a.premove.stage.value == "PRÉ-MOVIMENTO" and len(a.confirmations) >= 3:
+        decision = "GOLD PRE-MOVE"
+    if not a.has_edge:
+        decision = "NÃO SEI — SEM SINAL"
+    status = a.premove.latent_pressure or a.dominant_pressure
+    status_emoji = "🟢" if "COMPRADORA" in status else "🔴" if "VENDEDORA" in status else "🟡"
+    lead = f"{expected_lead_min:.0f} min (histórico)" if expected_lead_min else "n/d (sem histórico)"
+    rows = [
+        ("REGIME", a.regime), ("SCORE", f"{a.score:+.0f}"), ("PROBABILIDADE", f"{p_dom:.0%}"), ("CONFIANÇA", f"{a.confidence:.0f}"),
+        None,
+        ("PRE-MOVE", a.premove.direction.value if a.premove.stage.value == "PRÉ-MOVIMENTO" else a.premove.stage.value),
+        ("LEAD TIME", lead), ("EVIDÊNCIA", f"NÍVEL {int(a.evidence_level)}"),
+        None,
+        ("DXY", lab("dolar")), ("REAL YIELD", lab("juros_reais")), ("FED", lab("fed")), ("FLOW", lab("fluxo")),
+        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento")), ("GEO", lab("geopolitica")),
+        None,
+        ("STATUS", f"{status_emoji} {status}"),
+        None,
+        ("DECISÃO", decision),
+    ]
+    width = 44
+    out = ["┌" + "─" * width + "┐", "│" + "GOLD AI ENGINE".center(width) + "│", "├" + "─" * width + "┤"]
+    for r in rows:
+        if r is None:
+            out.append("│" + " " * width + "│")
+            continue
+        k, v = r
+        line = f" {k:<13}→ {v}"
+        out.append("│" + line[:width].ljust(width) + "│")
+    out.append("└" + "─" * width + "┘")
+    return "\n".join(out)
 
 
 # ============================================================================
@@ -3234,6 +3369,257 @@ class MT5Executor:
 
 
 # ============================================================================
+# VALIDATION
+# ============================================================================
+
+"""GOLD AI ENGINE 2.1 — VALIDATION ENGINE.
+
+Missão: provar (ou refutar) que o 2.0 antecipa o XAU/USD.
+  1. Auditoria anti look-ahead   → lookahead_audit
+  2. Walk-forward rolante         → evaluation.walk_forward(mode="rolling")
+  3. Lead time / 4. MFE-MAE       → evaluation.evaluate
+  5. Probabilidade calibrada      → calibration_table, Brier, IsotonicCalibrator
+  6. Score por fator              → factor_scoreboard (quais informações realmente preveem)
+"""
+
+
+
+
+
+# --------------------------------------------------------------------------- 1. anti look-ahead
+def lookahead_audit(snapshot: MarketSnapshot) -> list[str]:
+    """Lista violações: qualquer candle, notícia ou evento *realizado* com timestamp posterior ao snapshot."""
+    t = snapshot.time
+    bad: list[str] = []
+    for tf, cs in snapshot.candles.items():
+        late = [c for c in cs if c.time > t]
+        if late:
+            bad.append(f"{tf}: {len(late)} candle(s) após {t:%Y-%m-%d %H:%M}")
+        if any(cs[i].time > cs[i + 1].time for i in range(len(cs) - 1)):
+            bad.append(f"{tf}: candles fora de ordem")
+    for n in snapshot.news:
+        if n.time > t:
+            bad.append(f"notícia futura: {n.headline[:50]}")
+    for e in snapshot.events:
+        if e.actual is not None and e.time > t:
+            bad.append(f"resultado de evento futuro: {e.name}")
+    return bad
+
+
+# --------------------------------------------------------------------------- 5. calibração
+@dataclass
+class CalibrationBin:
+    lo: float
+    hi: float
+    n: int
+    predicted: float   # média da probabilidade prevista
+    observed: float    # taxa de acerto observada
+
+    @property
+    def gap(self) -> float:
+        return self.observed - self.predicted
+
+
+@dataclass
+class CalibrationReport:
+    bins: list[CalibrationBin]
+    brier: Optional[float]
+    brier_reference: Optional[float]  # Brier de prever sempre a taxa-base
+    ece: Optional[float]              # expected calibration error
+    n: int
+
+    def render(self) -> str:
+        lines = ["🎯 CALIBRAÇÃO DA PROBABILIDADE"]
+        if not self.n:
+            return "\n".join(lines + ["  (sem previsões resolvidas)"])
+        lines.append(f"  n={self.n} · Brier={self.brier:.3f} (referência {self.brier_reference:.3f}; menor é melhor) · ECE={self.ece:.3f}")
+        lines.append("  previsto → observado")
+        for b in self.bins:
+            bar = "█" * int(round(b.observed * 20))
+            lines.append(f"  {b.lo:.0%}–{b.hi:.0%}: prev {b.predicted:.0%} obs {b.observed:.0%} (n={b.n}) {bar} {'+' if b.gap > 0 else ''}{b.gap:+.0%}")
+        verdict = "bem calibrado" if self.ece < 0.05 else "moderadamente calibrado" if self.ece < 0.10 else "MAL calibrado — usar IsotonicCalibrator"
+        lines.append(f"  Veredito: {verdict}")
+        return "\n".join(lines)
+
+
+def calibration_table(pairs: Iterable[tuple[float, bool]], n_bins: int = 5, lo: float = 0.5, hi: float = 1.0) -> CalibrationReport:
+    """pairs: (probabilidade prevista na direção sinalizada, acertou?)."""
+    data = [(p, 1.0 if hit else 0.0) for p, hit in pairs]
+    if not data:
+        return CalibrationReport([], None, None, None, 0)
+    width = (hi - lo) / n_bins
+    bins: list[CalibrationBin] = []
+    ece = 0.0
+    for k in range(n_bins):
+        a, b = lo + k * width, lo + (k + 1) * width
+        inb = [(p, y) for p, y in data if (a <= p < b) or (k == n_bins - 1 and p == b)]
+        if not inb:
+            continue
+        pred = statistics.fmean(p for p, _ in inb)
+        obs = statistics.fmean(y for _, y in inb)
+        bins.append(CalibrationBin(a, b, len(inb), pred, obs))
+        ece += len(inb) / len(data) * abs(obs - pred)
+    brier = statistics.fmean((p - y) ** 2 for p, y in data)
+    base = statistics.fmean(y for _, y in data)
+    brier_ref = statistics.fmean((base - y) ** 2 for _, y in data)
+    return CalibrationReport(bins, round(brier, 4), round(brier_ref, 4), round(ece, 4), len(data))
+
+
+class IsotonicCalibrator:
+    """Regressão isotônica (pool-adjacent-violators): mapeia probabilidade prevista → observada,
+    monotônica. Aplicável ao motor via GoldAIEngine.calibrator."""
+
+    def __init__(self) -> None:
+        self.xs: list[float] = []
+        self.ys: list[float] = []
+
+    def fit(self, pairs: Iterable[tuple[float, bool]]) -> "IsotonicCalibrator":
+        data = sorted((p, 1.0 if h else 0.0) for p, h in pairs)
+        if not data:
+            return self
+        # agrupa empates de x (mesma probabilidade) antes do PAV
+        grouped: list[list[float]] = []  # [x, y médio, peso]
+        for x, y in data:
+            if grouped and grouped[-1][0] == x:
+                g = grouped[-1]
+                g[1] = (g[1] * g[2] + y) / (g[2] + 1)
+                g[2] += 1
+            else:
+                grouped.append([x, y, 1])
+        blocks = grouped  # [x médio, y médio, peso]
+        i = 0
+        while i < len(blocks) - 1:
+            if blocks[i][1] > blocks[i + 1][1]:
+                a, b = blocks[i], blocks[i + 1]
+                w = a[2] + b[2]
+                merged = [(a[0] * a[2] + b[0] * b[2]) / w, (a[1] * a[2] + b[1] * b[2]) / w, w]
+                blocks[i:i + 2] = [merged]
+                i = max(0, i - 1)
+            else:
+                i += 1
+        self.xs = [b[0] for b in blocks]
+        self.ys = [b[1] for b in blocks]
+        return self
+
+    def __call__(self, p: float) -> float:
+        if not self.xs:
+            return p
+        if p <= self.xs[0]:
+            return self.ys[0]
+        if p >= self.xs[-1]:
+            return self.ys[-1]
+        for i in range(len(self.xs) - 1):
+            if self.xs[i] <= p <= self.xs[i + 1]:
+                span = self.xs[i + 1] - self.xs[i]
+                w = (p - self.xs[i]) / span if span else 0.0
+                return self.ys[i] + w * (self.ys[i + 1] - self.ys[i])
+        return p
+
+    def to_dict(self) -> dict:
+        return {"xs": self.xs, "ys": self.ys}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "IsotonicCalibrator":
+        c = cls()
+        c.xs, c.ys = list(d.get("xs", [])), list(d.get("ys", []))
+        return c
+
+
+# --------------------------------------------------------------------------- 6. score por fator
+@dataclass
+class FactorRow:
+    name: str
+    n: int                 # previsões em que o fator estava alinhado com a direção prevista
+    hit_rate: float        # acertos / n quando alinhado
+    n_against: int         # previsões em que o fator apontava contra
+    hit_rate_against: Optional[float]
+    lift: Optional[float]  # hit_rate − hit_rate_against (poder discriminante)
+
+    def bar(self, width: int = 10) -> str:
+        return "█" * int(round(self.hit_rate * width)) + "░" * (width - int(round(self.hit_rate * width)))
+
+
+@dataclass
+class Scoreboard:
+    rows: list[FactorRow]
+    base_rate: Optional[float]
+    n: int
+
+    def render(self) -> str:
+        lines = ["📈 SCORE POR FATOR — taxa de acerto quando o fator apontava na direção do sinal"]
+        if not self.n:
+            return "\n".join(lines + ["  (sem previsões resolvidas)"])
+        lines.append(f"  taxa-base (todos os sinais): {self.base_rate:.0%} · n={self.n}")
+        w = max(len(r.name) for r in self.rows) if self.rows else 10
+        for r in sorted(self.rows, key=lambda r: -(r.lift if r.lift is not None else r.hit_rate)):
+            lift = f"lift {r.lift:+.0%}" if r.lift is not None else "lift n/d"
+            lines.append(f"  {r.name:<{w}} {r.bar()} {r.hit_rate:>4.0%}  (n={r.n:<3} {lift})")
+        return "\n".join(lines)
+
+
+def factor_scoreboard(records: Sequence[dict], min_ratio: float = 0.2) -> Scoreboard:
+    """records: dicts com 'direction' (ALTA|BAIXA), 'hit' (bool) e 'factors' {nome: valor assinado
+    (+ = altista)}, opcionalmente 'technical' {indicador: valor assinado}. Um fator conta como
+    'alinhado' se sinal(valor) == sinal(direção) e |valor| >= min_ratio (valores em -1..+1)."""
+    names: dict[str, tuple[list[bool], list[bool]]] = {}
+    hits_all: list[bool] = []
+    for r in records:
+        sign = 1.0 if r["direction"] == "ALTA" else -1.0
+        hit = bool(r["hit"])
+        hits_all.append(hit)
+        allf = {**r.get("factors", {}), **{f"tec:{k}": v for k, v in (r.get("technical") or {}).items()}}
+        for name, val in allf.items():
+            if val is None or abs(val) < min_ratio:
+                continue
+            aligned, against = names.setdefault(name, ([], []))
+            (aligned if sign * val > 0 else against).append(hit)
+    rows: list[FactorRow] = []
+    for name, (al, ag) in names.items():
+        if not al:
+            continue
+        hr = sum(al) / len(al)
+        hra = (sum(ag) / len(ag)) if ag else None
+        rows.append(FactorRow(name, len(al), hr, len(ag), hra, (hr - hra) if hra is not None else None))
+    base = (sum(hits_all) / len(hits_all)) if hits_all else None
+    return Scoreboard(rows, base, len(hits_all))
+
+
+# --------------------------------------------------------------------------- relatório consolidado
+@dataclass
+class ValidationReport:
+    backtest_text: str
+    walk_forward_text: str
+    calibration: CalibrationReport
+    scoreboard: Scoreboard
+    audit_violations: list[str] = field(default_factory=list)
+    n_audited: int = 0
+    min_signals: int = 20  # abaixo disso nenhuma conclusão estatística é honesta
+
+    def verdict(self) -> str:
+        m = re.search(r"Lead time \(acertos\): média ([\d.]+) min", self.walk_forward_text)
+        lead = float(m.group(1)) if m else None
+        p = re.search(r"Precisão: total (\d+)\.?\d*%", self.walk_forward_text)
+        prec = int(p.group(1)) / 100 if p else None
+        if self.audit_violations:
+            return "❌ REPROVADO — violações de look-ahead"
+        n = self.calibration.n
+        if prec is None or lead is None or n < self.min_signals:
+            return f"⚪ INCONCLUSIVO — {n} sinal(is) resolvido(s) fora da amostra; mínimo {self.min_signals}. Rode `live` por mais tempo ou use histórico com DXY/juros."
+        if prec >= 0.6 and lead >= 10 and (self.calibration.ece or 1) < 0.10:
+            return f"🟢 EVIDÊNCIA DE ANTECIPAÇÃO — precisão OOS {prec:.0%}, lead médio {lead:.0f} min, calibração ok"
+        if prec >= 0.5:
+            return f"🟡 PARCIAL — precisão OOS {prec:.0%}, lead médio {lead:.0f} min; ainda não comprova antecipação consistente"
+        return f"🔴 SEM EVIDÊNCIA — precisão OOS {prec:.0%}"
+
+    def render(self) -> str:
+        audit = f"🔍 AUDITORIA ANTI LOOK-AHEAD: {self.n_audited} snapshots, {len(self.audit_violations)} violação(ões)"
+        if self.audit_violations:
+            audit += "\n" + "\n".join(f"  ✗ {v}" for v in self.audit_violations[:10])
+        return "\n\n".join(["🧪 GOLD AI ENGINE 2.1 — VALIDATION ENGINE", audit, self.backtest_text, self.walk_forward_text,
+                            self.calibration.render(), self.scoreboard.render(), f"VEREDITO: {self.verdict()}"])
+
+
+# ============================================================================
 # EVALUATION
 # ============================================================================
 
@@ -3265,6 +3651,32 @@ class SignalRecord:
     evidence_level: int = 0
     probability: float = 0.0
     confidence: float = 0.0
+    factors: dict[str, float] = field(default_factory=dict)     # ratio -1..+1 por fator
+    technical: dict[str, float] = field(default_factory=dict)   # indicadores assinados -1..+1
+
+
+def technical_details(a) -> dict[str, float]:
+    """Indicadores técnicos assinados (-1..+1) do H1/H4 para o scoreboard: RSI, VWAP, EMA, MACD, ADX-tendência."""
+    out: dict[str, float] = {}
+    for r in a.technical:
+        if r.timeframe not in ("H1", "H4") or "dados insuficientes" in r.notes:
+            continue
+        tf = r.timeframe
+        if r.rsi is not None:
+            out[f"RSI_{tf}"] = max(-1.0, min(1.0, (r.rsi - 50) / 25))
+        if r.vwap_position is not None:
+            out[f"VWAP_{tf}"] = max(-1.0, min(1.0, r.vwap_position / 2))
+        if r.ema_alignment is not None:
+            out[f"EMA_{tf}"] = r.ema_alignment
+        if r.macd_hist is not None and r.atr:
+            out[f"MACD_{tf}"] = max(-1.0, min(1.0, r.macd_hist / (r.atr * 0.5)))
+    return out
+
+
+def record_from(a, sig, atr: float) -> "SignalRecord":
+    return SignalRecord(a.time, sig.direction.value, sig.type.value, a.price, atr, int(a.evidence_level),
+                        max(a.prob_up, a.prob_down), a.confidence,
+                        {f.name: f.ratio for f in a.factors if f.available}, technical_details(a))
 
 
 @dataclass
@@ -3519,8 +3931,7 @@ class Backtester:
                 continue
             if sig.direction == Direction.LATERAL:
                 continue
-            signals.append(SignalRecord(a.time, sig.direction.value, sig.type.value, a.price, snap.atr, int(a.evidence_level),
-                                        max(a.prob_up, a.prob_down), a.confidence))
+            signals.append(record_from(a, sig, snap.atr))
         path = [(c.time, c.close) for c in xau[start:end]]
         atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
         threshold = self.threshold_atr * statistics.fmean(atrs)
@@ -3533,7 +3944,7 @@ class WalkForwardResult:
     oos: Metrics
 
     def render(self) -> str:
-        lines = ["🔁 WALK-FORWARD (fora da amostra)"]
+        lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
         for k, (cfg, r) in enumerate(self.folds, 1):
             lines.append(f"  fold {k}: buy≥{cfg.buy} sell≤{cfg.sell} conf≥{cfg.min_confirmations} → sinais={r.metrics.n_signals} "
                          f"precisão={'n/d' if r.metrics.precision is None else f'{r.metrics.precision:.0%}'} lead={'n/d' if r.metrics.lead_time_avg is None else f'{r.metrics.lead_time_avg:.0f} min'}")
@@ -3551,15 +3962,21 @@ def _objective(m: Metrics) -> float:
     return f1 * (0.5 + 0.5 * (m.gold_lead_score or 0) / 100)
 
 
-def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = None) -> WalkForwardResult:
-    """Divide o histórico em folds sequenciais; calibra limiares no treino (grid) e avalia no teste."""
+def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = None, mode: str = "rolling",
+                 train_folds: int = 2) -> WalkForwardResult:
+    """Treina → testa → avança a janela → treina de novo → testa.
+
+    mode="rolling": janela de treino de tamanho fixo (`train_folds` folds) que avança;
+    mode="anchored": treino sempre desde o início. O teste nunca se sobrepõe ao treino e
+    nunca é usado para escolher parâmetros (calibração só no treino)."""
     grid = grid or [{"buy": b, "sell": -b, "min_confirmations": c} for b in (40, 50, 60) for c in (2, 3)]
     n = len(bt.frame.xau)
     usable = n - bt.warmup
-    fold_len = usable // (n_folds + 1)
+    fold_len = usable // (n_folds + train_folds)
     folds: list[tuple[EngineConfig, BacktestResult]] = []
-    for k in range(1, n_folds + 1):
-        train_start, train_end = bt.warmup, bt.warmup + k * fold_len
+    for k in range(n_folds):
+        train_end = bt.warmup + (train_folds + k) * fold_len
+        train_start = bt.warmup if mode == "anchored" else train_end - train_folds * fold_len
         test_end = min(n, train_end + fold_len)
         best_cfg, best_obj = None, -1.0
         for params in grid:
@@ -3572,10 +3989,30 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
         folds.append((best_cfg, bt.run(train_end, test_end, best_cfg)))
     # agrega OOS
     all_sigs = [s for _, r in folds for s in r.signals]
-    path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + fold_len:]]
+    path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + train_folds * fold_len:]]
     atrs = [s.atr for s in all_sigs if s.atr] or [1.0]
     oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
     return WalkForwardResult(folds, oos)
+
+
+# --------------------------------------------------------------------------- 2.1 validação consolidada
+def validate(frame: HistoryFrame, cfg: Optional[EngineConfig] = None, n_folds: int = 4, step: int = 1, warmup: int = 220,
+             threshold_atr: float = 1.0, horizon_min: int = 240, mode: str = "rolling", audit_every: int = 25):
+    """Backtest + walk-forward rolante + calibração + score por fator + auditoria anti look-ahead."""
+
+    bt = Backtester(frame, cfg, warmup=warmup, step=step, threshold_atr=threshold_atr, horizon_min=horizon_min)
+    violations: list[str] = []
+    audited = 0
+    for i in range(warmup, len(frame.xau), max(1, audit_every)):
+        audited += 1
+        violations += [f"i={i}: {v}" for v in lookahead_audit(frame.snapshot_at(i))]
+    full = bt.run()
+    wf = walk_forward(bt, n_folds=n_folds, mode=mode)
+    oos = wf.oos.outcomes
+    calib = calibration_table((o.signal.probability, o.result == "ACERTO") for o in oos if o.result != "LATERAL")
+    board = factor_scoreboard([{"direction": o.signal.direction, "hit": o.result == "ACERTO", "factors": o.signal.factors,
+                                "technical": o.signal.technical} for o in oos if o.result != "LATERAL"])
+    return ValidationReport(full.render(), wf.render(), calib, board, violations, audited)
 
 
 # ============================================================================
@@ -3677,7 +4114,13 @@ def cmd_live(args: argparse.Namespace) -> int:
         source = MT5Source(mcfg, data_engine=data)
         if args.execute:
             executor = MT5Executor(source.client, volume=args.volume)
-    engine = GoldAIEngine(EngineConfig())
+
+    calibrator = None
+    if args.calibrator and os.path.exists(args.calibrator):
+        with open(args.calibrator, encoding="utf-8") as f:
+            calibrator = IsotonicCalibrator.from_dict(json.load(f))
+        print(f"calibrador carregado: {args.calibrator}")
+    engine = GoldAIEngine(EngineConfig(), calibrator=calibrator)
     sender = TelegramSender(dry_run=not args.send)
     mem = PredictionMemory(args.db)
     try:
@@ -3689,11 +4132,18 @@ def cmd_live(args: argparse.Namespace) -> int:
             if not snap.candles:
                 print("sem candles XAU — ciclo abortado")
             else:
+                # 2.1: confronta previsões pendentes com o preço real antes de prever de novo
+                fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
+                for pid, out in mem.auto_resolve(fine, snap.time, snap.atr or 5.0, args.horizon):
+                    print(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
+                engine.expected_lead_min = mem.lead_time_stats()["media"]
                 assessment, signal = engine.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
-                print(render_report(assessment))
+                print(render_dashboard(assessment, engine.expected_lead_min))
+                if args.verbose:
+                    print(render_report(assessment))
                 if signal:
                     sender.send(signal.text)
-                    mem.record(assessment, signal.type.value)
+                    mem.record(assessment, signal.type.value, atr=snap.atr, horizon_min=args.horizon)
                     if executor is not None:
                         plan = executor.plan(signal)
                         if plan is not None:
@@ -3740,6 +4190,37 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    """2.1 VALIDATION ENGINE: backtest + walk-forward rolante + calibração + score por fator + auditoria."""
+
+    frame = _load_frame(args)
+    rep = validate(frame, EngineConfig(), n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
+                   horizon_min=args.horizon, mode=args.mode)
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """Ajusta o calibrador isotônico com as previsões resolvidas no SQLite e salva em JSON (usado por `live --calibrator`)."""
+    mem = PredictionMemory(args.db)
+    rep = mem.calibration()
+    print(rep.render())
+    if rep.n < args.min_n:
+        print(f"\nsó {rep.n} previsões resolvidas (mínimo {args.min_n}) — calibrador NÃO salvo")
+        mem.close()
+        return 1
+    cal = mem.fit_calibrator()
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(cal.to_dict(), f)
+    print(f"\ncalibrador salvo em {args.out}: " + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))
+    mem.close()
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
     pending = mem.pending()
@@ -3754,6 +4235,14 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print("\nPODER PREDITIVO DOS FATORES (média alinhada nos acertos − nos erros):")
     for row in mem.factor_power():
         print(f"  {row['fator']:<12} poder={row['poder']:+.2f} (n={row['n']})")
+    lt = mem.lead_time_stats()
+    print(f"\n⏱️ LEAD TIME médio dos acertos: {lt['media']:.0f} min (n={lt['n']})" if lt["media"] else "\n⏱️ LEAD TIME: sem acertos resolvidos ainda")
+    for k, v in lt["por_tipo"].items():
+        print(f"  {k}: {v:.0f} min")
+    print()
+    print(mem.calibration().render())
+    print()
+    print(mem.scoreboard().render())
     mem.close()
     return 0
 
@@ -3819,7 +4308,29 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--execute", action="store_true", help="gera plano de ordem no MT5 (simulado, salvo com --authorize)")
     lv.add_argument("--authorize", action="store_true", help="AUTORIZA envio real de ordens ao broker")
     lv.add_argument("--volume", type=float, default=0.01)
+    lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão")
+    lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")
+    lv.add_argument("-v", "--verbose", action="store_true", help="imprime o relatório completo além do painel")
     lv.set_defaults(func=cmd_live)
+
+    va = sub.add_parser("validate", help="2.1 VALIDATION ENGINE: backtest + walk-forward + calibração + score por fator + auditoria")
+    va.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
+    va.add_argument("--dxy-csv", default=None)
+    va.add_argument("--us10y-csv", default=None)
+    va.add_argument("--symbol", default="GC=F")
+    va.add_argument("--folds", type=int, default=4)
+    va.add_argument("--step", type=int, default=1)
+    va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
+    va.add_argument("--threshold-atr", type=float, default=1.0)
+    va.add_argument("--horizon", type=int, default=240)
+    va.add_argument("--out", default=None, help="salva o relatório em arquivo")
+    va.set_defaults(func=cmd_validate)
+
+    ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
+    ca.add_argument("--db", default="gold_ai.db")
+    ca.add_argument("--out", default="calibrator.json")
+    ca.add_argument("--min-n", type=int, default=30)
+    ca.set_defaults(func=cmd_calibrate)
 
     bt = sub.add_parser("backtest", help="backtest / walk-forward sobre histórico H1 (CSV ou Yahoo)")
     bt.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")

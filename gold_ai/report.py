@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from .models import Assessment
 
 
@@ -56,3 +58,51 @@ def render_report(a: Assessment) -> str:
         f"Conclusão: {a.conclusion}",
     ]
     return "\n".join(lines)
+
+
+def render_dashboard(a: Assessment, expected_lead_min: Optional[float] = None) -> str:
+    """Painel GOLD MARKET PREDICTION SYSTEM (caixa de largura fixa)."""
+    from .signals import classify
+    from .config import EngineConfig
+
+    f = {x.name: x for x in a.factors}
+
+    def lab(name: str) -> str:
+        x = f.get(name)
+        if x is None or not x.available:
+            return "N/D"
+        return "ALTISTA" if x.ratio >= 0.3 else "BAIXISTA" if x.ratio <= -0.3 else "NEUTRO"
+
+    p_dom = max(a.prob_up, a.prob_down)
+    decision = classify(a.score, EngineConfig()).value
+    if a.premove.stage.value == "PRÉ-MOVIMENTO" and len(a.confirmations) >= 3:
+        decision = "GOLD PRE-MOVE"
+    if not a.has_edge:
+        decision = "NÃO SEI — SEM SINAL"
+    status = a.premove.latent_pressure or a.dominant_pressure
+    status_emoji = "🟢" if "COMPRADORA" in status else "🔴" if "VENDEDORA" in status else "🟡"
+    lead = f"{expected_lead_min:.0f} min (histórico)" if expected_lead_min else "n/d (sem histórico)"
+    rows = [
+        ("REGIME", a.regime), ("SCORE", f"{a.score:+.0f}"), ("PROBABILIDADE", f"{p_dom:.0%}"), ("CONFIANÇA", f"{a.confidence:.0f}"),
+        None,
+        ("PRE-MOVE", a.premove.direction.value if a.premove.stage.value == "PRÉ-MOVIMENTO" else a.premove.stage.value),
+        ("LEAD TIME", lead), ("EVIDÊNCIA", f"NÍVEL {int(a.evidence_level)}"),
+        None,
+        ("DXY", lab("dolar")), ("REAL YIELD", lab("juros_reais")), ("FED", lab("fed")), ("FLOW", lab("fluxo")),
+        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento")), ("GEO", lab("geopolitica")),
+        None,
+        ("STATUS", f"{status_emoji} {status}"),
+        None,
+        ("DECISÃO", decision),
+    ]
+    width = 44
+    out = ["┌" + "─" * width + "┐", "│" + "GOLD AI ENGINE".center(width) + "│", "├" + "─" * width + "┤"]
+    for r in rows:
+        if r is None:
+            out.append("│" + " " * width + "│")
+            continue
+        k, v = r
+        line = f" {k:<13}→ {v}"
+        out.append("│" + line[:width].ljust(width) + "│")
+    out.append("└" + "─" * width + "┘")
+    return "\n".join(out)

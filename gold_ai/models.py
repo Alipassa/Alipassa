@@ -269,6 +269,7 @@ class Assessment:
     edge_status: str = ""          # "VANTAGEM ESTATÍSTICA: ALTA" | "🟡 SEM VANTAGEM ESTATÍSTICA"
     has_edge: bool = False
     chain: str = ""                # raciocínio em cadeia do evento (9 passos)
+    regime: str = "INDEFINIDO"     # BULLISH | BEARISH | RANGE | VOLATILE
 
     @property
     def direction(self) -> Direction:

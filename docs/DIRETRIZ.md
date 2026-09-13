@@ -307,3 +307,25 @@ apenas explica bem depois do movimento.
 Sinal → plano de ordem (entrada, invalidação = stop, alvo por risco/retorno). Nada é
 enviado ao broker sem autorização explícita (`--authorize`) e sem nível de evidência e
 confiança mínimos.
+
+
+---
+
+# ADENDO 2.1 — VALIDATION ENGINE
+
+Missão: provar que o 2.0 antecipa o mercado, não ampliar funcionalidades.
+
+1. **Backtest temporal rigoroso** — nada de misturar futuro com passado (`lookahead_audit`).
+2. **Walk-forward** — treina → testa → avança janela → treina novamente → testa.
+3. **Lead time** — quantos minutos antes do movimento o sinal apareceu.
+4. **MFE / MAE** — comportamento após cada previsão.
+5. **Probabilidade calibrada** — Brier, ECE, previsto × observado, mapa isotônico.
+6. **Score por fator** — quais informações realmente possuem poder preditivo.
+
+O sistema passa a produzir um painel, não só COMPRA/VENDA:
+REGIME · SCORE · PROBABILIDADE · CONFIANÇA · PRE-MOVE · LEAD TIME · DXY · REAL YIELD · FLOW ·
+COT · TECHNICAL · NEWS · STATUS · DECISÃO.
+
+Regra: nenhuma conclusão com menos de 20 sinais resolvidos fora da amostra. O próximo passo não
+é dinheiro real: é rodar `live` por dias ou semanas, deixar o loop resolver as previsões e ler
+`stats` e `validate`.

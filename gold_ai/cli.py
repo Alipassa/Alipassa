@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import time
 from datetime import timedelta
@@ -114,7 +116,15 @@ def cmd_live(args: argparse.Namespace) -> int:
         source = MT5Source(mcfg, data_engine=data)
         if args.execute:
             executor = MT5Executor(source.client, volume=args.volume)
-    engine = GoldAIEngine(EngineConfig())
+    from .report import render_dashboard
+    from .validation import IsotonicCalibrator
+
+    calibrator = None
+    if args.calibrator and os.path.exists(args.calibrator):
+        with open(args.calibrator, encoding="utf-8") as f:
+            calibrator = IsotonicCalibrator.from_dict(json.load(f))
+        print(f"calibrador carregado: {args.calibrator}")
+    engine = GoldAIEngine(EngineConfig(), calibrator=calibrator)
     sender = TelegramSender(dry_run=not args.send)
     mem = PredictionMemory(args.db)
     try:
@@ -126,11 +136,18 @@ def cmd_live(args: argparse.Namespace) -> int:
             if not snap.candles:
                 print("sem candles XAU — ciclo abortado")
             else:
+                # 2.1: confronta previsões pendentes com o preço real antes de prever de novo
+                fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
+                for pid, out in mem.auto_resolve(fine, snap.time, snap.atr or 5.0, args.horizon):
+                    print(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
+                engine.expected_lead_min = mem.lead_time_stats()["media"]
                 assessment, signal = engine.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
-                print(render_report(assessment))
+                print(render_dashboard(assessment, engine.expected_lead_min))
+                if args.verbose:
+                    print(render_report(assessment))
                 if signal:
                     sender.send(signal.text)
-                    mem.record(assessment, signal.type.value)
+                    mem.record(assessment, signal.type.value, atr=snap.atr, horizon_min=args.horizon)
                     if executor is not None:
                         plan = executor.plan(signal)
                         if plan is not None:
@@ -180,6 +197,38 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    """2.1 VALIDATION ENGINE: backtest + walk-forward rolante + calibração + score por fator + auditoria."""
+    from .evaluation import validate
+
+    frame = _load_frame(args)
+    rep = validate(frame, EngineConfig(), n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
+                   horizon_min=args.horizon, mode=args.mode)
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """Ajusta o calibrador isotônico com as previsões resolvidas no SQLite e salva em JSON (usado por `live --calibrator`)."""
+    mem = PredictionMemory(args.db)
+    rep = mem.calibration()
+    print(rep.render())
+    if rep.n < args.min_n:
+        print(f"\nsó {rep.n} previsões resolvidas (mínimo {args.min_n}) — calibrador NÃO salvo")
+        mem.close()
+        return 1
+    cal = mem.fit_calibrator()
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(cal.to_dict(), f)
+    print(f"\ncalibrador salvo em {args.out}: " + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))
+    mem.close()
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
     pending = mem.pending()
@@ -194,6 +243,14 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print("\nPODER PREDITIVO DOS FATORES (média alinhada nos acertos − nos erros):")
     for row in mem.factor_power():
         print(f"  {row['fator']:<12} poder={row['poder']:+.2f} (n={row['n']})")
+    lt = mem.lead_time_stats()
+    print(f"\n⏱️ LEAD TIME médio dos acertos: {lt['media']:.0f} min (n={lt['n']})" if lt["media"] else "\n⏱️ LEAD TIME: sem acertos resolvidos ainda")
+    for k, v in lt["por_tipo"].items():
+        print(f"  {k}: {v:.0f} min")
+    print()
+    print(mem.calibration().render())
+    print()
+    print(mem.scoreboard().render())
     mem.close()
     return 0
 
@@ -259,7 +316,29 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--execute", action="store_true", help="gera plano de ordem no MT5 (simulado, salvo com --authorize)")
     lv.add_argument("--authorize", action="store_true", help="AUTORIZA envio real de ordens ao broker")
     lv.add_argument("--volume", type=float, default=0.01)
+    lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão")
+    lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")
+    lv.add_argument("-v", "--verbose", action="store_true", help="imprime o relatório completo além do painel")
     lv.set_defaults(func=cmd_live)
+
+    va = sub.add_parser("validate", help="2.1 VALIDATION ENGINE: backtest + walk-forward + calibração + score por fator + auditoria")
+    va.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
+    va.add_argument("--dxy-csv", default=None)
+    va.add_argument("--us10y-csv", default=None)
+    va.add_argument("--symbol", default="GC=F")
+    va.add_argument("--folds", type=int, default=4)
+    va.add_argument("--step", type=int, default=1)
+    va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
+    va.add_argument("--threshold-atr", type=float, default=1.0)
+    va.add_argument("--horizon", type=int, default=240)
+    va.add_argument("--out", default=None, help="salva o relatório em arquivo")
+    va.set_defaults(func=cmd_validate)
+
+    ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
+    ca.add_argument("--db", default="gold_ai.db")
+    ca.add_argument("--out", default="calibrator.json")
+    ca.add_argument("--min-n", type=int, default=30)
+    ca.set_defaults(func=cmd_calibrate)
 
     bt = sub.add_parser("backtest", help="backtest / walk-forward sobre histórico H1 (CSV ou Yahoo)")
     bt.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")

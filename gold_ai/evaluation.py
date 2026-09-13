@@ -35,6 +35,32 @@ class SignalRecord:
     evidence_level: int = 0
     probability: float = 0.0
     confidence: float = 0.0
+    factors: dict[str, float] = field(default_factory=dict)     # ratio -1..+1 por fator
+    technical: dict[str, float] = field(default_factory=dict)   # indicadores assinados -1..+1
+
+
+def technical_details(a) -> dict[str, float]:
+    """Indicadores técnicos assinados (-1..+1) do H1/H4 para o scoreboard: RSI, VWAP, EMA, MACD, ADX-tendência."""
+    out: dict[str, float] = {}
+    for r in a.technical:
+        if r.timeframe not in ("H1", "H4") or "dados insuficientes" in r.notes:
+            continue
+        tf = r.timeframe
+        if r.rsi is not None:
+            out[f"RSI_{tf}"] = max(-1.0, min(1.0, (r.rsi - 50) / 25))
+        if r.vwap_position is not None:
+            out[f"VWAP_{tf}"] = max(-1.0, min(1.0, r.vwap_position / 2))
+        if r.ema_alignment is not None:
+            out[f"EMA_{tf}"] = r.ema_alignment
+        if r.macd_hist is not None and r.atr:
+            out[f"MACD_{tf}"] = max(-1.0, min(1.0, r.macd_hist / (r.atr * 0.5)))
+    return out
+
+
+def record_from(a, sig, atr: float) -> "SignalRecord":
+    return SignalRecord(a.time, sig.direction.value, sig.type.value, a.price, atr, int(a.evidence_level),
+                        max(a.prob_up, a.prob_down), a.confidence,
+                        {f.name: f.ratio for f in a.factors if f.available}, technical_details(a))
 
 
 @dataclass
@@ -290,8 +316,7 @@ class Backtester:
                 continue
             if sig.direction == Direction.LATERAL:
                 continue
-            signals.append(SignalRecord(a.time, sig.direction.value, sig.type.value, a.price, snap.atr, int(a.evidence_level),
-                                        max(a.prob_up, a.prob_down), a.confidence))
+            signals.append(record_from(a, sig, snap.atr))
         path = [(c.time, c.close) for c in xau[start:end]]
         atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
         threshold = self.threshold_atr * statistics.fmean(atrs)
@@ -304,7 +329,7 @@ class WalkForwardResult:
     oos: Metrics
 
     def render(self) -> str:
-        lines = ["🔁 WALK-FORWARD (fora da amostra)"]
+        lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
         for k, (cfg, r) in enumerate(self.folds, 1):
             lines.append(f"  fold {k}: buy≥{cfg.buy} sell≤{cfg.sell} conf≥{cfg.min_confirmations} → sinais={r.metrics.n_signals} "
                          f"precisão={'n/d' if r.metrics.precision is None else f'{r.metrics.precision:.0%}'} lead={'n/d' if r.metrics.lead_time_avg is None else f'{r.metrics.lead_time_avg:.0f} min'}")
@@ -322,15 +347,21 @@ def _objective(m: Metrics) -> float:
     return f1 * (0.5 + 0.5 * (m.gold_lead_score or 0) / 100)
 
 
-def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = None) -> WalkForwardResult:
-    """Divide o histórico em folds sequenciais; calibra limiares no treino (grid) e avalia no teste."""
+def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = None, mode: str = "rolling",
+                 train_folds: int = 2) -> WalkForwardResult:
+    """Treina → testa → avança a janela → treina de novo → testa.
+
+    mode="rolling": janela de treino de tamanho fixo (`train_folds` folds) que avança;
+    mode="anchored": treino sempre desde o início. O teste nunca se sobrepõe ao treino e
+    nunca é usado para escolher parâmetros (calibração só no treino)."""
     grid = grid or [{"buy": b, "sell": -b, "min_confirmations": c} for b in (40, 50, 60) for c in (2, 3)]
     n = len(bt.frame.xau)
     usable = n - bt.warmup
-    fold_len = usable // (n_folds + 1)
+    fold_len = usable // (n_folds + train_folds)
     folds: list[tuple[EngineConfig, BacktestResult]] = []
-    for k in range(1, n_folds + 1):
-        train_start, train_end = bt.warmup, bt.warmup + k * fold_len
+    for k in range(n_folds):
+        train_end = bt.warmup + (train_folds + k) * fold_len
+        train_start = bt.warmup if mode == "anchored" else train_end - train_folds * fold_len
         test_end = min(n, train_end + fold_len)
         best_cfg, best_obj = None, -1.0
         for params in grid:
@@ -343,7 +374,28 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
         folds.append((best_cfg, bt.run(train_end, test_end, best_cfg)))
     # agrega OOS
     all_sigs = [s for _, r in folds for s in r.signals]
-    path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + fold_len:]]
+    path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + train_folds * fold_len:]]
     atrs = [s.atr for s in all_sigs if s.atr] or [1.0]
     oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
     return WalkForwardResult(folds, oos)
+
+
+# --------------------------------------------------------------------------- 2.1 validação consolidada
+def validate(frame: HistoryFrame, cfg: Optional[EngineConfig] = None, n_folds: int = 4, step: int = 1, warmup: int = 220,
+             threshold_atr: float = 1.0, horizon_min: int = 240, mode: str = "rolling", audit_every: int = 25):
+    """Backtest + walk-forward rolante + calibração + score por fator + auditoria anti look-ahead."""
+    from .validation import ValidationReport, calibration_table, factor_scoreboard, lookahead_audit
+
+    bt = Backtester(frame, cfg, warmup=warmup, step=step, threshold_atr=threshold_atr, horizon_min=horizon_min)
+    violations: list[str] = []
+    audited = 0
+    for i in range(warmup, len(frame.xau), max(1, audit_every)):
+        audited += 1
+        violations += [f"i={i}: {v}" for v in lookahead_audit(frame.snapshot_at(i))]
+    full = bt.run()
+    wf = walk_forward(bt, n_folds=n_folds, mode=mode)
+    oos = wf.oos.outcomes
+    calib = calibration_table((o.signal.probability, o.result == "ACERTO") for o in oos if o.result != "LATERAL")
+    board = factor_scoreboard([{"direction": o.signal.direction, "hit": o.result == "ACERTO", "factors": o.signal.factors,
+                                "technical": o.signal.technical} for o in oos if o.result != "LATERAL"])
+    return ValidationReport(full.render(), wf.render(), calib, board, violations, audited)
