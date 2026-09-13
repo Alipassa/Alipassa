@@ -88,9 +88,20 @@ def _load_frame(args: argparse.Namespace):
                 out.append(Candle(t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r.get("volume") or 0)))
         return sorted(out, key=lambda c: c.time)
 
+    def attach(frame):
+        """BANCO HISTÓRICO point-in-time (--events dados/noticias_historicas.csv): o cérebro só vê o que estava publicado em cada passo."""
+        frame.symbol = (getattr(args, "market", None) or getattr(args, "market_symbol", None) or "XAUUSD").upper()
+        path = getattr(args, "events", None)
+        if path:
+            from .history import load_history
+            frame.events = load_history(path)
+            frame.news_mode = getattr(args, "news_mode", None) or "full"
+            print(f"banco histórico: {frame.events.stats()} · modo {frame.news_mode}")
+        return frame
+
     if args.csv:
-        return HistoryFrame(xau=read_csv(args.csv), dxy=read_csv(args.dxy_csv) if args.dxy_csv else [],
-                            us10y=read_csv(args.us10y_csv) if args.us10y_csv else [])
+        return attach(HistoryFrame(xau=read_csv(args.csv), dxy=read_csv(args.dxy_csv) if args.dxy_csv else [],
+                                   us10y=read_csv(args.us10y_csv) if args.us10y_csv else []))
     from .data import DataEngineConfig, HttpClient
     from .data.yahoo import YahooCollector
     y = YahooCollector(HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=900))
@@ -114,7 +125,7 @@ def _load_frame(args: argparse.Namespace):
             frame.breakeven_daily = [(datetime(d.year, d.month, d.day, tzinfo=timezone.utc), v) for d, v in fred.series("T10YIE")]
         except Exception as e:  # noqa: BLE001
             print(f"(FRED indisponível: {e})")
-    return frame
+    return attach(frame)
 
 
 def cmd_live_markets(args: argparse.Namespace) -> int:
@@ -219,6 +230,7 @@ def _frames_for_markets(args: argparse.Namespace, markets: str) -> dict:
     for sym in (s.strip().upper() for s in markets.split(",") if s.strip()):
         ns = argparse.Namespace(**vars(args))
         ns.symbol = get_market(sym).yahoo
+        ns.market_symbol = sym
         csv_dir = getattr(args, "csv_dir", None)
         ns.csv = os.path.join(csv_dir, f"{sym}_h1.csv") if csv_dir else None
         ns.dxy_csv = os.path.join(csv_dir, "DXY_h1.csv") if csv_dir and os.path.exists(os.path.join(csv_dir, "DXY_h1.csv")) else None
@@ -246,6 +258,114 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
     rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
                           cfg_factory=factory)
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    """BANCO HISTÓRICO DE EVENTOS/NOTÍCIAS (point-in-time): template · fetch-te · fetch-alfred · fetch-gdelt · rules · learn · stats."""
+    from datetime import date
+    from .history import EventHistory, HistoricalEvent, apply_rule_effects, learn_effects, load_history, merge, render_effect_table, save_history
+    from .telegram import load_env_file
+
+    env = load_env_file()
+    path = args.file
+    exists = os.path.exists(path)
+    hist = load_history(path) if exists else EventHistory()
+    start = date.fromisoformat(args.start) if args.start else date(2026, 1, 1)
+    end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date()
+    if args.action == "template":
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        ex = HistoricalEvent(datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc), datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc), "EXEMPLO_CPI_202601",
+                             "CPI MoM (exemplo — apague)", "US", "USD", "MUITO ALTO", 0.2, 0.3, 0.4, None, None, "MACRO", "cpi", "manual", "", "")
+        n = save_history(merge(hist, EventHistory([ex])) if not exists else hist, path)
+        print(f"template salvo em {path} ({n} linhas). Colunas: {', '.join(HistoricalEvent.columns())}")
+        print("Preencha com calendário (Investing/TE export) ou use fetch-te / fetch-alfred / fetch-gdelt. Datas em UTC (ISO 8601).")
+        return 0
+    if args.action == "stats":
+        print(hist.stats() if exists else f"{path} não existe — use `history template` ou um fetch-*")
+        if exists:
+            from .history import EFFECT_MARKETS
+            for m in EFFECT_MARKETS:
+                vals = [e.effect(m) for e in hist.events if e.effect(m) is not None]
+                print(f"  {m}: {len(vals)} eventos com efeito · favoráveis(↑) {sum(1 for v in vals if v > 0)} · contrários(↓) {sum(1 for v in vals if v < 0)}")
+        return 0
+    if args.action in ("fetch-te", "fetch-alfred", "fetch-gdelt"):
+        from .data import DataEngineConfig, HttpClient
+        http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=24 * 3600)
+        if args.action == "fetch-te":
+            from .data.history_sources import TradingEconomicsImporter
+            key = args.key or env.get("TE_API_KEY") or os.environ.get("TE_API_KEY")
+            if not key:
+                print("Trading Economics exige chave: --key ou TE_API_KEY no .env (https://tradingeconomics.com/api)")
+                return 1
+            new = TradingEconomicsImporter(http, key).fetch(start, end, args.country)
+        elif args.action == "fetch-alfred":
+            from .data.history_sources import ALFREDImporter
+            key = args.key or env.get("FRED_API_KEY") or os.environ.get("FRED_API_KEY")
+            if not key:
+                print("ALFRED/FRED exige chave gratuita: --key ou FRED_API_KEY no .env (https://fred.stlouisfed.org/docs/api/api_key.html)")
+                return 1
+            new = ALFREDImporter(http, key).fetch(start, end)
+        else:
+            from .data.history_sources import GDELTImporter
+            topics = [t.strip() for t in args.topics.split(",")] if args.topics else None
+            new = GDELTImporter(http).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records)
+        print(f"{args.action}: {len(new)} registros obtidos ({new.stats()})")
+        hist = merge(hist, new)
+        apply_rule_effects(hist)
+        n = save_history(hist, path)
+        print(f"salvo: {path} · {n} linhas · {hist.stats()}")
+        return 0
+    if not exists:
+        print(f"{path} não existe — use `history template` ou um fetch-*")
+        return 1
+    if args.action == "rules":
+        n = apply_rule_effects(hist)
+        save_history(hist, path)
+        print(f"efeitos por regra macro aplicados a {n} eventos (efeitos empíricos preservados) · salvo em {path}")
+        return 0
+    if args.action == "learn":
+        # efeitos empíricos: o histórico de preço (Yahoo/CSV) decide a direção média 60 min após cada evento
+        frames = _frames_for_markets(args, args.markets)
+        prices = {sym: [(c.time, c.close) for c in fr.xau] for sym, fr in frames.items()}
+        res = learn_effects(hist, prices, horizon_min=args.horizon, min_n=args.min_n)
+        print(render_effect_table(res["table"]))
+        print(f"\n{res['applied']} eventos passaram a usar efeito empírico (os demais mantêm a regra macro)")
+        save_history(hist, path)
+        print(f"salvo em {path}")
+        return 0
+    print(f"ação desconhecida: {args.action}")
+    return 1
+
+
+def cmd_compare_news(args: argparse.Namespace) -> int:
+    """TESTE A/B: Preço somente × Preço + Macro (A) × Preço + Macro + News (B) — mesma janela, mesmo piso, walk-forward OOS."""
+    from .ablation import compare_information
+    from .history import load_history
+    from .markets import get_market
+    from .telegram import load_env_file
+
+    if not os.path.exists(args.events):
+        print(f"banco histórico não encontrado: {args.events} — crie com `history template` / `history fetch-*`")
+        return 1
+    hist = load_history(args.events)
+    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
+    end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    args.events_path, args.events = args.events, None    # os frames são carregados SEM banco; a ablação liga/desliga por modo
+    frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+    if not frames:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
+    modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
+    rep = compare_information(frames, hist, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon,
+                              strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None))
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
@@ -656,6 +776,8 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
     es.add_argument("--out", default=None)
+    es.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    es.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     es.set_defaults(func=cmd_estimate)
 
     sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
@@ -676,7 +798,48 @@ def main(argv: list[str] | None = None) -> int:
     sw.add_argument("--no-fred", action="store_true")
     sw.add_argument("--out", default=None)
     sw.add_argument("-v", "--verbose", action="store_true")
+    sw.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    sw.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     sw.set_defaults(func=cmd_sweep)
+
+    hi = sub.add_parser("history", help="BANCO HISTÓRICO de eventos/notícias point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats")
+    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats"])
+    hi.add_argument("--file", default=os.path.join("dados", "noticias_historicas.csv"))
+    hi.add_argument("--start", default="2026-01-01")
+    hi.add_argument("--end", default=None)
+    hi.add_argument("--key", default=None, help="chave da API (ou TE_API_KEY / FRED_API_KEY no .env)")
+    hi.add_argument("--country", default="united states")
+    hi.add_argument("--topics", default=None, help="GDELT: geopolitica,petroleo,china,fed,risco (padrão: todos)")
+    hi.add_argument("--chunk-days", type=int, default=7)
+    hi.add_argument("--max-records", type=int, default=100, help="GDELT: manchetes por tema por janela")
+    hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
+    hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
+    hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")
+    hi.add_argument("--csv-dir", default=None)
+    hi.add_argument("--no-fred", action="store_true")
+    hi.set_defaults(func=cmd_history)
+
+    cn = sub.add_parser("compare-news", help="TESTE A/B: Preço somente × Preço + Macro (A) × Preço + Macro + News (B), walk-forward OOS, mesmo piso")
+    cn.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    cn.add_argument("--start", default="2026-01-01")
+    cn.add_argument("--end", default=None)
+    cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
+    cn.add_argument("--modes", default=None, help="none,macro,full (padrão: os três)")
+    cn.add_argument("--equity", type=float, default=10000.0)
+    cn.add_argument("--risk", type=float, default=None)
+    cn.add_argument("--strategy", default="adaptive")
+    cn.add_argument("--folds", type=int, default=4)
+    cn.add_argument("--step", type=int, default=1)
+    cn.add_argument("--horizon", type=int, default=240)
+    cn.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    cn.add_argument("--signal-score", type=float, default=None)
+    cn.add_argument("--min-confirmations", type=int, default=None)
+    cn.add_argument("--edge-confidence", type=float, default=None)
+    cn.add_argument("--no-fred", action="store_true")
+    cn.add_argument("--csv-dir", default=None)
+    cn.add_argument("--out", default=None)
+    cn.add_argument("-v", "--verbose", action="store_true")
+    cn.set_defaults(func=cmd_compare_news)
 
     ed = sub.add_parser("edge", help="4.0: LIVE EDGE — tabela diária por mercado a partir do que foi vivido (o teste definitivo)")
     ed.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
@@ -715,6 +878,8 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--walk-forward", action="store_true")
     bt.add_argument("--folds", type=int, default=4)
     bt.add_argument("--include-watch", action="store_true")
+    bt.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    bt.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     bt.set_defaults(func=cmd_backtest)
 
     mt = sub.add_parser("metrics", help="precisão/recall/MFE/MAE/lead time das previsões gravadas vs. preço real")
@@ -746,6 +911,8 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--markets", default=None, help="4.0: validação multi-mercado, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     va.add_argument("--csv-dir", default=None, help="pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv opcionais)")
     va.add_argument("--verbose-markets", action="store_true", help="imprime o relatório completo de cada mercado")
+    va.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    va.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     va.set_defaults(func=cmd_validate)
 
     si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy, oportunidades")
@@ -766,6 +933,8 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
     si.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     si.add_argument("--walk-forward", action="store_true")
+    si.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    si.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     si.set_defaults(func=cmd_simulate)
 
     ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")

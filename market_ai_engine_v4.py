@@ -32,6 +32,8 @@ Uso (4.0, multi-mercado):
     python market_ai_engine_v4.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
     python market_ai_engine_v4.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000   # estimativa de lucro OOS
     python market_ai_engine_v4.py sweep --start 2026-01-01 --market US500        # piso de vantagem escolhido no treino de cada fold
+    python market_ai_engine_v4.py history fetch-alfred|fetch-te|fetch-gdelt      # banco histórico point-in-time de eventos/notícias
+    python market_ai_engine_v4.py compare-news --start 2026-01-01 --markets US500,XAUUSD   # Preço só × +Macro (A) × +Macro+News (B)
     python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
     python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
 Uso (3.0, um mercado):
@@ -59,7 +61,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -5161,6 +5163,554 @@ def render_feed_health(rows: Sequence[FeedHealth]) -> str:
 
 
 # ============================================================================
+# HISTORY
+# ============================================================================
+
+"""BANCO HISTÓRICO DE EVENTOS/NOTÍCIAS — point-in-time (MARKET AI 4.0).
+
+O MARKET AI só pode ver, em cada instante do backtest, aquilo que estava publicado naquele momento:
+  • `timestamp`     = quando o evento ocorreu/saiu (ex.: CPI 12:30 UTC);
+  • `published_at`  = quando a informação ficou disponível (revisões entram como linhas novas, publicadas depois).
+Nada com published_at > t é visível em t. É isso que evita look-ahead por revisão.
+
+Esquema do CSV (dados/noticias_historicas.csv):
+timestamp,published_at,event_id,event,country,currency,impact,forecast,previous,actual,revised,surprise,category,kind,source,headline,sentiment,
+xau_effect,us500_effect,eurusd_effect,usdjpy_effect,wti_effect,effect_source
+Os efeitos por ativo nascem de regras macro (news_engine) e são substituídos pelo que o histórico mostrar (`history learn`).
+"""
+
+
+
+
+EFFECT_MARKETS = ("XAUUSD", "US500", "EURUSD", "USDJPY", "WTI")
+EFFECT_FIELD = {"XAUUSD": "xau_effect", "US500": "us500_effect", "EURUSD": "eurusd_effect", "USDJPY": "usdjpy_effect", "WTI": "wti_effect"}
+IMPACT_MAP = {"HIGH": "MUITO ALTO", "MEDIUM": "MÉDIO", "LOW": "BAIXO", "3": "MUITO ALTO", "2": "MÉDIO", "1": "BAIXO",
+              "MUITO ALTO": "MUITO ALTO", "ALTO": "ALTO", "MÉDIO": "MÉDIO", "BAIXO": "BAIXO"}
+
+# nome do evento (normalizado) → kind do motor
+KIND_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("core cpi", "core_cpi"), ("core inflation", "core_cpi"), ("cpi", "cpi"), ("inflation rate", "cpi"), ("core pce", "core_pce"), ("pce", "pce"),
+    ("personal consumption", "pce"), ("ppi", "ppi"), ("producer price", "ppi"), ("interest rate decision", "fomc"), ("non farm", "nfp"), ("nonfarm", "nfp"),
+    ("payroll", "nfp"), ("unemployment rate", "unemployment"), ("jobless claims", "jobless_claims"), ("initial claims", "jobless_claims"),
+    ("gdp", "gdp"), ("ism manufacturing", "ism"), ("ism services", "ism"), ("ism non-manufacturing", "ism"), ("pmi", "pmi"), ("retail sales", "retail_sales"),
+    ("jolts", "jolts"), ("consumer confidence", "consumer_confidence"), ("michigan", "michigan"), ("housing", "housing"), ("building permits", "housing"),
+    ("average hourly earnings", "earnings"), ("fomc", "fomc"), ("fed interest rate", "fomc"), ("federal funds", "fomc"), ("fed chair", "speech"),
+    ("powell", "speech"), ("ecb", "ecb"), ("boj", "boj"), ("bank of japan", "boj"), ("crude oil inventories", "oil_inventories"), ("eia", "oil_inventories"),
+    ("opec", "oil_supply_cut"), ("china", "china"),
+)
+# eventos sem sensibilidade direta na tabela do motor recebem uma transmissão própria aqui (unidade: acima do consenso)
+EXTRA_TRANSMISSION = {
+    "ppi": {"yields": +0.7, "dollar": +0.5, "risk": -0.4},
+    "oil_inventories": {"oil": -0.8},           # estoques ACIMA do esperado → petróleo cai
+    "ecb": {"dollar": -0.5, "yields": +0.2},    # BCE hawkish (acima) → euro sobe → dólar cai
+    "boj": {"dollar": -0.3, "yields": +0.2},
+    "china": {"risk": +0.4, "oil": +0.3},
+}
+TYPICAL = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "ppi": 0.2, "nfp": 60.0, "unemployment": 0.1, "jobless_claims": 15.0, "gdp": 0.5,
+           "ism": 1.5, "pmi": 1.0, "retail_sales": 0.4, "jolts": 300.0, "consumer_confidence": 3.0, "michigan": 2.0, "housing": 5.0, "earnings": 0.1,
+           "oil_inventories": 2.0, "fomc": 0.25, "ecb": 0.25, "boj": 0.1}
+
+
+def kind_from_name(name: str) -> str:
+    n = (name or "").lower()
+    for pat, kind in KIND_PATTERNS:
+        if pat in n:
+            return kind
+    return "generic"
+
+
+def _num(x) -> Optional[float]:
+    if x is None or str(x).strip() in ("", "n/d", "nan", "None"):
+        return None
+    s = str(x).strip().replace("%", "").replace("K", "").replace("k", "").replace("M", "").replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+@dataclass
+class HistoricalEvent:
+    timestamp: datetime
+    published_at: datetime
+    event_id: str
+    event: str
+    country: str = "US"
+    currency: str = "USD"
+    impact: str = "ALTO"
+    forecast: Optional[float] = None
+    previous: Optional[float] = None
+    actual: Optional[float] = None
+    revised: Optional[float] = None
+    surprise: Optional[float] = None
+    category: str = "MACRO"          # MACRO | CENTRAL_BANK | NEWS | GEOPOLITICAL | ENERGY | CHINA
+    kind: str = "generic"
+    source: str = ""
+    headline: str = ""
+    sentiment: str = ""              # POSITIVE | NEGATIVE | NEUTRAL (tom da mídia, GDELT)
+    xau_effect: Optional[float] = None
+    us500_effect: Optional[float] = None
+    eurusd_effect: Optional[float] = None
+    usdjpy_effect: Optional[float] = None
+    wti_effect: Optional[float] = None
+    effect_source: str = "rule"      # rule | empirical
+    surprise_basis: str = "forecast" # forecast (vs consenso) | previous (sem consenso: vs dado anterior)
+    tone: Optional[float] = None     # GDELT tone (−100..+100)
+    volume: Optional[float] = None   # GDELT volume (% da cobertura)
+
+    def __post_init__(self) -> None:
+        if self.surprise is None and self.actual is not None:
+            if self.forecast is not None:
+                self.surprise = round(self.actual - self.forecast, 4)
+            elif self.previous is not None and self.surprise_basis == "previous":
+                self.surprise = round(self.actual - self.previous, 4)
+        if self.forecast is None and self.previous is not None and self.surprise is not None and self.surprise_basis == "forecast":
+            self.surprise_basis = "previous"
+        if self.kind == "generic":
+            self.kind = kind_from_name(self.event)
+
+    def effect(self, market: str) -> Optional[float]:
+        return getattr(self, EFFECT_FIELD.get(market.upper(), "_"), None)
+
+    def to_economic_event(self) -> EconomicEvent:
+        consensus = self.forecast if self.forecast is not None else (self.previous if self.surprise_basis == "previous" else None)
+        return EconomicEvent(self.event, self.timestamp, IMPACT_MAP.get(str(self.impact).upper(), self.impact or "ALTO"), consensus, self.previous,
+                             self.actual, self.kind, "")
+
+    def to_news_item(self) -> NewsItem:
+        cat = {"GEOPOLITICAL": "geopolitical", "CENTRAL_BANK": "fed", "ENERGY": "generic", "CHINA": "china", "NEWS": "generic"}.get(self.category, "macro")
+        impact = 0.0
+        if self.xau_effect is not None:
+            impact = max(-1.0, min(1.0, self.xau_effect))
+        elif self.sentiment == "POSITIVE":
+            impact = 0.3
+        elif self.sentiment == "NEGATIVE":
+            impact = -0.3
+        return NewsItem(self.headline or self.event, self.source, self.timestamp, cat, impact, 0.0, f"{self.kind} · {self.category}")
+
+    @classmethod
+    def columns(cls) -> list[str]:
+        return [f.name for f in fields(cls)]
+
+    def to_row(self) -> dict:
+        d = {}
+        for f in fields(self):
+            v = getattr(self, f.name)
+            d[f.name] = v.isoformat() if isinstance(v, datetime) else ("" if v is None else v)
+        return d
+
+    @classmethod
+    def from_row(cls, r: dict) -> "HistoricalEvent":
+        def dt(x):
+            t = datetime.fromisoformat(str(x).replace("Z", "+00:00").replace(" ", "T"))
+            return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        ts = dt(r["timestamp"])
+        pub = dt(r["published_at"]) if r.get("published_at") else ts
+        num = lambda k: _num(r.get(k))  # noqa: E731
+        return cls(ts, pub, r.get("event_id") or f"{r.get('event', 'EV')}_{ts:%Y%m%d%H%M}", r.get("event", ""), r.get("country", "US"), r.get("currency", "USD"),
+                   r.get("impact", "ALTO"), num("forecast"), num("previous"), num("actual"), num("revised"), num("surprise"), r.get("category", "MACRO"),
+                   r.get("kind") or "generic", r.get("source", ""), r.get("headline", ""), r.get("sentiment", ""), num("xau_effect"), num("us500_effect"),
+                   num("eurusd_effect"), num("usdjpy_effect"), num("wti_effect"), r.get("effect_source") or "rule", r.get("surprise_basis") or "forecast", num("tone"), num("volume"))
+
+
+class EventHistory:
+    def __init__(self, events: Sequence[HistoricalEvent] = ()) -> None:
+        self.events: list[HistoricalEvent] = sorted(events, key=lambda e: e.published_at)
+
+    def __len__(self) -> int:
+        return len(self.events)
+
+    def add(self, ev: HistoricalEvent) -> None:
+        self.events.append(ev)
+        self.events.sort(key=lambda e: e.published_at)
+
+    def available_at(self, t: datetime, lookback_hours: float = 24.0) -> list[HistoricalEvent]:
+        """POINT-IN-TIME: só o que estava publicado em t (published_at ≤ t) e ocorreu nas últimas `lookback_hours`."""
+        lo = t - timedelta(hours=lookback_hours)
+        out = [e for e in self.events if e.published_at <= t and lo <= e.timestamp <= t]
+        # revisão: para o mesmo event_id fica a linha publicada mais recentemente até t
+        latest: dict[str, HistoricalEvent] = {}
+        for e in out:
+            latest[e.event_id] = e
+        return sorted(latest.values(), key=lambda e: e.timestamp)
+
+    def upcoming_at(self, t: datetime, ahead_hours: float = 48.0) -> list[HistoricalEvent]:
+        """Eventos futuros já agendados (consenso conhecido, sem actual) — calendário de risco."""
+        hi = t + timedelta(hours=ahead_hours)
+        return [HistoricalEvent(e.timestamp, e.published_at, e.event_id, e.event, e.country, e.currency, e.impact, e.forecast, e.previous, None, None, None,
+                                e.category, e.kind, e.source) for e in self.events if t < e.timestamp <= hi]
+
+    def snapshot_inputs(self, t: datetime, lookback_hours: float = 24.0) -> tuple[list[EconomicEvent], list[NewsItem]]:
+        avail = self.available_at(t, lookback_hours)
+        events = [e.to_economic_event() for e in avail if e.actual is not None or e.category in ("MACRO", "CENTRAL_BANK")]
+        events += [e.to_economic_event() for e in self.upcoming_at(t)]
+        news = [e.to_news_item() for e in avail if e.headline or e.category in ("NEWS", "GEOPOLITICAL", "ENERGY", "CHINA")]
+        return events, news
+
+    def stats(self) -> str:
+        if not self.events:
+            return "histórico vazio"
+        by_cat: dict[str, int] = {}
+        for e in self.events:
+            by_cat[e.category] = by_cat.get(e.category, 0) + 1
+        with_actual = sum(1 for e in self.events if e.actual is not None)
+        revised = sum(1 for e in self.events if e.revised is not None)
+        emp = sum(1 for e in self.events if e.effect_source == "empirical")
+        return (f"{len(self.events)} registros · {self.events[0].timestamp:%Y-%m-%d} → {self.events[-1].timestamp:%Y-%m-%d} · com actual {with_actual} · revisões {revised} · "
+                f"efeitos empíricos {emp} · por categoria: " + ", ".join(f"{k} {v}" for k, v in sorted(by_cat.items())))
+
+
+# --------------------------------------------------------------------------- CSV
+def load_history(path: str) -> EventHistory:
+    with open(path, encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    return EventHistory([HistoricalEvent.from_row(r) for r in rows if r.get("timestamp")])
+
+
+def save_history(hist: EventHistory, path: str) -> int:
+    cols = HistoricalEvent.columns()
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for e in hist.events:
+            w.writerow(e.to_row())
+    return len(hist.events)
+
+
+def merge(a: EventHistory, b: EventHistory) -> EventHistory:
+    seen = {(e.event_id, e.published_at) for e in a.events}
+    out = list(a.events) + [e for e in b.events if (e.event_id, e.published_at) not in seen]
+    return EventHistory(out)
+
+
+# --------------------------------------------------------------------------- efeitos: regras → empíricos
+def rule_direction(kind: str, sign: float, sigma: Optional[float], market: str) -> float:
+    """Direção esperada (−1..+1) por regra macro: canais de transmissão do evento × sensibilidade do mercado."""
+
+    chans = TRANSMISSION.get(kind) or EXTRA_TRANSMISSION.get(kind)
+    if not chans or sign == 0.0:
+        return 0.0
+    mag = min(1.0, abs(sigma) / 2.0) if sigma is not None else 1.0
+    weights = CHANNEL_TO_MARKET.get(market, {})
+    total = sum(sign * v * mag * weights.get(c, 0.0) for c, v in chans.items())
+    norm = sum(abs(w) for c, w in weights.items() if c in chans) or 1.0
+    return max(-1.0, min(1.0, total / norm))
+
+
+def apply_rule_effects(hist: EventHistory) -> int:
+    """Direção esperada por ativo a partir das regras macro (mesmas do NEWS ENGINE). Não toca efeitos empíricos."""
+    n = 0
+    for e in hist.events:
+        if e.effect_source == "empirical":
+            continue
+        sign, sigma = 0.0, None
+        if e.surprise is not None:
+            typical = TYPICAL.get(e.kind, max(abs(e.forecast or e.previous or 1.0) * 0.1, 0.1))
+            sigma = e.surprise / typical if typical else None
+            sign = 1.0 if e.surprise > 0 else -1.0 if e.surprise < 0 else 0.0
+        elif e.kind in ("fomc_hawkish", "fomc_dovish", "geopolitical_escalation", "geopolitical_deescalation", "systemic_stress", "oil_supply_cut",
+                        "oil_supply_increase", "cb_gold_buying", "china_stimulus"):
+            sign = 1.0
+        if sign == 0.0:
+            continue
+        for m in EFFECT_MARKETS:
+            setattr(e, EFFECT_FIELD[m], round(rule_direction(e.kind, sign, sigma, m), 3))
+        e.effect_source = "rule"
+        n += 1
+    return n
+
+
+def learn_effects(hist: EventHistory, prices: dict[str, Sequence[tuple[datetime, float]]], horizon_min: int = 60, min_n: int = 8) -> dict:
+    """Deixa o histórico determinar o impacto: para cada (kind, sinal da surpresa) e mercado, mede a direção média do
+    preço `horizon_min` depois do evento (em fração de ATR aproximada pelo desvio típico) e a taxa de acerto da regra.
+    Substitui os efeitos por valores empíricos quando há amostra suficiente."""
+    def move_after(series, t0):
+        pts = [(t, p) for t, p in series if t >= t0]
+        if not pts:
+            return None
+        p0 = pts[0][1]
+        after = [p for t, p in pts if t <= t0 + timedelta(minutes=horizon_min)]
+        return ((after[-1] / p0 - 1.0) * 100.0) if len(after) > 1 and p0 else None
+    groups: dict[tuple[str, int, str], list[float]] = {}
+    for e in hist.events:
+        if e.surprise is None and e.category == "MACRO":
+            continue
+        sgn = 1 if (e.surprise or 0) > 0 else -1 if (e.surprise or 0) < 0 else 0
+        for m, series in prices.items():
+            mv = move_after(series, e.timestamp)
+            if mv is not None:
+                groups.setdefault((e.kind, sgn, m), []).append(mv)
+    table: dict = {}
+    for (kind, sgn, m), moves in groups.items():
+        if len(moves) < min_n:
+            continue
+        avg = statistics.fmean(moves)
+        sd = statistics.pstdev(moves) or 1.0
+        up = sum(1 for x in moves if x > 0) / len(moves)
+        table[(kind, sgn, m)] = {"n": len(moves), "avg_move_pct": round(avg, 3), "p_up": round(up, 2), "effect": round(max(-1.0, min(1.0, avg / sd)), 3)}
+    applied = 0
+    for e in hist.events:
+        sgn = 1 if (e.surprise or 0) > 0 else -1 if (e.surprise or 0) < 0 else 0
+        touched = False
+        for m in EFFECT_MARKETS:
+            row = table.get((e.kind, sgn, m))
+            if row:
+                setattr(e, EFFECT_FIELD[m], row["effect"])
+                touched = True
+        if touched:
+            e.effect_source = "empirical"
+            applied += 1
+    return {"table": table, "applied": applied}
+
+
+def render_effect_table(table: dict) -> str:
+    if not table:
+        return "efeitos empíricos: amostra insuficiente (mínimo 8 eventos por tipo/sinal/mercado)"
+    lines = ["📚 EFEITO EMPÍRICO POR EVENTO (direção média do preço 60 min após, por mercado)", f"{'evento':<18}{'surpresa':>9}{'mercado':>9}{'n':>5}{'mov.médio':>11}{'P(sobe)':>9}{'efeito':>8}"]
+    for (kind, sgn, m), r in sorted(table.items()):
+        lines.append(f"{kind:<18}{('acima' if sgn > 0 else 'abaixo' if sgn < 0 else 'em linha'):>9}{m:>9}{r['n']:>5}{r['avg_move_pct']:>+10.2f}%{r['p_up']:>8.0%}{r['effect']:>+8.2f}")
+    return "\n".join(lines)
+
+
+# ============================================================================
+# DATA · HISTORY_SOURCES
+# ============================================================================
+
+"""IMPORTADORES do banco histórico de eventos/notícias (point-in-time).
+
+  • TradingEconomicsImporter — calendário macro com actual/forecast/previous/revised (exige chave: TE_API_KEY).
+  • ALFREDImporter           — vintages do FRED (ALFRED): o valor INICIALMENTE publicado e as revisões, cada uma com a data
+                               em que passou a existir (exige chave gratuita: FRED_API_KEY). Sem consenso → surpresa vs anterior.
+  • GDELTImporter            — manchetes + tom + volume por tema (aberto, sem chave) → TESTE B (news/geopolítica/China/petróleo).
+
+Nada aqui inventa efeito: o efeito por ativo nasce das regras macro (history.apply_rule_effects) e é substituído
+pelo que o histórico mostrar (history.learn_effects).
+"""
+
+
+import zlib
+from urllib.parse import quote
+
+
+TE_BASE = "https://api.tradingeconomics.com"
+FRED_API = "https://api.stlouisfed.org/fred/series/observations"
+GDELT_DOC = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+TE_IMPORTANCE = {3: "MUITO ALTO", 2: "MÉDIO", 1: "BAIXO"}
+CATEGORY_BY_KIND = {"fomc": "CENTRAL_BANK", "speech": "CENTRAL_BANK", "ecb": "CENTRAL_BANK", "boj": "CENTRAL_BANK", "oil_inventories": "ENERGY",
+                    "oil_supply_cut": "ENERGY", "china": "CHINA"}
+
+
+def _iso(t: datetime) -> datetime:
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def us_release_time(d: date, hour_et: int = 8, minute: int = 30) -> datetime:
+    """Horário UTC de uma divulgação às hour_et:minute (hora de Nova York), respeitando o horário de verão dos EUA."""
+    def nth_sunday(year: int, month: int, n: int) -> date:
+        first = date(year, month, 1)
+        off = (6 - first.weekday()) % 7
+        return first + timedelta(days=off + 7 * (n - 1))
+    dst_start, dst_end = nth_sunday(d.year, 3, 2), nth_sunday(d.year, 11, 1)
+    offset = 4 if dst_start <= d < dst_end else 5
+    return datetime(d.year, d.month, d.day, hour_et + offset, minute, tzinfo=timezone.utc)
+
+
+# --------------------------------------------------------------------------- Trading Economics
+class TradingEconomicsImporter:
+    def __init__(self, http, api_key: str) -> None:
+        self.http, self.key = http, api_key
+
+    def fetch(self, start: date, end: date, country: str = "united states") -> EventHistory:
+        url = f"{TE_BASE}/calendar/country/{quote(country)}/{start:%Y-%m-%d}/{end:%Y-%m-%d}?c={self.key}&f=json"
+        rows = self.http.get_json(url, ttl=24 * 3600)
+        return self.parse(rows)
+
+    @staticmethod
+    def parse(rows: list[dict]) -> EventHistory:
+        out: list[HistoricalEvent] = []
+        for r in rows or []:
+            try:
+                ts = _iso(datetime.fromisoformat(str(r.get("Date")).replace("Z", "")))
+            except (TypeError, ValueError):
+                continue
+            name = str(r.get("Event") or r.get("Category") or "")
+            kind = kind_from_name(name) if kind_from_name(name) != "generic" else kind_from_name(str(r.get("Category") or ""))
+            imp = TE_IMPORTANCE.get(int(r.get("Importance") or 0), "BAIXO")
+            actual, forecast, previous, revised = _num(r.get("Actual")), _num(r.get("Forecast") or r.get("TEForecast")), _num(r.get("Previous")), _num(r.get("Revised"))
+            ev_id = f"TE_{r.get('CalendarId') or name.replace(' ', '_')}_{ts:%Y%m%d%H%M}"
+            cat = CATEGORY_BY_KIND.get(kind, "MACRO")
+            out.append(HistoricalEvent(ts, ts, ev_id, name, str(r.get("Country") or "US"), str(r.get("Currency") or "USD"), imp, forecast, previous, actual, None,
+                                       None, cat, kind, "tradingeconomics"))
+            # REVISÃO: o valor anterior foi revisto nesta divulgação → linha nova, publicada AGORA, para o evento anterior
+            if revised is not None and previous is not None and revised != previous:
+                out.append(HistoricalEvent(ts, ts, f"{ev_id}_REVISAO", f"{name} (revisão do anterior)", str(r.get("Country") or "US"), str(r.get("Currency") or "USD"),
+                                           "BAIXO", previous, previous, revised, revised, None, cat, kind, "tradingeconomics"))
+        return EventHistory(out)
+
+
+# --------------------------------------------------------------------------- ALFRED (FRED vintages)
+ALFRED_SERIES: dict[str, tuple[str, str, str]] = {
+    # série: (nome do evento, kind, transformação para a unidade que o mercado lê)
+    "CPIAUCSL": ("CPI MoM", "cpi", "pct"),
+    "CPILFESL": ("Core CPI MoM", "core_cpi", "pct"),
+    "PCEPILFE": ("Core PCE MoM", "core_pce", "pct"),
+    "PPIFIS": ("PPI MoM", "ppi", "pct"),
+    "PAYEMS": ("Nonfarm Payrolls (K)", "nfp", "diff"),
+    "UNRATE": ("Unemployment Rate", "unemployment", "level"),
+    "ICSA": ("Initial Jobless Claims (K)", "jobless_claims", "level_k"),
+    "RSAFS": ("Retail Sales MoM", "retail_sales", "pct"),
+    "GDPC1": ("GDP QoQ ann.", "gdp", "pct_ann"),
+    "CES0500000003": ("Average Hourly Earnings MoM", "earnings", "pct"),
+}
+
+
+class ALFREDImporter:
+    def __init__(self, http, api_key: str) -> None:
+        self.http, self.key = http, api_key
+
+    def fetch(self, start: date, end: date, series: Optional[list[str]] = None) -> EventHistory:
+        hist = EventHistory()
+        for sid in series or list(ALFRED_SERIES):
+            obs_start = start - timedelta(days=120)
+            url = (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
+                   f"&realtime_start={start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
+            payload = self.http.get_json(url, ttl=24 * 3600)
+            for e in self.parse(sid, payload.get("observations", []), start).events:
+                hist.add(e)
+        return hist
+
+    @staticmethod
+    def parse(sid: str, observations: list[dict], start: date) -> EventHistory:
+        name, kind, transform = ALFRED_SERIES.get(sid, (sid, "generic", "level"))
+        # vintage = realtime_start; para cada vintage, série completa (date → value)
+        vintages: dict[str, dict[str, float]] = {}
+        for o in observations:
+            v = _num(o.get("value"))
+            if v is None:
+                continue
+            vintages.setdefault(o["realtime_start"], {})[o["date"]] = v
+        first_seen: dict[str, tuple[str, float]] = {}      # data da observação → (vintage inicial, valor transformado)
+        out: list[HistoricalEvent] = []
+        for vint in sorted(vintages):
+            series = vintages[vint]
+            dates = sorted(series)
+            for i, d in enumerate(dates):
+                if i == 0 and transform in ("pct", "diff", "pct_ann"):
+                    continue
+                v, prev = series[d], series[dates[i - 1]] if i else None
+                if transform == "pct":
+                    val = round((v / prev - 1) * 100, 2) if prev else None
+                elif transform == "pct_ann":
+                    val = round(((v / prev) ** 4 - 1) * 100, 1) if prev else None
+                elif transform == "diff":
+                    val = round(v - prev, 0) if prev is not None else None
+                elif transform == "level_k":
+                    val = round(v / 1000.0, 0)
+                else:
+                    val = v
+                if val is None:
+                    continue
+                pub = datetime.fromisoformat(vint).date()
+                if pub < start:
+                    continue
+                if d not in first_seen:
+                    first_seen[d] = (vint, val)
+                    prev_val = first_seen.get(dates[i - 1], (None, None))[1] if i else None
+                    out.append(HistoricalEvent(us_release_time(pub), us_release_time(pub), f"ALFRED_{sid}_{d}", f"{name} ({d[:7]})", "US", "USD",
+                                               "MUITO ALTO" if kind in ("cpi", "core_cpi", "nfp", "core_pce") else "ALTO", None, prev_val, val, None,
+                                               (round(val - prev_val, 3) if prev_val is not None else None), "MACRO", kind, "alfred", surprise_basis="previous"))
+                elif first_seen[d][1] != val and vintages[first_seen[d][0]].get(d) is not None:
+                    # revisão: publicada na data desta vintage, mantém o event_id → substitui só a partir de published_at
+                    out.append(HistoricalEvent(us_release_time(datetime.fromisoformat(first_seen[d][0]).date()), us_release_time(pub), f"ALFRED_{sid}_{d}",
+                                               f"{name} ({d[:7]}) revisado", "US", "USD", "BAIXO", None, first_seen[d][1], val, val, None, "MACRO", kind, "alfred"))
+                    first_seen[d] = (first_seen[d][0], val)
+        return EventHistory(out)
+
+
+# --------------------------------------------------------------------------- GDELT
+GDELT_TOPICS: dict[str, tuple[str, str]] = {
+    # tema: (query GDELT, categoria)
+    "geopolitica": ('(war OR missile OR ceasefire OR sanctions OR "Middle East" OR Iran OR Israel OR Ukraine)', "GEOPOLITICAL"),
+    "petroleo": ('(OPEC OR "crude oil" OR "oil supply" OR "oil prices")', "ENERGY"),
+    "china": ('("China economy" OR PBOC OR "China stimulus" OR "Chinese exports")', "CHINA"),
+    "fed": ('("Federal Reserve" OR Powell OR FOMC OR "rate cut" OR "rate hike")', "CENTRAL_BANK"),
+    "risco": ('(recession OR "bank failure" OR "credit stress" OR "debt default" OR tariffs)', "NEWS"),
+}
+
+
+class GDELTImporter:
+    def __init__(self, http) -> None:
+        self.http = http
+
+    def _url(self, query: str, mode: str, start: datetime, end: datetime, extra: str = "") -> str:
+        return (f"{GDELT_DOC}?query={quote(query + ' sourcelang:english')}&mode={mode}&format=json"
+                f"&startdatetime={start:%Y%m%d%H%M%S}&enddatetime={end:%Y%m%d%H%M%S}{extra}")
+
+    def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 7, max_records: int = 100) -> EventHistory:
+        hist = EventHistory()
+        t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+        t_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
+        for topic in topics or list(GDELT_TOPICS):
+            query, cat = GDELT_TOPICS[topic]
+            t = t0
+            while t < t_end:
+                t1 = min(t + timedelta(days=chunk_days), t_end)
+                arts = self.http.get_json(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"), ttl=24 * 3600)
+                tone = self.http.get_json(self._url(query, "timelinetone", t, t1), ttl=24 * 3600)
+                vol = self.http.get_json(self._url(query, "timelinevolraw", t, t1), ttl=24 * 3600)
+                for e in self.parse(topic, cat, arts, tone, vol).events:
+                    hist.add(e)
+                t = t1
+        return hist
+
+    @staticmethod
+    def _timeline(payload: dict) -> list[tuple[datetime, float]]:
+        out = []
+        for series in (payload or {}).get("timeline", []):
+            for pt in series.get("data", []):
+                try:
+                    out.append((datetime.strptime(pt["date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc), float(pt.get("value", 0.0))))
+                except (KeyError, ValueError):
+                    continue
+        return sorted(out)
+
+    @staticmethod
+    def parse(topic: str, category: str, artlist: dict, tone: Optional[dict] = None, volume: Optional[dict] = None) -> EventHistory:
+        tones = GDELTImporter._timeline(tone or {})
+        vols = GDELTImporter._timeline(volume or {})
+
+        def nearest(series, t):
+            best = None
+            for ts, v in series:
+                if ts <= t:
+                    best = v
+                else:
+                    break
+            return best
+        out: list[HistoricalEvent] = []
+        seen: set[str] = set()
+        for a in (artlist or {}).get("articles", []):
+            title = str(a.get("title") or "").strip()
+            if not title:
+                continue
+            try:
+                ts = datetime.strptime(a["seendate"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            except (KeyError, ValueError):
+                continue
+            key = re.sub(r"\W+", " ", title.lower())[:60]
+            if key in seen:
+                continue
+            seen.add(key)
+            kind = next((k for pat, k, _ in QUALITATIVE if re.search(pat, title.lower())), "generic")
+            tn, vl = nearest(tones, ts), nearest(vols, ts)
+            sentiment = "" if tn is None else ("POSITIVE" if tn > 1.0 else "NEGATIVE" if tn < -1.0 else "NEUTRAL")
+            out.append(HistoricalEvent(ts, ts, f"GDELT_{topic}_{ts:%Y%m%d%H%M}_{zlib.crc32(key.encode()) % 10000:04d}", f"{topic}: {title[:60]}", "GLOBAL", "", "MÉDIO",
+                                       None, None, None, None, None, category, kind, f"gdelt/{a.get('domain', '')}", title[:160], sentiment, tone=tn, volume=vl))
+        return EventHistory(out)
+
+
+# ============================================================================
 # EXECUTION
 # ============================================================================
 
@@ -6027,6 +6577,9 @@ class HistoryFrame:
     real_yield_daily: list[tuple[datetime, float]] = field(default_factory=list)  # FRED DFII10 (%)
     fedfunds: list[Candle] = field(default_factory=list)      # ZQ=F (30-day Fed Funds futures): 100 − preço = taxa implícita
     breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
+    symbol: str = "XAUUSD"                                     # mercado (para o NEWS ENGINE por mercado)
+    events: Optional[object] = None                            # history.EventHistory (banco point-in-time de eventos/notícias)
+    news_mode: str = "full"                                    # none | macro | full — o que do banco o cérebro pode ver
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -6083,7 +6636,26 @@ class HistoryFrame:
                     s.real_yield_change_bp = (pts[-1][1] - pts[-2][1]) * 100
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
+        self._attach_events(s, t)
         return s
+
+    def _attach_events(self, s: MarketSnapshot, t: datetime) -> None:
+        """BANCO HISTÓRICO point-in-time: só o que estava publicado em t. Modo none = preço somente;
+        macro = calendário (releases/bancos centrais); full = calendário + manchetes/tom (GDELT)."""
+        if self.events is None or self.news_mode == "none" or len(self.events) == 0:
+            return
+
+        events, news = self.events.snapshot_inputs(t)
+        if self.news_mode == "macro":
+            news = []
+        s.events = events
+        identified = EventIdentifier().identify(news, events, t)
+        na = NewsEngine().assess(self.symbol, s, identified, t)
+        s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
+        if self.news_mode == "full":
+            tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
+            if tones:
+                s.sentiment = max(-1.0, min(1.0, sum(tones) / len(tones) / 10.0))
 
 
 @dataclass
@@ -7335,6 +7907,139 @@ def threshold_sweep(bt: Backtester, floors: Sequence[float] = DEFAULT_FLOORS, n_
 
 
 # ============================================================================
+# ABLATION
+# ============================================================================
+
+"""TESTE A/B — o que a informação adiciona ao cérebro (MARKET AI 4.0).
+
+Mesmo período, mesmo walk-forward, mesmo piso; muda só o que o cérebro pode ver:
+  • Preço somente            — sem banco histórico (news_mode = none)
+  • Preço + Macro (TESTE A)  — calendário macro/bancos centrais point-in-time (news_mode = macro)
+  • Preço + Macro + News (B) — + manchetes, tom e intensidade (GDELT) (news_mode = full)
+
+Se a informação cria a oportunidade, entradas e expectancy sobem SEM mexer no funil. Só depois recalibra-se o piso.
+"""
+
+
+
+
+MODES: tuple[tuple[str, str], ...] = (("none", "Preço somente"), ("macro", "Preço + Macro (A)"), ("full", "Preço + Macro + News (B)"))
+
+
+@dataclass
+class ModeResult:
+    market: str
+    mode: str
+    label: str
+    metrics: FloorMetrics
+    steps: int
+    steps_with_info: int
+    news_known_steps: int
+
+    @property
+    def info_share(self) -> float:
+        return self.steps_with_info / self.steps if self.steps else 0.0
+
+    def row(self) -> str:
+        m = self.metrics
+        pf = "n/d" if m.profit_factor is None else ("∞" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}")
+        cap = "n/d" if m.capture is None else f"{m.capture:.0%}"
+        return (f"{self.market:<8}{self.label:<27}{self.steps:>7}{self.info_share:>8.0%}{m.n:>9}{m.per_day:>8.2f}{cap:>9}{m.expectancy:>+12.2f}R{pf:>7}"
+                f"{m.max_dd_pct:>7.1f}%{m.win_rate:>7.0%}")
+
+
+@dataclass
+class AblationReport:
+    start: str
+    end: str
+    history_stats: str
+    results: list[ModeResult] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def by_market(self) -> dict[str, dict[str, ModeResult]]:
+        out: dict[str, dict[str, ModeResult]] = {}
+        for r in self.results:
+            out.setdefault(r.market, {})[r.mode] = r
+        return out
+
+    def verdicts(self) -> list[str]:
+        lines = []
+        for mkt, modes in self.by_market().items():
+            base = modes.get("none")
+            if base is None:
+                continue
+            for mode, label in MODES[1:]:
+                r = modes.get(mode)
+                if r is None:
+                    continue
+                if r.steps_with_info == 0:
+                    lines.append(f"{mkt} · {label}: banco sem cobertura neste período (0 passos com informação) — nada a concluir; rode `history stats`.")
+                    continue
+                d_exp = r.metrics.expectancy - base.metrics.expectancy
+                d_n = r.metrics.n - base.metrics.n
+                n = min(r.metrics.n, base.metrics.n)
+                strength = "⚪ inconclusivo (amostra < 30)" if n < 30 else ("🟢 melhora" if d_exp > 0.05 else "🔴 piora" if d_exp < -0.05 else "🟡 sem diferença")
+                lines.append(f"{mkt} · {label}: entradas {base.metrics.n} → {r.metrics.n} ({d_n:+d}), expectancy {base.metrics.expectancy:+.2f}R → "
+                             f"{r.metrics.expectancy:+.2f}R ({d_exp:+.2f}R), cobertura {r.info_share:.0%} dos passos · {strength}")
+        return lines
+
+    def render(self) -> str:
+        head = (f"🧪 TESTE A/B — O QUE A INFORMAÇÃO ADICIONA · {self.start} → {self.end} (walk-forward OOS, mesmo piso, mesma janela)\n"
+                f"banco histórico: {self.history_stats}\n\n"
+                f"{'mercado':<8}{'modo':<27}{'passos':>7}{'c/info':>8}{'entradas':>9}{'ent/dia':>8}{'capture':>9}{'expectancy':>13}{'PF':>7}{'DD':>8}{'acerto':>7}")
+        rows = [r.row() for r in self.results]
+        out = [head] + rows + ["", "LEITURA (Preço somente = referência):"] + [f"  • {v}" for v in self.verdicts()]
+        if self.notes:
+            out += ["", "NOTAS:"] + [f"  • {n}" for n in self.notes]
+        out += ["", "REGRA: se a informação cria entradas com expectancy ≥ referência, ela fica; o funil só é recalibrado depois (`sweep`).",
+                "       Efeitos por ativo: regras macro até `history learn` substituí-los pelo que o histórico mostrou (nunca inventados)."]
+        return "\n".join(out)
+
+
+def _info_steps(results, hist: EventHistory, mode: str) -> tuple[int, int]:
+    """Passos OOS (um por decisão do backtest) e quantos deles tinham evento/notícia publicada naquele instante."""
+    total, with_info = 0, 0
+    for res in results:
+        for d in res.decisions:
+            total += 1
+            if mode == "none":
+                continue
+            avail = hist.available_at(d.time)
+            if mode == "macro":
+                avail = [e for e in avail if e.category in ("MACRO", "CENTRAL_BANK")]
+            if avail:
+                with_info += 1
+    return total, with_info
+
+
+def compare_information(frames: dict[str, HistoryFrame], hist: EventHistory, start: datetime, end: datetime, equity: float = 10000.0, risk_pct: float = 0.5,
+                        n_folds: int = 4, step: int = 1, warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive",
+                        cfg_factory: Optional[Callable[[str], EngineConfig]] = None, modes: tuple[str, ...] = ("none", "macro", "full"),
+                        log: Optional[Callable[[str], None]] = None) -> AblationReport:
+    rep = AblationReport(f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}", hist.stats())
+    labels = dict(MODES)
+    for symbol, frame in frames.items():
+        spec = get_market(symbol)
+        for mode in modes:
+            cfg = cfg_factory(symbol) if cfg_factory else EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
+            frame.symbol, frame.events, frame.news_mode = symbol, (hist if mode != "none" else None), mode
+            bt = Backtester(frame, cfg, warmup=warmup, step=step, horizon_min=horizon_min)
+            wf = walk_forward(bt, n_folds=n_folds)
+            results = [res for _, res in wf.folds]
+            m = _metrics(results, cfg.min_edge_score, strategy, equity, risk_pct)
+            steps, with_info = _info_steps(results, hist, mode)
+            rep.results.append(ModeResult(symbol, mode, labels[mode], m, steps, with_info, with_info))
+            if log:
+                log(f"{symbol} · {labels[mode]}: {m.n} entradas OOS, expectancy {m.expectancy:+.2f}R")
+        frame.events, frame.news_mode = None, "full"
+    if not any(r.steps_with_info for r in rep.results if r.mode != "none"):
+        rep.notes.append("Nenhum passo do backtest teve evento/notícia disponível: o banco não cobre o período ou não foi carregado.")
+    rep.notes.append("Reação real medida no fechamento do candle H1 seguinte ao evento (12:30 → 13:00); a sequência 12:29→12:31→12:35 exige histórico M1/M5.")
+    rep.notes.append("Sem consenso (ALFRED) a surpresa é vs. o dado anterior; com Trading Economics é vs. o consenso — a regra macro lê a surpresa, não o nível.")
+    return rep
+
+
+# ============================================================================
 # LIVE_ENGINE
 # ============================================================================
 
@@ -8055,9 +8760,19 @@ def _load_frame(args: argparse.Namespace):
                 out.append(Candle(t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r.get("volume") or 0)))
         return sorted(out, key=lambda c: c.time)
 
+    def attach(frame):
+        """BANCO HISTÓRICO point-in-time (--events dados/noticias_historicas.csv): o cérebro só vê o que estava publicado em cada passo."""
+        frame.symbol = (getattr(args, "market", None) or getattr(args, "market_symbol", None) or "XAUUSD").upper()
+        path = getattr(args, "events", None)
+        if path:
+            frame.events = load_history(path)
+            frame.news_mode = getattr(args, "news_mode", None) or "full"
+            print(f"banco histórico: {frame.events.stats()} · modo {frame.news_mode}")
+        return frame
+
     if args.csv:
-        return HistoryFrame(xau=read_csv(args.csv), dxy=read_csv(args.dxy_csv) if args.dxy_csv else [],
-                            us10y=read_csv(args.us10y_csv) if args.us10y_csv else [])
+        return attach(HistoryFrame(xau=read_csv(args.csv), dxy=read_csv(args.dxy_csv) if args.dxy_csv else [],
+                                   us10y=read_csv(args.us10y_csv) if args.us10y_csv else []))
     y = YahooCollector(HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=900))
     start, end = getattr(args, "start", None), getattr(args, "end", None)
     if start:
@@ -8078,7 +8793,7 @@ def _load_frame(args: argparse.Namespace):
             frame.breakeven_daily = [(datetime(d.year, d.month, d.day, tzinfo=timezone.utc), v) for d, v in fred.series("T10YIE")]
         except Exception as e:  # noqa: BLE001
             print(f"(FRED indisponível: {e})")
-    return frame
+    return attach(frame)
 
 
 def cmd_live_markets(args: argparse.Namespace) -> int:
@@ -8166,6 +8881,7 @@ def _frames_for_markets(args: argparse.Namespace, markets: str) -> dict:
     for sym in (s.strip().upper() for s in markets.split(",") if s.strip()):
         ns = argparse.Namespace(**vars(args))
         ns.symbol = get_market(sym).yahoo
+        ns.market_symbol = sym
         csv_dir = getattr(args, "csv_dir", None)
         ns.csv = os.path.join(csv_dir, f"{sym}_h1.csv") if csv_dir else None
         ns.dxy_csv = os.path.join(csv_dir, "DXY_h1.csv") if csv_dir and os.path.exists(os.path.join(csv_dir, "DXY_h1.csv")) else None
@@ -8189,6 +8905,102 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
     rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
                           cfg_factory=factory)
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    """BANCO HISTÓRICO DE EVENTOS/NOTÍCIAS (point-in-time): template · fetch-te · fetch-alfred · fetch-gdelt · rules · learn · stats."""
+
+    env = load_env_file()
+    path = args.file
+    exists = os.path.exists(path)
+    hist = load_history(path) if exists else EventHistory()
+    start = date.fromisoformat(args.start) if args.start else date(2026, 1, 1)
+    end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date()
+    if args.action == "template":
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        ex = HistoricalEvent(datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc), datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc), "EXEMPLO_CPI_202601",
+                             "CPI MoM (exemplo — apague)", "US", "USD", "MUITO ALTO", 0.2, 0.3, 0.4, None, None, "MACRO", "cpi", "manual", "", "")
+        n = save_history(merge(hist, EventHistory([ex])) if not exists else hist, path)
+        print(f"template salvo em {path} ({n} linhas). Colunas: {', '.join(HistoricalEvent.columns())}")
+        print("Preencha com calendário (Investing/TE export) ou use fetch-te / fetch-alfred / fetch-gdelt. Datas em UTC (ISO 8601).")
+        return 0
+    if args.action == "stats":
+        print(hist.stats() if exists else f"{path} não existe — use `history template` ou um fetch-*")
+        if exists:
+            for m in EFFECT_MARKETS:
+                vals = [e.effect(m) for e in hist.events if e.effect(m) is not None]
+                print(f"  {m}: {len(vals)} eventos com efeito · favoráveis(↑) {sum(1 for v in vals if v > 0)} · contrários(↓) {sum(1 for v in vals if v < 0)}")
+        return 0
+    if args.action in ("fetch-te", "fetch-alfred", "fetch-gdelt"):
+        http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=24 * 3600)
+        if args.action == "fetch-te":
+            key = args.key or env.get("TE_API_KEY") or os.environ.get("TE_API_KEY")
+            if not key:
+                print("Trading Economics exige chave: --key ou TE_API_KEY no .env (https://tradingeconomics.com/api)")
+                return 1
+            new = TradingEconomicsImporter(http, key).fetch(start, end, args.country)
+        elif args.action == "fetch-alfred":
+            key = args.key or env.get("FRED_API_KEY") or os.environ.get("FRED_API_KEY")
+            if not key:
+                print("ALFRED/FRED exige chave gratuita: --key ou FRED_API_KEY no .env (https://fred.stlouisfed.org/docs/api/api_key.html)")
+                return 1
+            new = ALFREDImporter(http, key).fetch(start, end)
+        else:
+            topics = [t.strip() for t in args.topics.split(",")] if args.topics else None
+            new = GDELTImporter(http).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records)
+        print(f"{args.action}: {len(new)} registros obtidos ({new.stats()})")
+        hist = merge(hist, new)
+        apply_rule_effects(hist)
+        n = save_history(hist, path)
+        print(f"salvo: {path} · {n} linhas · {hist.stats()}")
+        return 0
+    if not exists:
+        print(f"{path} não existe — use `history template` ou um fetch-*")
+        return 1
+    if args.action == "rules":
+        n = apply_rule_effects(hist)
+        save_history(hist, path)
+        print(f"efeitos por regra macro aplicados a {n} eventos (efeitos empíricos preservados) · salvo em {path}")
+        return 0
+    if args.action == "learn":
+        # efeitos empíricos: o histórico de preço (Yahoo/CSV) decide a direção média 60 min após cada evento
+        frames = _frames_for_markets(args, args.markets)
+        prices = {sym: [(c.time, c.close) for c in fr.xau] for sym, fr in frames.items()}
+        res = learn_effects(hist, prices, horizon_min=args.horizon, min_n=args.min_n)
+        print(render_effect_table(res["table"]))
+        print(f"\n{res['applied']} eventos passaram a usar efeito empírico (os demais mantêm a regra macro)")
+        save_history(hist, path)
+        print(f"salvo em {path}")
+        return 0
+    print(f"ação desconhecida: {args.action}")
+    return 1
+
+
+def cmd_compare_news(args: argparse.Namespace) -> int:
+    """TESTE A/B: Preço somente × Preço + Macro (A) × Preço + Macro + News (B) — mesma janela, mesmo piso, walk-forward OOS."""
+
+    if not os.path.exists(args.events):
+        print(f"banco histórico não encontrado: {args.events} — crie com `history template` / `history fetch-*`")
+        return 1
+    hist = load_history(args.events)
+    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
+    end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    args.events_path, args.events = args.events, None    # os frames são carregados SEM banco; a ablação liga/desliga por modo
+    frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+    if not frames:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
+    modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
+    rep = compare_information(frames, hist, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon,
+                              strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None))
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
@@ -8577,6 +9389,8 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
     es.add_argument("--out", default=None)
+    es.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    es.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     es.set_defaults(func=cmd_estimate)
 
     sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
@@ -8597,7 +9411,48 @@ def main(argv: list[str] | None = None) -> int:
     sw.add_argument("--no-fred", action="store_true")
     sw.add_argument("--out", default=None)
     sw.add_argument("-v", "--verbose", action="store_true")
+    sw.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    sw.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     sw.set_defaults(func=cmd_sweep)
+
+    hi = sub.add_parser("history", help="BANCO HISTÓRICO de eventos/notícias point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats")
+    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats"])
+    hi.add_argument("--file", default=os.path.join("dados", "noticias_historicas.csv"))
+    hi.add_argument("--start", default="2026-01-01")
+    hi.add_argument("--end", default=None)
+    hi.add_argument("--key", default=None, help="chave da API (ou TE_API_KEY / FRED_API_KEY no .env)")
+    hi.add_argument("--country", default="united states")
+    hi.add_argument("--topics", default=None, help="GDELT: geopolitica,petroleo,china,fed,risco (padrão: todos)")
+    hi.add_argument("--chunk-days", type=int, default=7)
+    hi.add_argument("--max-records", type=int, default=100, help="GDELT: manchetes por tema por janela")
+    hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
+    hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
+    hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")
+    hi.add_argument("--csv-dir", default=None)
+    hi.add_argument("--no-fred", action="store_true")
+    hi.set_defaults(func=cmd_history)
+
+    cn = sub.add_parser("compare-news", help="TESTE A/B: Preço somente × Preço + Macro (A) × Preço + Macro + News (B), walk-forward OOS, mesmo piso")
+    cn.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    cn.add_argument("--start", default="2026-01-01")
+    cn.add_argument("--end", default=None)
+    cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
+    cn.add_argument("--modes", default=None, help="none,macro,full (padrão: os três)")
+    cn.add_argument("--equity", type=float, default=10000.0)
+    cn.add_argument("--risk", type=float, default=None)
+    cn.add_argument("--strategy", default="adaptive")
+    cn.add_argument("--folds", type=int, default=4)
+    cn.add_argument("--step", type=int, default=1)
+    cn.add_argument("--horizon", type=int, default=240)
+    cn.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    cn.add_argument("--signal-score", type=float, default=None)
+    cn.add_argument("--min-confirmations", type=int, default=None)
+    cn.add_argument("--edge-confidence", type=float, default=None)
+    cn.add_argument("--no-fred", action="store_true")
+    cn.add_argument("--csv-dir", default=None)
+    cn.add_argument("--out", default=None)
+    cn.add_argument("-v", "--verbose", action="store_true")
+    cn.set_defaults(func=cmd_compare_news)
 
     ed = sub.add_parser("edge", help="4.0: LIVE EDGE — tabela diária por mercado a partir do que foi vivido (o teste definitivo)")
     ed.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
@@ -8636,6 +9491,8 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--walk-forward", action="store_true")
     bt.add_argument("--folds", type=int, default=4)
     bt.add_argument("--include-watch", action="store_true")
+    bt.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    bt.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     bt.set_defaults(func=cmd_backtest)
 
     mt = sub.add_parser("metrics", help="precisão/recall/MFE/MAE/lead time das previsões gravadas vs. preço real")
@@ -8667,6 +9524,8 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--markets", default=None, help="4.0: validação multi-mercado, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     va.add_argument("--csv-dir", default=None, help="pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv opcionais)")
     va.add_argument("--verbose-markets", action="store_true", help="imprime o relatório completo de cada mercado")
+    va.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    va.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     va.set_defaults(func=cmd_validate)
 
     si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy, oportunidades")
@@ -8687,6 +9546,8 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
     si.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     si.add_argument("--walk-forward", action="store_true")
+    si.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
+    si.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     si.set_defaults(func=cmd_simulate)
 
     ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")

@@ -438,3 +438,10 @@ Regras:
    esperada por mercado → reação real → divergência → pressão latente → score. Ausência de informação não
    é informação negativa: NEWS ausente = UNKNOWN, peso reduzido. COT = último dado válido com idade, peso
    decaindo. Só depois de o NEWS ENGINE funcionar de verdade se recalibra o funil.
+
+10. **BANCO HISTÓRICO POINT-IN-TIME** `[history, data/history_sources, ablation]`: antes de recalibrar
+    qualquer piso, o backtest recebe a mesma informação que o live — calendário macro com consenso/real/
+    revisões (Trading Economics, ALFRED) e manchetes com tom e intensidade (GDELT) — vendo em cada instante
+    apenas o que estava publicado (`published_at ≤ t`). TESTE A (Preço + Macro) e TESTE B (Preço + Macro +
+    News) contra Preço somente, no mesmo walk-forward. Se a informação cria entradas com expectancy ≥ referência,
+    ela fica; os efeitos por ativo nascem das regras macro e são substituídos pelos empíricos, nunca inventados.

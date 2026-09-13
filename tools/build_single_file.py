@@ -18,7 +18,7 @@ VERSION = "4.0.0"
 
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "trading", "monitor",
-         "markets", "news_engine", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "live_engine", "data/multi", "market_engine", "cli"]
+         "markets", "news_engine", "history", "data/history_sources", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "ablation", "live_engine", "data/multi", "market_engine", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
 """MARKET AI ENGINE 4.0 — cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade.
@@ -54,6 +54,8 @@ Uso (4.0, multi-mercado):
     python market_ai_engine_v4.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
     python market_ai_engine_v4.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000   # estimativa de lucro OOS
     python market_ai_engine_v4.py sweep --start 2026-01-01 --market US500        # piso de vantagem escolhido no treino de cada fold
+    python market_ai_engine_v4.py history fetch-alfred|fetch-te|fetch-gdelt      # banco histórico point-in-time de eventos/notícias
+    python market_ai_engine_v4.py compare-news --start 2026-01-01 --markets US500,XAUUSD   # Preço só × +Macro (A) × +Macro+News (B)
     python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
     python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
 Uso (3.0, um mercado):
@@ -81,7 +83,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum

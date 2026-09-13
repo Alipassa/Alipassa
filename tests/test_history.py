@@ -1,0 +1,223 @@
+"""Testes — banco histórico point-in-time de eventos/notícias, importadores e TESTE A/B."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from datetime import date, datetime, timedelta, timezone
+
+from gold_ai.ablation import compare_information
+from gold_ai.data.history_sources import ALFREDImporter, GDELTImporter, TradingEconomicsImporter, us_release_time
+from gold_ai.evaluation import Backtester, HistoryFrame
+from gold_ai.history import EventHistory, HistoricalEvent, apply_rule_effects, learn_effects, load_history, merge, render_effect_table, save_history
+from gold_ai.sources.sample import make_candles
+from tests.test_v2 import FakeHttp
+
+UTC = timezone.utc
+T0 = datetime(2026, 1, 14, 13, 30, tzinfo=UTC)
+
+
+def cpi(actual=0.4, forecast=0.2, published=None, event_id="CPI_202601", **kw) -> HistoricalEvent:
+    return HistoricalEvent(T0, published or T0, event_id, "CPI MoM", "US", "USD", "MUITO ALTO", forecast, 0.3, actual, category="MACRO", kind="cpi", **kw)
+
+
+class PointInTimeTests(unittest.TestCase):
+    def test_nothing_visible_before_publication(self):
+        h = EventHistory([cpi()])
+        self.assertEqual(h.available_at(T0 - timedelta(minutes=1)), [])
+        self.assertEqual(len(h.available_at(T0)), 1)
+        self.assertEqual(len(h.available_at(T0 + timedelta(hours=23))), 1)
+        self.assertEqual(h.available_at(T0 + timedelta(hours=25)), [])
+
+    def test_revision_only_after_its_own_publication(self):
+        first = cpi(actual=0.4)
+        revised = cpi(actual=0.3, published=T0 + timedelta(days=1, hours=2), revised=0.3)
+        h = EventHistory([revised, first])
+        self.assertEqual(h.available_at(T0 + timedelta(hours=2))[0].actual, 0.4)      # o valor inicialmente publicado
+        later = h.available_at(T0 + timedelta(days=1, hours=3), lookback_hours=48)
+        self.assertEqual(len(later), 1)
+        self.assertEqual(later[0].actual, 0.3)                                          # a revisão substitui só depois de publicada
+
+    def test_upcoming_events_have_no_actual(self):
+        h = EventHistory([cpi()])
+        events, news = h.snapshot_inputs(T0 - timedelta(hours=5))
+        self.assertEqual(len(events), 1)
+        self.assertIsNone(events[0].actual)                       # calendário futuro: consenso conhecido, resultado não
+        self.assertEqual(events[0].consensus, 0.2)
+        events, _ = h.snapshot_inputs(T0 + timedelta(minutes=30))
+        self.assertEqual(events[0].actual, 0.4)
+
+    def test_surprise_and_rule_effects(self):
+        e = cpi()
+        self.assertAlmostEqual(e.surprise, 0.2)
+        h = EventHistory([e])
+        self.assertEqual(apply_rule_effects(h), 1)
+        self.assertLess(e.effect("XAUUSD"), 0)        # CPI acima → juros/dólar ↑ → ouro ↓
+        self.assertLess(e.effect("US500"), 0)
+        self.assertGreater(e.effect("USDJPY"), 0)
+        self.assertEqual(e.effect_source, "rule")
+        # sem consenso: surpresa vs anterior, explicitada
+        e2 = HistoricalEvent(T0, T0, "NFP", "Nonfarm Payrolls", forecast=None, previous=150.0, actual=200.0, kind="nfp", surprise_basis="previous")
+        self.assertEqual(e2.surprise, 50.0)
+        self.assertEqual(e2.to_economic_event().consensus, 150.0)
+        e3 = HistoricalEvent(T0, T0, "X", "CPI MoM", forecast=None, previous=0.3, actual=0.4)
+        self.assertIsNone(e3.surprise)                # sem base declarada, nada é inventado
+        self.assertIsNone(e3.to_economic_event().consensus)
+
+    def test_csv_roundtrip_and_merge(self):
+        h = EventHistory([cpi(), HistoricalEvent(T0 + timedelta(hours=3), T0 + timedelta(hours=3), "G1", "geopolitica: Missile strike", "GLOBAL", "", "MÉDIO",
+                                                  category="GEOPOLITICAL", headline="Missile strike escalates conflict", sentiment="NEGATIVE", tone=-4.2, volume=1.3)])
+        apply_rule_effects(h)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "noticias_historicas.csv")
+            self.assertEqual(save_history(h, path), 2)
+            with open(path, encoding="utf-8") as f:
+                header = f.readline().strip()
+            for col in ("timestamp", "event_id", "forecast", "actual", "surprise", "xau_effect", "us500_effect", "eurusd_effect", "usdjpy_effect", "wti_effect", "headline", "sentiment"):
+                self.assertIn(col, header)
+            back = load_history(path)
+            self.assertEqual(len(back), 2)
+            self.assertAlmostEqual(back.events[0].effect("XAUUSD"), h.events[0].effect("XAUUSD"))
+            self.assertEqual(back.events[1].tone, -4.2)
+            merged = merge(back, EventHistory([cpi()]))
+            self.assertEqual(len(merged), 2)            # mesma (event_id, published_at) não duplica
+        self.assertIn("2 registros", h.stats())
+
+    def test_learn_effects_replaces_rules_when_history_shows(self):
+        events = [cpi(actual=0.4, event_id=f"CPI_{i}") for i in range(10)]
+        for i, e in enumerate(events):
+            e.timestamp = e.published_at = T0 + timedelta(days=i)
+        h = EventHistory(events)
+        apply_rule_effects(h)
+        # preço do ouro SOBE após cada CPI acima do consenso (contrário à regra) → o histórico manda
+        series = []
+        for e in events:
+            for k in range(0, 61, 15):
+                series.append((e.timestamp + timedelta(minutes=k), 2500.0 + k * 0.5))
+        res = learn_effects(h, {"XAUUSD": series}, horizon_min=60, min_n=8)
+        self.assertEqual(res["applied"], 10)
+        self.assertGreater(events[0].effect("XAUUSD"), 0)
+        self.assertEqual(events[0].effect_source, "empirical")
+        self.assertIn("cpi", render_effect_table(res["table"]))
+        self.assertEqual(apply_rule_effects(h), 0)     # regras não sobrescrevem o empírico
+
+
+class ImporterTests(unittest.TestCase):
+    def test_trading_economics_with_revision(self):
+        rows = [{"CalendarId": "1", "Date": "2026-01-14T13:30:00", "Country": "United States", "Category": "Inflation Rate", "Event": "Core Inflation Rate MoM",
+                 "Actual": "0.4%", "Previous": "0.3%", "Forecast": "0.2%", "Importance": 3, "Currency": "USD", "Revised": "0.2%"},
+                {"CalendarId": "2", "Date": "2026-01-16T15:00:00", "Event": "Fed Chair Powell Speech", "Actual": "", "Previous": "", "Forecast": "", "Importance": 2}]
+        h = TradingEconomicsImporter(FakeHttp({"tradingeconomics": rows}), "k").fetch(date(2026, 1, 1), date(2026, 1, 31))
+        self.assertEqual(len(h), 3)
+        main = next(e for e in h.events if e.event_id == "TE_1_202601141330")
+        self.assertEqual(main.kind, "core_cpi")
+        self.assertAlmostEqual(main.surprise, 0.2)
+        rev = next(e for e in h.events if e.event_id.endswith("_REVISAO"))
+        self.assertEqual(rev.actual, 0.2)
+        speech = next(e for e in h.events if e.kind == "speech")
+        self.assertEqual(speech.category, "CENTRAL_BANK")
+        self.assertIsNone(speech.actual)
+
+    def test_alfred_initial_print_then_revision(self):
+        obs = [
+            {"realtime_start": "2026-01-14", "realtime_end": "2026-02-10", "date": "2025-11-01", "value": "320.0"},
+            {"realtime_start": "2026-01-14", "realtime_end": "2026-02-10", "date": "2025-12-01", "value": "321.28"},
+            {"realtime_start": "2026-02-11", "realtime_end": "9999-12-31", "date": "2025-11-01", "value": "320.0"},
+            {"realtime_start": "2026-02-11", "realtime_end": "9999-12-31", "date": "2025-12-01", "value": "320.96"},   # revisão do dezembro
+            {"realtime_start": "2026-02-11", "realtime_end": "9999-12-31", "date": "2026-01-01", "value": "322.24"},
+        ]
+        h = ALFREDImporter(FakeHttp({"CPIAUCSL": {"observations": obs}}), "k").fetch(date(2026, 1, 1), date(2026, 3, 1), ["CPIAUCSL"])
+        dec = [e for e in h.events if e.event_id == "ALFRED_CPIAUCSL_2025-12-01"]
+        self.assertEqual(len(dec), 2)
+        first, rev = sorted(dec, key=lambda e: e.published_at)
+        self.assertAlmostEqual(first.actual, 0.4)                  # 321.28/320 − 1
+        self.assertEqual(first.published_at, us_release_time(date(2026, 1, 14)))
+        self.assertEqual(first.published_at.hour, 13)              # 8:30 ET em janeiro = 13:30 UTC
+        self.assertAlmostEqual(rev.actual, 0.3)
+        self.assertEqual(rev.published_at.date(), date(2026, 2, 11))
+        self.assertEqual(us_release_time(date(2026, 7, 3)).hour, 12)   # horário de verão
+        jan = next(e for e in h.events if e.event_id == "ALFRED_CPIAUCSL_2026-01-01")
+        self.assertEqual(jan.surprise_basis, "previous")
+        self.assertIsNotNone(jan.surprise)
+        # point-in-time: em 20/jan o dezembro vale 0.4; em 12/fev vale 0.3
+        pit = EventHistory(h.events)
+        self.assertAlmostEqual(pit.available_at(datetime(2026, 1, 15, tzinfo=UTC), 48)[0].actual, 0.4)
+        later = [e for e in pit.available_at(datetime(2026, 2, 12, tzinfo=UTC), 24 * 40) if e.event_id.endswith("2025-12-01")]
+        self.assertAlmostEqual(later[0].actual, 0.3)
+
+    def test_gdelt_headlines_tone_volume(self):
+        arts = {"articles": [{"title": "Missile strike escalates Middle East conflict", "seendate": "20260114T140000Z", "domain": "x.com"},
+                             {"title": "Missile strike escalates Middle East conflict", "seendate": "20260114T141500Z", "domain": "y.com"},   # duplicada
+                             {"title": "Ceasefire talks resume", "seendate": "20260115T090000Z", "domain": "z.com"}]}
+        tone = {"timeline": [{"series": "Average Tone", "data": [{"date": "20260114T120000Z", "value": -5.1}, {"date": "20260115T000000Z", "value": 2.0}]}]}
+        vol = {"timeline": [{"series": "Article Count", "data": [{"date": "20260114T120000Z", "value": 1.8}]}]}
+        http = FakeHttp({"mode=artlist": arts, "mode=timelinetone": tone, "mode=timelinevolraw": vol})
+        h = GDELTImporter(http).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        self.assertEqual(len(h), 2)
+        strike = next(e for e in h.events if "Missile" in e.headline)
+        self.assertEqual(strike.kind, "geopolitical_escalation")
+        self.assertEqual(strike.sentiment, "NEGATIVE")
+        self.assertEqual(strike.category, "GEOPOLITICAL")
+        self.assertAlmostEqual(strike.volume, 1.8)
+        cease = next(e for e in h.events if "Ceasefire" in e.headline)
+        self.assertEqual(cease.kind, "geopolitical_deescalation")
+        self.assertEqual(cease.sentiment, "POSITIVE")
+        # ids determinísticos entre execuções
+        h2 = GDELTImporter(http).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        self.assertEqual([e.event_id for e in h.events], [e.event_id for e in h2.events])
+
+
+class BacktestIntegrationTests(unittest.TestCase):
+    def _frame(self, end: datetime) -> HistoryFrame:
+        return HistoryFrame(xau=make_candles("H1", 900, 2500, 0.4, 6.0, end, seed=3), dxy=make_candles("H1", 900, 104, -0.002, 0.08, end, seed=4),
+                            us10y=make_candles("H1", 900, 4.2, -0.0005, 0.02, end, seed=5))
+
+    def _history(self, frame: HistoryFrame) -> EventHistory:
+        evs = []
+        for k, i in enumerate(range(250, len(frame.xau) - 10, 40)):
+            t = frame.xau[i].time
+            evs.append(HistoricalEvent(t, t, f"CPI_{k}", "CPI MoM", forecast=0.2, previous=0.3, actual=(0.4 if k % 2 else 0.0), kind="cpi", impact="MUITO ALTO"))
+            evs.append(HistoricalEvent(t + timedelta(hours=5), t + timedelta(hours=5), f"G_{k}", "geopolitica: strike", "GLOBAL", "", "MÉDIO", category="GEOPOLITICAL",
+                                       headline="Missile strike escalates conflict", sentiment="NEGATIVE", tone=-4.0))
+        h = EventHistory(evs)
+        apply_rule_effects(h)
+        return h
+
+    def test_snapshot_sees_only_published_and_modes_differ(self):
+        frame = self._frame(datetime(2026, 9, 14, 13, 0, tzinfo=UTC))
+        hist = self._history(frame)
+        frame.symbol, frame.events = "XAUUSD", hist
+        i = 250
+        frame.news_mode = "none"
+        self.assertEqual(frame.snapshot_at(i).news_status, "UNKNOWN")
+        frame.news_mode = "macro"
+        s = frame.snapshot_at(i)
+        self.assertIn(s.news_status, ("FAVORÁVEL", "CONTRÁRIO", "NEUTRO"))
+        self.assertTrue(s.events)
+        self.assertIsNone(s.sentiment)
+        self.assertEqual(frame.snapshot_at(i - 1).news_status, "UNKNOWN")      # uma hora antes: nada publicado
+        frame.news_mode = "full"
+        s_full = frame.snapshot_at(i + 5)
+        self.assertIsNotNone(s_full.sentiment)                                 # tom GDELT só no modo B
+        self.assertLess(s_full.sentiment, 0)
+
+    def test_backtest_runs_with_events_and_ablation_report(self):
+        end = datetime(2026, 9, 14, 13, 0, tzinfo=UTC)
+        frame = self._frame(end)
+        hist = self._history(frame)
+        frame.symbol, frame.events, frame.news_mode = "XAUUSD", hist, "full"
+        res = Backtester(frame, warmup=240, step=6).run()
+        self.assertGreater(res.n_steps, 50)
+        rep = compare_information({"XAUUSD": frame}, hist, frame.xau[0].time, end, n_folds=2, step=8, warmup=240)
+        self.assertEqual(len(rep.results), 3)
+        txt = rep.render()
+        for label in ("Preço somente", "Preço + Macro (A)", "Preço + Macro + News (B)", "LEITURA", "TESTE A/B"):
+            self.assertIn(label, txt)
+        macro = next(r for r in rep.results if r.mode == "macro")
+        self.assertGreater(macro.steps_with_info, 0)
+        self.assertIsNone(frame.events)          # a ablação devolve o frame como estava
+
+
+if __name__ == "__main__":
+    unittest.main()

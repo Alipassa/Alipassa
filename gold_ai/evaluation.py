@@ -229,6 +229,9 @@ class HistoryFrame:
     real_yield_daily: list[tuple[datetime, float]] = field(default_factory=list)  # FRED DFII10 (%)
     fedfunds: list[Candle] = field(default_factory=list)      # ZQ=F (30-day Fed Funds futures): 100 − preço = taxa implícita
     breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
+    symbol: str = "XAUUSD"                                     # mercado (para o NEWS ENGINE por mercado)
+    events: Optional[object] = None                            # history.EventHistory (banco point-in-time de eventos/notícias)
+    news_mode: str = "full"                                    # none | macro | full — o que do banco o cérebro pode ver
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -286,7 +289,27 @@ class HistoryFrame:
                     s.real_yield_change_bp = (pts[-1][1] - pts[-2][1]) * 100
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
+        self._attach_events(s, t)
         return s
+
+    def _attach_events(self, s: MarketSnapshot, t: datetime) -> None:
+        """BANCO HISTÓRICO point-in-time: só o que estava publicado em t. Modo none = preço somente;
+        macro = calendário (releases/bancos centrais); full = calendário + manchetes/tom (GDELT)."""
+        if self.events is None or self.news_mode == "none" or len(self.events) == 0:
+            return
+        from .news_engine import EventIdentifier, NewsEngine
+
+        events, news = self.events.snapshot_inputs(t)
+        if self.news_mode == "macro":
+            news = []
+        s.events = events
+        identified = EventIdentifier().identify(news, events, t)
+        na = NewsEngine().assess(self.symbol, s, identified, t)
+        s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
+        if self.news_mode == "full":
+            tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
+            if tones:
+                s.sentiment = max(-1.0, min(1.0, sum(tones) / len(tones) / 10.0))
 
 
 @dataclass

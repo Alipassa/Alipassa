@@ -105,6 +105,39 @@ NEWS → EVENT IDENTIFIER → IMPORTÂNCIA → EXPECTATIVA → SURPRESA → DIRE
 - **COT** é semanal: usa o último dado válido conhecido com a idade em dias; o peso decai após 10 dias e some após 35, sem
   derrubar o score inteiro quando a CFTC está fora do ar.
 
+## 🗄️ BANCO HISTÓRICO DE NOTÍCIAS/EVENTOS — point-in-time para o backtest
+
+O histórico H1 gratuito não tem notícias nem calendário; por isso o backtest via menos evidência do que o `live`. O banco
+`dados/noticias_historicas.csv` devolve ao cérebro, em cada passo, **só o que estava publicado naquele momento**:
+`timestamp` (quando saiu), `published_at` (quando passou a existir — revisões entram como linhas novas, publicadas depois),
+`event_id, event, country, currency, impact, forecast, previous, actual, revised, surprise, category, kind, source, headline,
+sentiment, xau_effect, us500_effect, eurusd_effect, usdjpy_effect, wti_effect, effect_source, surprise_basis, tone, volume`.
+
+```bash
+python market_ai_engine_v4.py history template                       # cria dados/noticias_historicas.csv (preencha ou importe)
+python market_ai_engine_v4.py history fetch-te --start 2026-01-01    # Trading Economics point-in-time (TE_API_KEY no .env)
+python market_ai_engine_v4.py history fetch-alfred                   # FRED/ALFRED: valor inicialmente publicado + revisões (FRED_API_KEY)
+python market_ai_engine_v4.py history fetch-gdelt                    # GDELT: manchetes, tom e intensidade por tema (aberto)
+python market_ai_engine_v4.py history rules                          # efeito por ativo a partir das regras macro
+python market_ai_engine_v4.py history learn --markets XAUUSD,US500   # efeito empírico: o preço 60 min depois decide (≥ 8 eventos)
+python market_ai_engine_v4.py history stats
+
+# TESTE A (macro) e TESTE B (macro + news): mesma janela, mesmo piso, walk-forward OOS
+python market_ai_engine_v4.py compare-news --start 2026-01-01 --markets US500,XAUUSD
+# qualquer comando histórico pode usar o banco
+python market_ai_engine_v4.py estimate --start 2026-01-01 --markets US500 --events dados/noticias_historicas.csv --news-mode macro
+python market_ai_engine_v4.py sweep --start 2026-01-01 --market US500 --events dados/noticias_historicas.csv
+```
+
+- **Sem look-ahead de revisão**: `published_at ≤ t` decide o que é visível; a revisão substitui o valor só depois de publicada.
+- **Surpresa** = real − consenso (Trading Economics). Sem consenso (ALFRED) a surpresa é vs. o dado anterior e fica marcada
+  em `surprise_basis`; sem base declarada, nada é inventado.
+- **Efeitos por ativo** nascem das regras macro do NEWS ENGINE (`effect_source=rule`) e são substituídos pelo que o histórico
+  mostrar (`history learn`, `effect_source=empirical`). Nunca inventados.
+- **Modos**: `none` (preço somente) · `macro` (calendário e bancos centrais = TESTE A) · `full` (+ manchetes/tom = TESTE B).
+- A reação real é medida no fechamento do candle H1 seguinte ao evento; a sequência 12:29 → 12:31 → 12:35 exige histórico M1/M5.
+- Só depois deste teste o funil é recalibrado (`sweep`, piso escolhido no treino de cada fold).
+
 ## Entrypoint único
 
 Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:
