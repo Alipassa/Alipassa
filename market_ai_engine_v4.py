@@ -6366,7 +6366,7 @@ class MarketEdge:
                 "confidence": self.confidence.level, "shrunk": self.confidence.shrunk, "status": self.status, "status_reason": self.status_reason}
 
 
-def edge_status(conf: StatConfidence, prob_observed: Optional[float], min_trades: int = 30) -> tuple[str, str]:
+def edge_status_from_stats(conf: StatConfidence, prob_observed: Optional[float], min_trades: int = 30) -> tuple[str, str]:
     if conf.n == 0:
         return "⚪", "sem operações resolvidas"
     if conf.n < min_trades:
@@ -6390,7 +6390,7 @@ def market_edge(mem, symbol: str, min_trades: int = 30) -> MarketEdge:
     prob_decl = statistics.fmean(p["probabilidade"] for p in preds) if preds else None
     prob_obs = (sum(1 for p in preds if p["resultado"] == "ACERTO") / len(preds)) if preds else None
     opp = mem.opportunity_report(symbol=symbol)
-    status, why = edge_status(conf, prob_obs, min_trades)
+    status, why = edge_status_from_stats(conf, prob_obs, min_trades)
     return MarketEdge(symbol, len(rs), round(conf.expectancy, 3), (len(wins) / len(rs)) if rs else 0.0, (round(pf, 2) if pf else None),
                       (round(prob_decl, 3) if prob_decl is not None else None), (round(prob_obs, 3) if prob_obs is not None else None), len(preds),
                       opp.capture_rate, opp.entry_rate, round(pnl, 2), conf, status, why)

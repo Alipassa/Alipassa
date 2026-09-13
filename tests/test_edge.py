@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from gold_ai import GoldAIEngine
-from gold_ai.edge_report import LiveEdgeReport, edge_status, edge_trend, live_edge_report, market_edge
+from gold_ai.edge_report import LiveEdgeReport, edge_status_from_stats as edge_status, edge_trend, live_edge_report, market_edge
 from gold_ai.guard import GuardLimits, TelegramCommands, KillSwitch, TradingMode
 from gold_ai.market_engine import MarketAIEngine
 from gold_ai.memory import PredictionMemory
