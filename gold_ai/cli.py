@@ -97,6 +97,11 @@ def _load_frame(args: argparse.Namespace):
                         vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
 
 
+def ManagedTradeFactory(trade_id, plan, thesis):
+    from .monitor import ManagedTrade
+    return ManagedTrade(trade_id, plan, thesis)
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Ciclo com DADOS REAIS (Yahoo/FRED/CFTC/RSS) → MarketSnapshot → GOLD AI → Telegram/SQLite."""
     from .data import DataEngine, DataEngineConfig
@@ -119,7 +124,8 @@ def cmd_live(args: argparse.Namespace) -> int:
     from .report import render_dashboard
     from .validation import IsotonicCalibrator
 
-    from .telegram import format_decision, load_env_file
+    from .monitor import TradeMonitor, Thesis, render_evolution, render_monitor
+    from .telegram import format_decision, format_monitor, load_env_file
     from .trading import PositionManager, RiskLimits, TradingMode
 
     limits = RiskLimits.from_env(load_env_file())
@@ -144,6 +150,11 @@ def cmd_live(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
     pm = PositionManager(mode, limits, args.equity, mem.r_stats(), args.horizon, pm_executor)
     pm.authorized = args.authorize
+    monitor = TradeMonitor(history=mem.r_stats())
+    managed = mem.managed_trades()
+    pm.risk.open_positions = len(managed)
+    if managed:
+        print(f"{len(managed)} operação(ões) aberta(s) retomada(s) pelo GOLD TRADE MONITOR")
     try:
         while True:
             snap = source.collect() if source is data else source.snapshot()
@@ -162,10 +173,30 @@ def cmd_live(args: argparse.Namespace) -> int:
                     print(f"[trade] operação #{tid} fechada → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R, "
                           + ", ".join(f"{k} {v:+.2f}R" for k, v in sim["results"].items()))
                     pm.risk.open_positions = max(0, pm.risk.open_positions - 1)
-                pm.mpe.history = mem.r_stats()
+                pm.mpe.history = monitor.history = mem.r_stats()
                 engine.expected_lead_min = mem.lead_time_stats()["media"]
                 assessment, signal = engine.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
                 print(render_dashboard(assessment, engine.expected_lead_min))
+                # 2.3: GOLD TRADE MONITOR — reavalia a tese de cada operação aberta com o cenário atual
+                for tr in list(managed):
+                    reading = monitor.check_path(tr, fine)
+                    if reading is None and tr.status == "OPEN":
+                        reading = monitor.evaluate(tr, assessment, snap)
+                    if reading is None:
+                        continue
+                    mem.log_monitor(tr.trade_id, reading)
+                    print(render_monitor(tr, reading))
+                    if tr.status == "CLOSED":
+                        mem.close_managed(tr.trade_id, tr.result_r, tr.close_reason, snap.time, tr.state_dict())
+                        print(render_evolution(tr))
+                        managed.remove(tr)
+                        pm.risk.close(tr.plan, tr.result_r, snap.time)
+                        if pm_executor is not None and mode == TradingMode.LIVE:
+                            print("LIVE: encerramento no broker deve ser confirmado manualmente nesta versão")
+                    else:
+                        mem.save_state(tr.trade_id, tr.state_dict())
+                    if args.send and reading.action != "MANTER":
+                        sender.send(format_monitor(tr, reading))
                 if args.verbose:
                     print(render_report(assessment))
                 if signal:
@@ -174,7 +205,12 @@ def cmd_live(args: argparse.Namespace) -> int:
                     decision = pm.decide(signal, snap)
                     print(decision.render())
                     if decision.action in ("PAPER", "SENT"):
-                        mem.open_trade(decision.plan, mode.value, pid, args.horizon)
+                        tid = mem.open_trade(decision.plan, mode.value, pid, args.horizon)
+                        thesis = Thesis.from_assessment(assessment, decision.plan.direction)
+                        tr = ManagedTradeFactory(tid, decision.plan, thesis)
+                        mem.save_thesis(tid, thesis, tr.state_dict())
+                        managed.append(tr)
+                        print(f"[monitor] operação #{tid:05d} sob acompanhamento — tese: score {thesis.score:+.0f}, pilares {', '.join(thesis.pillars) or 'nenhum'}")
                     if args.send and decision.action != "NO_TRADE":
                         sender.send(format_decision(decision))
                     if executor is not None:
@@ -303,6 +339,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print()
     rs = mem.r_stats()
     print(rs.render())
+    print()
+    print(mem.exit_learning())
     if rs.n:
         best = next((s for s in rs.strategies if s.name == rs.best), None)
         print(f"\nExpectancy em R ({rs.best}): {best.expectancy_r:+.2f}R por operação · "

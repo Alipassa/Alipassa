@@ -298,9 +298,11 @@ class BacktestResult:
 
 class Backtester:
     def __init__(self, frame: HistoryFrame, cfg: Optional[EngineConfig] = None, warmup: int = 220, step: int = 1,
-                 threshold_atr: float = 1.0, horizon_min: int = 240, include_watch: bool = False, simulate_trades: bool = True) -> None:
+                 threshold_atr: float = 1.0, horizon_min: int = 240, include_watch: bool = False, simulate_trades: bool = True,
+                 adaptive_exit: bool = True) -> None:
         self.frame = frame
         self.simulate_trades = simulate_trades
+        self.adaptive_exit = adaptive_exit
         self.cfg = cfg or EngineConfig()
         self.warmup, self.step = warmup, step
         self.threshold_atr, self.horizon_min = threshold_atr, horizon_min
@@ -312,14 +314,32 @@ class Backtester:
         xau = self.frame.xau
         start = max(self.warmup, start or self.warmup)
         end = min(len(xau), end or len(xau))
+        from .monitor import ManagedTrade, Thesis, TradeMonitor
         from .trading import MaxProfitEngine, r_stats, simulate_all
 
         mpe = MaxProfitEngine(horizon_min=self.horizon_min)
+        monitor = TradeMonitor()
         signals: list[SignalRecord] = []
         trade_rows: list[dict] = []
+        managed: list[tuple[ManagedTrade, dict, int]] = []   # (trade, row, índice de abertura)
+        horizon_bars = self.horizon_min // 60
+        prev_i = start - 1
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
+            # 2.3: operações abertas continuam sendo analisadas a cada passo (ADAPTIVE EXIT)
+            if self.adaptive_exit:
+                for tr, row, i0 in list(managed):
+                    if monitor.check_path(tr, xau[prev_i + 1: i + 1]) is None and tr.status == "OPEN":
+                        if i - i0 >= horizon_bars:
+                            tr.close(tr.r_at(xau[i].close), "HORIZON", xau[i].time)
+                        else:
+                            monitor.evaluate(tr, a, snap)
+                    if tr.status == "CLOSED":
+                        row["results"]["adaptive"] = tr.result_r
+                        row["adaptive_reason"] = tr.close_reason
+                        managed.remove((tr, row, i0))
+            prev_i = i
             if sig is None or sig.type in (SignalType.RISK, SignalType.REVERSAL):
                 continue
             if sig.type == SignalType.WATCH and not self.include_watch:
@@ -329,8 +349,14 @@ class Backtester:
             signals.append(record_from(a, sig, snap.atr))
             if self.simulate_trades and sig.type != SignalType.WATCH:
                 plan = mpe.plan(a, snap, sig.direction, sig.type.value)
-                sim = simulate_all(plan, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
-                trade_rows.append({"type": sig.type.value, "profile": sim["profile"], "results": sim["results"]})
+                sim = simulate_all(plan, xau[i + 1: i + 1 + horizon_bars + 2], self.horizon_min)
+                row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"]}
+                trade_rows.append(row)
+                if self.adaptive_exit:
+                    managed.append((ManagedTrade(len(trade_rows), plan, Thesis.from_assessment(a, sig.direction)), row, i))
+        for tr, row, i0 in managed:  # ainda abertas no fim do período
+            tr.close(tr.r_at(xau[min(end, len(xau)) - 1].close), "FIM", xau[min(end, len(xau)) - 1].time)
+            row["results"]["adaptive"] = tr.result_r
         path = [(c.time, c.close) for c in xau[start:end]]
         atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
         threshold = self.threshold_atr * statistics.fmean(atrs)

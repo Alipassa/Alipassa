@@ -65,7 +65,20 @@ CREATE TABLE IF NOT EXISTS trades (
     hit_1r INTEGER, hit_2r INTEGER, hit_3r INTEGER, hit_4r INTEGER,
     estopada INTEGER,
     resultados TEXT,
-    fechada_em TEXT
+    fechada_em TEXT,
+    tese TEXT,
+    estado TEXT,
+    motivo_saida TEXT,
+    resultado_r REAL,
+    gerenciada_em TEXT
+);
+CREATE TABLE IF NOT EXISTS trade_monitor (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER NOT NULL,
+    hora TEXT NOT NULL,
+    preco REAL, r_atual REAL,
+    trade_score REAL, thesis_score REAL, exit_score REAL, profit_potential REAL,
+    acao TEXT, nota TEXT
 );
 """
 
@@ -241,7 +254,68 @@ class PredictionMemory:
         return int(cur.lastrowid)
 
     def open_trades(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM trades WHERE status='OPEN' ORDER BY id").fetchall()
+        return self.conn.execute("SELECT * FROM trades WHERE status IN ('OPEN','MANAGED_CLOSED') ORDER BY id").fetchall()
+
+    # ------------------------------------------------------------------ 2.3: trade monitor
+    def save_thesis(self, trade_id: int, thesis, state: dict) -> None:
+        self.conn.execute("UPDATE trades SET tese=?, estado=? WHERE id=?", (json.dumps(thesis.to_dict()), json.dumps(state), trade_id))
+        self.conn.commit()
+
+    def save_state(self, trade_id: int, state: dict) -> None:
+        self.conn.execute("UPDATE trades SET estado=? WHERE id=?", (json.dumps(state), trade_id))
+        self.conn.commit()
+
+    def log_monitor(self, trade_id: int, reading) -> None:
+        self.conn.execute(
+            "INSERT INTO trade_monitor (trade_id, hora, preco, r_atual, trade_score, thesis_score, exit_score, profit_potential, acao, nota) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (trade_id, reading.time.isoformat(), reading.price, reading.current_r, reading.trade_score, reading.thesis_score,
+             reading.exit_score, reading.profit_potential, reading.action, reading.note))
+        self.conn.commit()
+
+    def close_managed(self, trade_id: int, result_r: float, reason: str, t: datetime, state: dict) -> None:
+        """Fechada pelo monitor; continua sendo acompanhada até o horizonte para medir o que ficou na mesa."""
+        self.conn.execute("UPDATE trades SET status='MANAGED_CLOSED', resultado_r=?, motivo_saida=?, gerenciada_em=?, estado=? WHERE id=?",
+                          (result_r, reason, t.isoformat(), json.dumps(state), trade_id))
+        self.conn.commit()
+
+    def managed_trades(self) -> list:
+        """Reconstrói as operações abertas gerenciadas pelo monitor (ManagedTrade)."""
+        from .models import Direction
+        from .monitor import ManagedTrade, Thesis
+        from .trading import TradePlan
+
+        out = []
+        for r in self.conn.execute("SELECT * FROM trades WHERE status='OPEN' AND tese IS NOT NULL ORDER BY id").fetchall():
+            plan = TradePlan(Direction(r["direcao"]), r["entrada"], r["stop"], r["atr"] or 0.0, datetime.fromisoformat(r["aberta_em"]),
+                             targets=json.loads(r["alvos"] or "{}"), recommended=r["estrategia"] or "3R", signal_type=r["sinal_tipo"] or "", lots=r["lote"], risk_usd=r["risco_usd"])
+            tr = ManagedTrade(r["id"], plan, Thesis.from_dict(json.loads(r["tese"]))).load_state(json.loads(r["estado"] or "{}"))
+            last = self.conn.execute("SELECT hora FROM trade_monitor WHERE trade_id=? ORDER BY id DESC LIMIT 1", (r["id"],)).fetchone()
+            if last:
+                from .monitor import MonitorReading
+                tr.history.append(MonitorReading(datetime.fromisoformat(last["hora"]), plan.entry, 0.0, 0.0, 0.0, 0.0, 0.0, "MANTER"))
+            out.append(tr)
+        return out
+
+    def monitor_history(self, trade_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM trade_monitor WHERE trade_id=? ORDER BY id", (trade_id,)).fetchall()
+
+    def exit_learning_rows(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM trades WHERE motivo_saida IS NOT NULL").fetchall()
+        out = []
+        for r in rows:
+            hist = self.monitor_history(r["id"])
+            thesis0 = json.loads(r["tese"])["score"] if r["tese"] else None
+            last = hist[-1] if hist else None
+            out.append({"exit_reason": r["motivo_saida"], "result_r": r["resultado_r"] or 0.0,
+                        "max_r_after": r["max_r"] if r["status"] == "CLOSED" else None,
+                        "min_r_after": (-(r["mae_r"] or 0.0)) if r["status"] == "CLOSED" else None,
+                        "thesis_at_exit": last["thesis_score"] if last else None,
+                        "drop_at_exit": (thesis0 - last["trade_score"]) if (last and thesis0 is not None) else None})
+        return out
+
+    def exit_learning(self) -> str:
+        from .monitor import exit_learning
+        return exit_learning(self.exit_learning_rows())
 
     def auto_resolve_trades(self, candles: Iterable, now: datetime) -> list[tuple[int, dict]]:
         """Simula cada operação aberta com os candles reais (todas as estratégias). Fecha quando o stop
@@ -262,6 +336,8 @@ class PredictionMemory:
             expired = now >= t0 + timedelta(minutes=horizon) or prof.horizon_reached
             all_closed = all(r.exit_reason != "OPEN" for r in sim["details"].values())
             if prof.stopped or expired or all_closed:
+                if row["status"] == "MANAGED_CLOSED" and not (prof.stopped or expired):
+                    continue  # segue acompanhando até o stop inicial ou o horizonte
                 self.conn.execute(
                     """UPDATE trades SET status='CLOSED', max_r=?, mae_r=?, hit_1r=?, hit_2r=?, hit_3r=?, hit_4r=?, estopada=?, resultados=?, fechada_em=? WHERE id=?""",
                     (prof.max_r_before_stop, prof.mae_r, int(prof.hit(1)), int(prof.hit(2)), int(prof.hit(3)), int(prof.hit(4)),
@@ -275,8 +351,13 @@ class PredictionMemory:
         from .trading import ExcursionProfile, r_stats
 
         rows = self.conn.execute("SELECT * FROM trades WHERE status='CLOSED'").fetchall()
-        recs = [{"type": r["sinal_tipo"] or "?", "results": json.loads(r["resultados"] or "{}"),
-                 "profile": ExcursionProfile(r["max_r"] or 0.0, r["mae_r"] or 0.0, bool(r["estopada"]), False, 0)} for r in rows]
+        recs = []
+        for r in rows:
+            results = json.loads(r["resultados"] or "{}")
+            if r["resultado_r"] is not None:
+                results["adaptive"] = r["resultado_r"]
+            recs.append({"type": r["sinal_tipo"] or "?", "results": results,
+                         "profile": ExcursionProfile(r["max_r"] or 0.0, r["mae_r"] or 0.0, bool(r["estopada"]), False, 0)})
         return r_stats(recs)
 
     def resolved_records(self) -> list[dict]:

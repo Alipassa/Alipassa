@@ -101,6 +101,35 @@ python -m gold_ai stats                                     # itens 1–15: sina
 
 Sequência: GOLD AI 2.1 → VALIDATION → TRADE SIMULATOR → RESULTADO ESTATÍSTICO → 3.0 → MT5 → corretora.
 
+## 2.3 — GOLD TRADE MONITOR + ADAPTIVE EXIT ENGINE
+
+> **Regra central:** a abertura de uma operação não encerra o processo de análise. Enquanto existir
+> posição aberta, o motor continua recebendo mercado, notícias, macro, fluxo e técnico, compara o
+> cenário atual com a tese original e decide continuamente entre MANTER, PROTEGER, REDUZIR, ESTENDER
+> ou ENCERRAR.
+
+```text
+OPERAÇÃO ABERTA → GOLD TRADE MONITOR → NOVO SCORE → COMPARAR COM TESE ORIGINAL
+        → 🟢 MANTER (trailing) · 🟡 PROTEGER (parcial 50 % + zero a zero) · 🟠 REDUZIR · 🟢 ESTENDER (4R/5R) · 🔴 ENCERRAR (tese invalidada)
+```
+
+| Indicador | Significado |
+| --- | --- |
+| **TRADE SCORE** (−100..+100) | estado atual do mercado, assinado na direção da operação |
+| **THESIS SCORE** (0..100) | quanto dos pilares da tese original (fatores alinhados na entrada) ainda permanece válido |
+| **EXIT SCORE** (0..100) | necessidade de encerrar: deterioração da tese, score contra, queda vs entrada, reversão, risco sistêmico, evento próximo, pré‑movimento contrário |
+| **PROFIT POTENTIAL** (0..100) | espaço restante: distância ao próximo nível estrutural, força do cenário, probabilidade condicional do próximo R no histórico |
+
+- `monitor.Thesis` fotografa score e pilares na entrada; `monitor.TradeMonitor` reavalia a cada ciclo e verifica stop/trailing candle a candle.
+- **Tese invalidada fecha mesmo com lucro**, sem esperar o stop. Cenário mais forte que a tese com potencial alto estende a busca para 4R/5R.
+- Cada leitura vai para a tabela `trade_monitor`; a evolução do score de cada operação fica registrada (`render_evolution`).
+- Após um fechamento antecipado a operação continua acompanhada até o horizonte para medir o que ficou na mesa; `stats` mostra o **aprendizado de saída**: qual queda do score realmente indicava sair.
+- No backtest e no walk-forward a saída adaptativa entra como estratégia `adaptive` ao lado de 1R/2R/3R/4R/trailing.
+- O `live` retoma operações abertas do SQLite ao reiniciar.
+
+Sequência até o 3.0: 2.1 provou a previsão → 2.2 provou a operação → 2.3 prova o gerenciamento → 3.0 execução real
+(PAPER → BACKTEST → WALK-FORWARD → LIVE SEM ORDEM → AUTHORIZE → LIVE).
+
 ## Uso rápido
 
 ```bash

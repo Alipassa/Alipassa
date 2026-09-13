@@ -353,3 +353,18 @@ importante quanto saber comprar e vender.
 
 Modos: 🟡 PAPER · 🟠 AUTHORIZE · 🔴 LIVE. Dinheiro real só depois do simulador validado no
 histórico e no walk-forward.
+
+
+---
+
+# ADENDO 2.3 — GOLD TRADE MONITOR
+
+**Regra central:** "A abertura de uma operação não encerra o processo de análise. Enquanto existir
+posição aberta, o GOLD AI ENGINE deverá continuar recebendo dados de mercado, notícias,
+macroeconomia, fluxo e indicadores técnicos, comparar o cenário atual com a tese original e
+decidir continuamente entre MANTER, PROTEGER, REDUZIR ou ENCERRAR a posição."
+
+Quatro indicadores por operação aberta: TRADE SCORE · THESIS SCORE · EXIT SCORE · PROFIT
+POTENTIAL. Tese invalidada → fechar, mesmo com lucro. Cenário mais forte → proteger metade e
+estender o restante. Toda decisão e a evolução do score são registradas para descobrir,
+empiricamente, qual nível de deterioração realmente indica que é melhor sair.

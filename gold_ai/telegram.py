@@ -154,3 +154,8 @@ class TelegramSender:
 def format_decision(decision) -> str:
     """Mensagem do TRADE SIMULATOR / gestor de posição (2.2)."""
     return "🧾 GOLD AI TRADE\n" + decision.render()
+
+
+def format_monitor(tr, reading) -> str:
+    from .monitor import render_monitor
+    return "📡 " + render_monitor(tr, reading)
