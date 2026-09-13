@@ -505,6 +505,11 @@ def cmd_stats(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
     mem.resolve_hypotheticals(datetime.now(timezone.utc))
     print(mem.opportunity_report().render())
+    print()
+    print(mem.funnel().render("FUNIL DE ENTRADA (vivido)"))
+    for m in mem.per_market_summary():
+        print()
+        print(mem.funnel(m["symbol"]).render(f"FUNIL — {m['symbol']}"))
     if rs.n:
         best = next((s for s in rs.strategies if s.name == rs.best), None)
         print(f"\nExpectancy em R ({rs.best}): {best.expectancy_r:+.2f}R por operação · "

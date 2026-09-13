@@ -155,11 +155,12 @@ class LiveExecutionEngine:
             res.decision = self._decide_entry(sig, a, snap, res.pid or 0, res)
         else:
             res.decision = "SEM SINAL — " + a.edge_status
-        # OPPORTUNITY ENGINE: toda oportunidade analisada vira um registro (entrada ou regra que bloqueou)
-        from .opportunity import DecisionRecord, classify_reason
+        # OPPORTUNITY ENGINE + FUNIL: toda análise vira um registro (entrada, ou a primeira etapa em que caiu)
+        from .opportunity import DecisionRecord, classify_reason, funnel_stage
         direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+        is_raw, stage = funnel_stage(a, sig, self.engine.gate.last_reason, res.decision, self.engine.cfg)
         self.mem.record_decision(DecisionRecord(snap.time, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
-                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence), symbol=self.symbol)
+                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence), symbol=self.symbol, stage=stage, is_raw=is_raw)
         return res
 
     # ------------------------------------------------------------------ entrada

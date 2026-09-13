@@ -1555,8 +1555,10 @@ class SignalGate:
     last_reversal_alert: bool = False
     last_risk_alert: bool = False
     seen_events: set[str] = field(default_factory=set)
+    last_reason: str = ""   # motivo do último None (funil de entrada)
 
     def evaluate(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
+        self.last_reason = ""
         base_type = classify(a.score, self.cfg)
         direction = a.direction
         stage = a.premove.stage
@@ -1587,6 +1589,7 @@ class SignalGate:
         if not directional_allowed:
             self.last_stage, self.last_direction, self.last_score = stage, direction, a.score
             self.last_type = SignalType.NEUTRAL
+            self.last_reason = "SEM_VANTAGEM"
             return None
 
         # 4. surgimento de pré-movimento (fundamentos antecipam o preço)
@@ -1617,21 +1620,25 @@ class SignalGate:
         self.last_stage, self.last_direction, self.last_score = stage, direction, a.score
         if sig_type is None:
             self.last_type = base_type
+            self.last_reason = "SCORE_SINAL" if base_type == SignalType.NEUTRAL else "ANTI_SPAM"
             return None
 
         # filtro §27: sinal direcional exige >= 3 confirmações independentes
         if sig_type in (SignalType.STRONG_BUY, SignalType.BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE, SignalType.WATCH):
             if len(confs) < self.cfg.min_confirmations:
                 self.last_type = SignalType.NEUTRAL
+                self.last_reason = "CONFIRMACOES"
                 return None
             if stage == Stage.MOVIMENTO and sig_type != SignalType.PRE_MOVE:
                 # §22 estágio 3: não perseguir preço — rebaixa para neutro
                 self.last_type = SignalType.NEUTRAL
+                self.last_reason = "ESTAGIO_3"
                 return None
 
         # intervalo mínimo entre alertas do mesmo tipo/direção
         if self.last_sent_at and (a.time - self.last_sent_at).total_seconds() < self.cfg.min_seconds_between_alerts \
                 and sig_type == self.last_type and trigger not in ("mudança de direção", "surgimento de pré-movimento"):
+            self.last_reason = "INTERVALO_MINIMO"
             return None
         return self._emit(sig_type, direction, a, trigger or "")
 
@@ -1798,6 +1805,11 @@ class PredictionMemory:
             cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if "ativo" not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN ativo TEXT DEFAULT 'XAUUSD'")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(decisions)").fetchall()}
+        if "etapa" not in cols:
+            self.conn.execute("ALTER TABLE decisions ADD COLUMN etapa TEXT")
+        if "bruta" not in cols:
+            self.conn.execute("ALTER TABLE decisions ADD COLUMN bruta INTEGER DEFAULT 0")
         self.conn.commit()
 
     @staticmethod
@@ -2113,10 +2125,11 @@ class PredictionMemory:
         return r_stats(recs)
 
     # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
-    def record_decision(self, rec, symbol: str = "XAUUSD") -> int:
+    def record_decision(self, rec, symbol: str = "XAUUSD", stage: Optional[str] = None, is_raw: bool = False) -> int:
         cur = self.conn.execute(
-            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca, ativo) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence, symbol))
+            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca, ativo, etapa, bruta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence, symbol,
+             stage, int(is_raw)))
         self.conn.commit()
         return int(cur.lastrowid)
 
@@ -2164,6 +2177,22 @@ class PredictionMemory:
         rows = self.conn.execute(q, tuple(args)).fetchall()
         return [DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
                                r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0) for r in rows]
+
+    def funnel(self, symbol: Optional[str] = None, since: Optional[datetime] = None):
+        """FUNIL DE ENTRADA do que foi vivido (uma linha por análise gravada pelo live)."""
+
+        conds, args = [], []
+        if since:
+            conds.append("hora >= ?"); args.append(since.isoformat())
+        if symbol:
+            conds.append("ativo = ?"); args.append(symbol)
+        q = "SELECT bruta, etapa, acao FROM decisions" + (" WHERE " + " AND ".join(conds) if conds else "")
+        f = Funnel()
+        for r in self.conn.execute(q, tuple(args)).fetchall():
+            is_raw = bool(r["bruta"]) or r["acao"] == "ENTRADA"
+            stage = None if r["acao"] == "ENTRADA" else (r["etapa"] or ("OUTROS" if is_raw else None))
+            f.add(is_raw, stage)
+        return f
 
     def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None, symbol: Optional[str] = None):
 
@@ -5715,6 +5744,7 @@ class BacktestResult:
     opportunity: Optional[object] = None  # opportunity.OpportunityReport (3.0)
     decisions: list = field(default_factory=list)
     entries: list = field(default_factory=list)
+    funnel: Optional[object] = None       # opportunity.Funnel
 
     def render(self) -> str:
         out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
@@ -5722,6 +5752,8 @@ class BacktestResult:
             out += "\n\n" + self.trades.render()
         if self.opportunity is not None:
             out += "\n\n" + self.opportunity.render()
+        if self.funnel is not None:
+            out += "\n\n" + self.funnel.render()
         return out
 
 
@@ -5753,6 +5785,7 @@ class Backtester:
         prev_i = start - 1
         decisions: list[DecisionRecord] = []
         entries: list[tuple] = []
+        funnel = Funnel()
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
@@ -5760,6 +5793,9 @@ class Backtester:
             d_dir = a.direction if a.direction != Direction.LATERAL else a.premove.direction
             entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
             rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
+            # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
+            decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
+            funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
@@ -5802,8 +5838,8 @@ class Backtester:
         threshold = self.threshold_atr * statistics.fmean(atrs)
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
-        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries)
+        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
+                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
 
 
 @dataclass
@@ -5812,6 +5848,7 @@ class WalkForwardResult:
     oos: Metrics
     oos_trades: Optional[object] = None  # trading.RStats fora da amostra
     oos_opportunity: Optional[object] = None  # opportunity.OpportunityReport agregado OOS
+    oos_funnel: Optional[object] = None       # opportunity.Funnel agregado OOS
 
     def render(self) -> str:
         lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
@@ -5826,6 +5863,9 @@ class WalkForwardResult:
         if self.oos_opportunity is not None:
             lines.append("")
             lines.append(self.oos_opportunity.render())
+        if self.oos_funnel is not None:
+            lines.append("")
+            lines.append(self.oos_funnel.render("FUNIL DE ENTRADA (fora da amostra, todos os folds de teste)"))
         return "\n".join(lines)
 
 
@@ -5874,7 +5914,11 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     entries = [e for _, res in folds if res.opportunity for e in res.entries]
     curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
     opp = opportunity_report(decisions, path, entries, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min, curve_rows) if decisions else None
-    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None, opp)
+    fun = Funnel()
+    for _, res in folds:
+        if res.funnel is not None:
+            fun = fun.merge(res.funnel)
+    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None, opp, fun if fun.analyses else None)
 
 
 # --------------------------------------------------------------------------- 2.1 validação consolidada
@@ -6123,6 +6167,130 @@ def opportunity_report(decisions: Sequence[DecisionRecord], prices: Sequence[tup
     overfilter = (entry_rate is not None and len(analyzed) >= 20 and entry_rate < min_entry_rate) or (capture is not None and len(moves) >= 10 and capture < min_capture_rate)
     return OpportunityReport(hours, len(moves), captured, capture, len(analyzed), n_entries, entry_rate, overfilter,
                              attribution([d for d in decisions if d.action != "ENTRADA"]), threshold_curve(trade_rows), min_entry_rate, min_capture_rate)
+
+
+# --------------------------------------------------------------------------- FUNIL DE ENTRADA
+# Onde as entradas desaparecem: cada análise recebe a PRIMEIRA etapa em que a oportunidade caiu.
+FUNNEL_STAGES: tuple[tuple[str, str], ...] = (
+    ("SCORE_MIN", "Score insuficiente (|score| < mínimo de vantagem)"),
+    ("PROB_MIN", "Probabilidade insuficiente (< 55 %)"),
+    ("CONF_MIN", "Confiança insuficiente (< 50)"),
+    ("SCORE_SINAL", "Score abaixo do limiar de sinal (±50)"),
+    ("CONFIRMACOES", "Confirmações insuficientes (< 3 famílias)"),
+    ("ESTAGIO_3", "Estágio 3 (movimento já ocorreu)"),
+    ("ANTI_SPAM", "Anti-spam (sem mudança relevante)"),
+    ("INTERVALO_MINIMO", "Intervalo mínimo entre alertas"),
+    ("SINAL_NAO_OPERACIONAL", "Sinal não operacional (WATCH/REVERSAL/RISK)"),
+    ("CONFIANCA_OPERAR", "Confiança para operar (< 60)"),
+    ("EVIDENCIA", "Evidência insuficiente (< nível 2)"),
+    ("CONFLITO", "Fatores conflitantes"),
+    ("VIABILIDADE", "Alvo inviável (resistência/suporte forte antes de 2R)"),
+    ("STOP_LOTE", "Stop inválido / lote zero"),
+    ("SPREAD", "Spread"),
+    ("KILL_SWITCH", "Kill switch / pausa"),
+    ("TRADING_STOP", "Trading stop / drawdown"),
+    ("POSICAO_ABERTA", "Posição já aberta no ativo"),
+    ("CORRELACAO", "Correlação / exposição de carteira"),
+    ("PRIORIDADE", "Prioridade (outro mercado foi melhor)"),
+    ("AUTORIZACAO", "Aguardando autorização"),
+    ("OUTROS", "Outros filtros"),
+)
+STAGE_LABEL = dict(FUNNEL_STAGES)
+
+
+def funnel_stage(a, sig, gate_reason: str, decision: str, cfg, raw_min_score: float = 15.0) -> tuple[bool, Optional[str]]:
+    """(é oportunidade bruta?, etapa em que caiu ou None = ENTRADA)."""
+
+    direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+    if direction == Direction.LATERAL or abs(a.score) < raw_min_score:
+        return False, None
+    d = (decision or "").lower()
+    if d.startswith(("🟢 paper open", "🟢 position open")):
+        return True, None
+    if not a.has_edge:
+        if abs(a.score) < cfg.min_edge_score:
+            return True, "SCORE_MIN"
+        if max(a.prob_up, a.prob_down) < cfg.min_edge_probability:
+            return True, "PROB_MIN"
+        return True, "CONF_MIN"
+    if sig is None:
+        return True, gate_reason if gate_reason in STAGE_LABEL else "OUTROS"
+    if "não é operacional" in d:
+        return True, "SINAL_NAO_OPERACIONAL"
+    if "aguardando autoriza" in d:
+        return True, "AUTORIZACAO"
+    if "confiança" in d:
+        return True, "CONFIANCA_OPERAR"
+    if "evidência" in d:
+        return True, "EVIDENCIA"
+    if "conflitantes" in d:
+        return True, "CONFLITO"
+    if "perseguir" in d:
+        return True, "ESTAGIO_3"
+    if "espaço estatístico" in d or "viabil" in d:
+        return True, "VIABILIDADE"
+    if "spread" in d:
+        return True, "SPREAD"
+    if "kill switch" in d or "trading_enabled" in d or "/stop" in d or "pausado" in d:
+        return True, "KILL_SWITCH"
+    if "trading stop" in d or "drawdown" in d:
+        return True, "TRADING_STOP"
+    if "exposição de carteira" in d or "correlacionado" in d or "max_portfolio_positions" in d or "max_total_open_risk" in d:
+        return True, "CORRELACAO"
+    if "posição ativa" in d or "max_asset_exposure" in d:
+        return True, "POSICAO_ABERTA"
+    if "prioridade" in d:
+        return True, "PRIORIDADE"
+    if "lote" in d or "stop" in d:
+        return True, "STOP_LOTE"
+    if "analisado" in d:
+        return True, "OUTROS"
+    return True, "OUTROS"
+
+
+@dataclass
+class Funnel:
+    analyses: int = 0
+    raw: int = 0
+    entries: int = 0
+    drops: dict[str, int] = field(default_factory=dict)
+
+    def add(self, is_raw: bool, stage: Optional[str]) -> None:
+        self.analyses += 1
+        if not is_raw:
+            return
+        self.raw += 1
+        if stage is None:
+            self.entries += 1
+        else:
+            self.drops[stage] = self.drops.get(stage, 0) + 1
+
+    def merge(self, other: "Funnel") -> "Funnel":
+        f = Funnel(self.analyses + other.analyses, self.raw + other.raw, self.entries + other.entries, dict(self.drops))
+        for k, v in other.drops.items():
+            f.drops[k] = f.drops.get(k, 0) + v
+        return f
+
+    @property
+    def qualified(self) -> int:
+        """Passaram por todas as regras do motor (vantagem + sinal + regras de operação); só faltou carteira/prioridade/autorização."""
+        portfolio = ("KILL_SWITCH", "TRADING_STOP", "POSICAO_ABERTA", "CORRELACAO", "PRIORIDADE", "AUTORIZACAO")
+        return self.entries + sum(v for k, v in self.drops.items() if k in portfolio)
+
+    def render(self, title: str = "FUNIL DE ENTRADA") -> str:
+        w = 46
+        lines = [f"🔻 {title}", f"{'ANÁLISES H1:':<{w}}{self.analyses:>7,}", f"{'OPORTUNIDADES BRUTAS (|score| ≥ 15):':<{w}}{self.raw:>7,}", ""]
+        for key, label in FUNNEL_STAGES:
+            n = self.drops.get(key, 0)
+            if n:
+                pct = f"{n / self.raw:>5.0%}" if self.raw else ""
+                lines.append(f"  {label:<{w - 2}}{n:>7,}  {pct}")
+        lines += ["", f"{'OPORTUNIDADES QUALIFICADAS:':<{w}}{self.qualified:>7,}", f"{'ENTRADAS:':<{w}}{self.entries:>7,}"]
+        if self.raw:
+            top = max(self.drops.items(), key=lambda kv: kv[1], default=None)
+            if top and top[1] / self.raw >= 0.3:
+                lines.append(f"→ maior perda: {STAGE_LABEL[top[0]]} ({top[1] / self.raw:.0%} das oportunidades brutas)")
+        return "\n".join(lines)
 
 
 # ============================================================================
@@ -6809,10 +6977,11 @@ class LiveExecutionEngine:
             res.decision = self._decide_entry(sig, a, snap, res.pid or 0, res)
         else:
             res.decision = "SEM SINAL — " + a.edge_status
-        # OPPORTUNITY ENGINE: toda oportunidade analisada vira um registro (entrada ou regra que bloqueou)
+        # OPPORTUNITY ENGINE + FUNIL: toda análise vira um registro (entrada, ou a primeira etapa em que caiu)
         direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+        is_raw, stage = funnel_stage(a, sig, self.engine.gate.last_reason, res.decision, self.engine.cfg)
         self.mem.record_decision(DecisionRecord(snap.time, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
-                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence), symbol=self.symbol)
+                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence), symbol=self.symbol, stage=stage, is_raw=is_raw)
         return res
 
     # ------------------------------------------------------------------ entrada
@@ -7742,6 +7911,11 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print()
     mem.resolve_hypotheticals(datetime.now(timezone.utc))
     print(mem.opportunity_report().render())
+    print()
+    print(mem.funnel().render("FUNIL DE ENTRADA (vivido)"))
+    for m in mem.per_market_summary():
+        print()
+        print(mem.funnel(m["symbol"]).render(f"FUNIL — {m['symbol']}"))
     if rs.n:
         best = next((s for s in rs.strategies if s.name == rs.best), None)
         print(f"\nExpectancy em R ({rs.best}): {best.expectancy_r:+.2f}R por operação · "

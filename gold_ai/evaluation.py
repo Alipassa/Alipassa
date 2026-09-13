@@ -291,6 +291,7 @@ class BacktestResult:
     opportunity: Optional[object] = None  # opportunity.OpportunityReport (3.0)
     decisions: list = field(default_factory=list)
     entries: list = field(default_factory=list)
+    funnel: Optional[object] = None       # opportunity.Funnel
 
     def render(self) -> str:
         out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
@@ -298,6 +299,8 @@ class BacktestResult:
             out += "\n\n" + self.trades.render()
         if self.opportunity is not None:
             out += "\n\n" + self.opportunity.render()
+        if self.funnel is not None:
+            out += "\n\n" + self.funnel.render()
         return out
 
 
@@ -329,9 +332,10 @@ class Backtester:
         managed: list[tuple[ManagedTrade, dict, int]] = []   # (trade, row, índice de abertura)
         horizon_bars = self.horizon_min // 60
         prev_i = start - 1
-        from .opportunity import DecisionRecord, hypothetical_trade
+        from .opportunity import DecisionRecord, Funnel, funnel_stage, hypothetical_trade
         decisions: list[DecisionRecord] = []
         entries: list[tuple] = []
+        funnel = Funnel()
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
@@ -339,6 +343,9 @@ class Backtester:
             d_dir = a.direction if a.direction != Direction.LATERAL else a.premove.direction
             entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
             rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
+            # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
+            decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
+            funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
@@ -382,8 +389,8 @@ class Backtester:
         from .opportunity import opportunity_report
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
-        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries)
+        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
+                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
 
 
 @dataclass
@@ -392,6 +399,7 @@ class WalkForwardResult:
     oos: Metrics
     oos_trades: Optional[object] = None  # trading.RStats fora da amostra
     oos_opportunity: Optional[object] = None  # opportunity.OpportunityReport agregado OOS
+    oos_funnel: Optional[object] = None       # opportunity.Funnel agregado OOS
 
     def render(self) -> str:
         lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
@@ -406,6 +414,9 @@ class WalkForwardResult:
         if self.oos_opportunity is not None:
             lines.append("")
             lines.append(self.oos_opportunity.render())
+        if self.oos_funnel is not None:
+            lines.append("")
+            lines.append(self.oos_funnel.render("FUNIL DE ENTRADA (fora da amostra, todos os folds de teste)"))
         return "\n".join(lines)
 
 
@@ -456,7 +467,12 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     entries = [e for _, res in folds if res.opportunity for e in res.entries]
     curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
     opp = opportunity_report(decisions, path, entries, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min, curve_rows) if decisions else None
-    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None, opp)
+    from .opportunity import Funnel
+    fun = Funnel()
+    for _, res in folds:
+        if res.funnel is not None:
+            fun = fun.merge(res.funnel)
+    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None, opp, fun if fun.analyses else None)
 
 
 # --------------------------------------------------------------------------- 2.1 validação consolidada

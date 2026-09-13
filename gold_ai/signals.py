@@ -58,8 +58,10 @@ class SignalGate:
     last_reversal_alert: bool = False
     last_risk_alert: bool = False
     seen_events: set[str] = field(default_factory=set)
+    last_reason: str = ""   # motivo do último None (funil de entrada)
 
     def evaluate(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
+        self.last_reason = ""
         base_type = classify(a.score, self.cfg)
         direction = a.direction
         stage = a.premove.stage
@@ -90,6 +92,7 @@ class SignalGate:
         if not directional_allowed:
             self.last_stage, self.last_direction, self.last_score = stage, direction, a.score
             self.last_type = SignalType.NEUTRAL
+            self.last_reason = "SEM_VANTAGEM"
             return None
 
         # 4. surgimento de pré-movimento (fundamentos antecipam o preço)
@@ -120,21 +123,25 @@ class SignalGate:
         self.last_stage, self.last_direction, self.last_score = stage, direction, a.score
         if sig_type is None:
             self.last_type = base_type
+            self.last_reason = "SCORE_SINAL" if base_type == SignalType.NEUTRAL else "ANTI_SPAM"
             return None
 
         # filtro §27: sinal direcional exige >= 3 confirmações independentes
         if sig_type in (SignalType.STRONG_BUY, SignalType.BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE, SignalType.WATCH):
             if len(confs) < self.cfg.min_confirmations:
                 self.last_type = SignalType.NEUTRAL
+                self.last_reason = "CONFIRMACOES"
                 return None
             if stage == Stage.MOVIMENTO and sig_type != SignalType.PRE_MOVE:
                 # §22 estágio 3: não perseguir preço — rebaixa para neutro
                 self.last_type = SignalType.NEUTRAL
+                self.last_reason = "ESTAGIO_3"
                 return None
 
         # intervalo mínimo entre alertas do mesmo tipo/direção
         if self.last_sent_at and (a.time - self.last_sent_at).total_seconds() < self.cfg.min_seconds_between_alerts \
                 and sig_type == self.last_type and trigger not in ("mudança de direção", "surgimento de pré-movimento"):
+            self.last_reason = "INTERVALO_MINIMO"
             return None
         return self._emit(sig_type, direction, a, trigger or "")
 

@@ -122,3 +122,60 @@ class OpportunityBacktestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FunnelTests(unittest.TestCase):
+    def test_funnel_counts_and_render(self):
+        from gold_ai.opportunity import Funnel, FUNNEL_STAGES, funnel_stage
+        from gold_ai.config import EngineConfig
+        f = Funnel()
+        f.add(False, None)                 # análise sem oportunidade bruta
+        f.add(True, "SCORE_MIN")
+        f.add(True, "CONFIRMACOES")
+        f.add(True, "CORRELACAO")
+        f.add(True, None)                  # entrada
+        self.assertEqual((f.analyses, f.raw, f.entries), (5, 4, 1))
+        self.assertEqual(f.qualified, 2)   # entrada + bloqueada só por carteira
+        txt = f.render()
+        for key in ("ANÁLISES H1:", "OPORTUNIDADES BRUTAS", "Score insuficiente", "Confirmações insuficientes", "Correlação", "OPORTUNIDADES QUALIFICADAS:", "ENTRADAS:"):
+            self.assertIn(key, txt)
+        g = f.merge(f)
+        self.assertEqual(g.analyses, 10)
+        self.assertTrue(all(k in dict(FUNNEL_STAGES) for k in g.drops))
+        # etapas a partir de uma avaliação real
+        cfg = EngineConfig()
+        eng = GoldAIEngine(cfg)
+        a = eng.analyze(SampleSource("neutro").snapshot())
+        self.assertEqual(funnel_stage(a, None, "SEM_VANTAGEM", "", cfg)[0], abs(a.score) >= 15)
+        a2, sig = eng.run_cycle(SampleSource("venda").snapshot())
+        self.assertEqual(funnel_stage(a2, sig, "", "🟢 PAPER OPEN #1", cfg), (True, None))
+        self.assertEqual(funnel_stage(a2, sig, "", "BLOQUEADA — exposição de carteira: risco correlacionado", cfg)[1], "CORRELACAO")
+        self.assertEqual(funnel_stage(a2, sig, "", "BLOQUEADA — já existe posição ativa em XAUUSD (MAX_POSITIONS)", cfg)[1], "POSICAO_ABERTA")
+        self.assertEqual(funnel_stage(a2, None, "CONFIRMACOES", "", cfg)[1], "CONFIRMACOES")
+
+    def test_funnel_in_backtest_walkforward_and_live(self):
+        f = HistoryFrame(xau=make_candles("H1", 900, 2500, 0.4, 6.0, NOW, seed=3),
+                         dxy=make_candles("H1", 900, 104, -0.002, 0.08, NOW, seed=4),
+                         us10y=make_candles("H1", 900, 4.2, -0.0005, 0.02, NOW, seed=5))
+        bt = Backtester(f, warmup=230, step=4)
+        r = bt.run()
+        self.assertIsNotNone(r.funnel)
+        self.assertEqual(r.funnel.analyses, r.n_steps)
+        self.assertIn("FUNIL DE ENTRADA", r.render())
+        from gold_ai.evaluation import walk_forward
+        wf = walk_forward(bt, n_folds=2, grid=[{"buy": 40, "sell": -40, "min_confirmations": 2}])
+        self.assertIsNotNone(wf.oos_funnel)
+        self.assertIn("fora da amostra, todos os folds", wf.render())
+        with tempfile.TemporaryDirectory() as d:
+            mem = PredictionMemory(os.path.join(d, "t.db"))
+            eng = LiveExecutionEngine(mem, GuardLimits(), TradingMode.PAPER, 10000, None, TelegramSender(dry_run=True, quiet=True), log=lambda s: None)
+            src = SampleSource("venda")
+            eng.run_cycle(src.snapshot())
+            src.now += timedelta(minutes=20)
+            eng.run_cycle(src.snapshot())          # bloqueada: posição já aberta
+            fun = mem.funnel("XAUUSD")
+            self.assertEqual(fun.analyses, 2)
+            self.assertEqual(fun.entries, 1)
+            self.assertEqual(fun.drops.get("POSICAO_ABERTA"), 1)
+            self.assertEqual(fun.qualified, 2)
+            mem.close()

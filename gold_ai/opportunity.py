@@ -165,3 +165,128 @@ def opportunity_report(decisions: Sequence[DecisionRecord], prices: Sequence[tup
     overfilter = (entry_rate is not None and len(analyzed) >= 20 and entry_rate < min_entry_rate) or (capture is not None and len(moves) >= 10 and capture < min_capture_rate)
     return OpportunityReport(hours, len(moves), captured, capture, len(analyzed), n_entries, entry_rate, overfilter,
                              attribution([d for d in decisions if d.action != "ENTRADA"]), threshold_curve(trade_rows), min_entry_rate, min_capture_rate)
+
+
+# --------------------------------------------------------------------------- FUNIL DE ENTRADA
+# Onde as entradas desaparecem: cada análise recebe a PRIMEIRA etapa em que a oportunidade caiu.
+FUNNEL_STAGES: tuple[tuple[str, str], ...] = (
+    ("SCORE_MIN", "Score insuficiente (|score| < mínimo de vantagem)"),
+    ("PROB_MIN", "Probabilidade insuficiente (< 55 %)"),
+    ("CONF_MIN", "Confiança insuficiente (< 50)"),
+    ("SCORE_SINAL", "Score abaixo do limiar de sinal (±50)"),
+    ("CONFIRMACOES", "Confirmações insuficientes (< 3 famílias)"),
+    ("ESTAGIO_3", "Estágio 3 (movimento já ocorreu)"),
+    ("ANTI_SPAM", "Anti-spam (sem mudança relevante)"),
+    ("INTERVALO_MINIMO", "Intervalo mínimo entre alertas"),
+    ("SINAL_NAO_OPERACIONAL", "Sinal não operacional (WATCH/REVERSAL/RISK)"),
+    ("CONFIANCA_OPERAR", "Confiança para operar (< 60)"),
+    ("EVIDENCIA", "Evidência insuficiente (< nível 2)"),
+    ("CONFLITO", "Fatores conflitantes"),
+    ("VIABILIDADE", "Alvo inviável (resistência/suporte forte antes de 2R)"),
+    ("STOP_LOTE", "Stop inválido / lote zero"),
+    ("SPREAD", "Spread"),
+    ("KILL_SWITCH", "Kill switch / pausa"),
+    ("TRADING_STOP", "Trading stop / drawdown"),
+    ("POSICAO_ABERTA", "Posição já aberta no ativo"),
+    ("CORRELACAO", "Correlação / exposição de carteira"),
+    ("PRIORIDADE", "Prioridade (outro mercado foi melhor)"),
+    ("AUTORIZACAO", "Aguardando autorização"),
+    ("OUTROS", "Outros filtros"),
+)
+STAGE_LABEL = dict(FUNNEL_STAGES)
+
+
+def funnel_stage(a, sig, gate_reason: str, decision: str, cfg, raw_min_score: float = 15.0) -> tuple[bool, Optional[str]]:
+    """(é oportunidade bruta?, etapa em que caiu ou None = ENTRADA)."""
+    from .models import Direction
+
+    direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+    if direction == Direction.LATERAL or abs(a.score) < raw_min_score:
+        return False, None
+    d = (decision or "").lower()
+    if d.startswith(("🟢 paper open", "🟢 position open")):
+        return True, None
+    if not a.has_edge:
+        if abs(a.score) < cfg.min_edge_score:
+            return True, "SCORE_MIN"
+        if max(a.prob_up, a.prob_down) < cfg.min_edge_probability:
+            return True, "PROB_MIN"
+        return True, "CONF_MIN"
+    if sig is None:
+        return True, gate_reason if gate_reason in STAGE_LABEL else "OUTROS"
+    if "não é operacional" in d:
+        return True, "SINAL_NAO_OPERACIONAL"
+    if "aguardando autoriza" in d:
+        return True, "AUTORIZACAO"
+    if "confiança" in d:
+        return True, "CONFIANCA_OPERAR"
+    if "evidência" in d:
+        return True, "EVIDENCIA"
+    if "conflitantes" in d:
+        return True, "CONFLITO"
+    if "perseguir" in d:
+        return True, "ESTAGIO_3"
+    if "espaço estatístico" in d or "viabil" in d:
+        return True, "VIABILIDADE"
+    if "spread" in d:
+        return True, "SPREAD"
+    if "kill switch" in d or "trading_enabled" in d or "/stop" in d or "pausado" in d:
+        return True, "KILL_SWITCH"
+    if "trading stop" in d or "drawdown" in d:
+        return True, "TRADING_STOP"
+    if "exposição de carteira" in d or "correlacionado" in d or "max_portfolio_positions" in d or "max_total_open_risk" in d:
+        return True, "CORRELACAO"
+    if "posição ativa" in d or "max_asset_exposure" in d:
+        return True, "POSICAO_ABERTA"
+    if "prioridade" in d:
+        return True, "PRIORIDADE"
+    if "lote" in d or "stop" in d:
+        return True, "STOP_LOTE"
+    if "analisado" in d:
+        return True, "OUTROS"
+    return True, "OUTROS"
+
+
+@dataclass
+class Funnel:
+    analyses: int = 0
+    raw: int = 0
+    entries: int = 0
+    drops: dict[str, int] = field(default_factory=dict)
+
+    def add(self, is_raw: bool, stage: Optional[str]) -> None:
+        self.analyses += 1
+        if not is_raw:
+            return
+        self.raw += 1
+        if stage is None:
+            self.entries += 1
+        else:
+            self.drops[stage] = self.drops.get(stage, 0) + 1
+
+    def merge(self, other: "Funnel") -> "Funnel":
+        f = Funnel(self.analyses + other.analyses, self.raw + other.raw, self.entries + other.entries, dict(self.drops))
+        for k, v in other.drops.items():
+            f.drops[k] = f.drops.get(k, 0) + v
+        return f
+
+    @property
+    def qualified(self) -> int:
+        """Passaram por todas as regras do motor (vantagem + sinal + regras de operação); só faltou carteira/prioridade/autorização."""
+        portfolio = ("KILL_SWITCH", "TRADING_STOP", "POSICAO_ABERTA", "CORRELACAO", "PRIORIDADE", "AUTORIZACAO")
+        return self.entries + sum(v for k, v in self.drops.items() if k in portfolio)
+
+    def render(self, title: str = "FUNIL DE ENTRADA") -> str:
+        w = 46
+        lines = [f"🔻 {title}", f"{'ANÁLISES H1:':<{w}}{self.analyses:>7,}", f"{'OPORTUNIDADES BRUTAS (|score| ≥ 15):':<{w}}{self.raw:>7,}", ""]
+        for key, label in FUNNEL_STAGES:
+            n = self.drops.get(key, 0)
+            if n:
+                pct = f"{n / self.raw:>5.0%}" if self.raw else ""
+                lines.append(f"  {label:<{w - 2}}{n:>7,}  {pct}")
+        lines += ["", f"{'OPORTUNIDADES QUALIFICADAS:':<{w}}{self.qualified:>7,}", f"{'ENTRADAS:':<{w}}{self.entries:>7,}"]
+        if self.raw:
+            top = max(self.drops.items(), key=lambda kv: kv[1], default=None)
+            if top and top[1] / self.raw >= 0.3:
+                lines.append(f"→ maior perda: {STAGE_LABEL[top[0]]} ({top[1] / self.raw:.0%} das oportunidades brutas)")
+        return "\n".join(lines)

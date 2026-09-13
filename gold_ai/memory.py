@@ -157,6 +157,11 @@ class PredictionMemory:
             cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if "ativo" not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN ativo TEXT DEFAULT 'XAUUSD'")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(decisions)").fetchall()}
+        if "etapa" not in cols:
+            self.conn.execute("ALTER TABLE decisions ADD COLUMN etapa TEXT")
+        if "bruta" not in cols:
+            self.conn.execute("ALTER TABLE decisions ADD COLUMN bruta INTEGER DEFAULT 0")
         self.conn.commit()
 
     @staticmethod
@@ -481,10 +486,11 @@ class PredictionMemory:
         return r_stats(recs)
 
     # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
-    def record_decision(self, rec, symbol: str = "XAUUSD") -> int:
+    def record_decision(self, rec, symbol: str = "XAUUSD", stage: Optional[str] = None, is_raw: bool = False) -> int:
         cur = self.conn.execute(
-            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca, ativo) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence, symbol))
+            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca, ativo, etapa, bruta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence, symbol,
+             stage, int(is_raw)))
         self.conn.commit()
         return int(cur.lastrowid)
 
@@ -535,6 +541,23 @@ class PredictionMemory:
         rows = self.conn.execute(q, tuple(args)).fetchall()
         return [DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
                                r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0) for r in rows]
+
+    def funnel(self, symbol: Optional[str] = None, since: Optional[datetime] = None):
+        """FUNIL DE ENTRADA do que foi vivido (uma linha por análise gravada pelo live)."""
+        from .opportunity import Funnel
+
+        conds, args = [], []
+        if since:
+            conds.append("hora >= ?"); args.append(since.isoformat())
+        if symbol:
+            conds.append("ativo = ?"); args.append(symbol)
+        q = "SELECT bruta, etapa, acao FROM decisions" + (" WHERE " + " AND ".join(conds) if conds else "")
+        f = Funnel()
+        for r in self.conn.execute(q, tuple(args)).fetchall():
+            is_raw = bool(r["bruta"]) or r["acao"] == "ENTRADA"
+            stage = None if r["acao"] == "ENTRADA" else (r["etapa"] or ("OUTROS" if is_raw else None))
+            f.add(is_raw, stage)
+        return f
 
     def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None, symbol: Optional[str] = None):
         from .opportunity import opportunity_report
