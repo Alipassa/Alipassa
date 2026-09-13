@@ -471,3 +471,64 @@ def validate(frame: HistoryFrame, cfg: Optional[EngineConfig] = None, n_folds: i
                                                          f"entry rate {('n/d' if r.opportunity.entry_rate is None else f'{r.opportunity.entry_rate:.0%}')}"
                                                          + (" ⚠️ OVERFILTER" if r.opportunity.overfilter else "") for k, (_, r) in enumerate(wf.folds, 1))
     return rep
+
+
+# --------------------------------------------------------------------------- 4.0: validação multi-mercado
+@dataclass
+class MarketValidation:
+    symbol: str
+    n_trades: int
+    expectancy: float
+    profit_factor: Optional[float]
+    win_rate: float
+    capture_rate: Optional[float]
+    entry_rate: Optional[float]
+    confidence: object            # selector.StatConfidence
+    status: str                   # 🟢 🟡 🔴
+    report: object                # ValidationReport
+
+
+def validate_markets(frames: dict, cfg_factory=None, n_folds: int = 4, step: int = 1, warmup: int = 220, horizon_min: int = 240,
+                     strategy: str = "adaptive") -> list[MarketValidation]:
+    """Responde: qual mercado apresenta melhor expectativa FORA DA AMOSTRA, ponderada pelo tamanho da amostra?
+    O ranking usa a expectancy encolhida pela confiança estatística — 37 trades a +0.9R não vencem 487 a +0.42R."""
+    from .config import EngineConfig
+    from .markets import get_market
+    from .selector import statistical_confidence
+
+    out: list[MarketValidation] = []
+    for symbol, frame in frames.items():
+        spec = get_market(symbol)
+        cfg = cfg_factory(symbol) if cfg_factory else EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
+        rep = validate(frame, cfg, n_folds=n_folds, step=step, warmup=warmup, horizon_min=horizon_min, audit_every=200)
+        bt = Backtester(frame, cfg, warmup=warmup, step=step, horizon_min=horizon_min)
+        wf = walk_forward(bt, n_folds=n_folds)
+        rows = [r for _, res in wf.folds for r in res.trade_rows]
+        rs = [row["results"].get(strategy, row["results"].get("3R", 0.0)) for row in rows]
+        conf = statistical_confidence(rs)
+        wins = [x for x in rs if x > 0]
+        losses = [x for x in rs if x <= 0]
+        pf = (sum(wins) / -sum(losses)) if losses and sum(losses) < 0 else (None if not wins else float("inf"))
+        caps = [res.opportunity.capture_rate for _, res in wf.folds if res.opportunity and res.opportunity.capture_rate is not None]
+        ents = [res.opportunity.entry_rate for _, res in wf.folds if res.opportunity and res.opportunity.entry_rate is not None]
+        status = "🟢" if (conf.level in ("HIGH", "MEDIUM") and conf.shrunk > 0.1) else "🟡" if conf.shrunk > 0 else "🔴"
+        out.append(MarketValidation(symbol, len(rs), conf.expectancy, (round(pf, 2) if pf not in (None, float("inf")) else pf), (len(wins) / len(rs)) if rs else 0.0,
+                                    (statistics.fmean(caps) if caps else None), (statistics.fmean(ents) if ents else None), conf, status, rep))
+    return sorted(out, key=lambda m: -m.confidence.shrunk)
+
+
+def render_market_validation(rows: Sequence[MarketValidation]) -> str:
+    lines = ["🧪 VALIDAÇÃO MULTI-MERCADO (fora da amostra, walk-forward) — ranking pela expectancy ajustada à amostra",
+             f"{'Ativo':<8}{'Trades':>7}{'Expect.':>9}{'Ajust.':>8}{'PF':>7}{'Win':>6}{'Capture':>9}{'Entry':>7}  Conf.   Status"]
+    for m in rows:
+        pf = "n/d" if m.profit_factor is None else ("∞" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}")
+        cap = "n/d" if m.capture_rate is None else f"{m.capture_rate:.0%}"
+        ent = "n/d" if m.entry_rate is None else f"{m.entry_rate:.0%}"
+        lines.append(f"{m.symbol:<8}{m.n_trades:>7}{m.expectancy:>+9.2f}{m.confidence.shrunk:>+8.2f}{pf:>7}{m.win_rate:>6.0%}{cap:>9}{ent:>7}  {m.confidence.level:<7} {m.status}")
+    if rows:
+        best = rows[0]
+        lines.append(f"Melhor expectativa OOS ajustada: {best.symbol} ({best.confidence.render()})")
+        low = [m.symbol for m in rows if m.confidence.level == "LOW" and m.expectancy > rows[0].expectancy]
+        if low:
+            lines.append(f"⚠️ {', '.join(low)}: expectancy maior mas amostra pequena — NÃO escolher automaticamente")
+    return "\n".join(lines)

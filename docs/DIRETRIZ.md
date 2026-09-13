@@ -404,3 +404,27 @@ bloqueou e o que teria acontecido) e a curva limiar × expectancy (a região ide
 Se o sistema entra pouco, não se adiciona filtro: identifica-se a regra que elimina oportunidades
 lucrativas e retira-se ou reduz-se o seu peso. Analisar muito, decidir simples, agir quando existir
 vantagem.
+
+
+---
+
+# ADENDO 4.0 — MARKET AI ENGINE
+
+GOLD AI ENGINE 3.0 = cérebro + execução para um mercado. MARKET AI ENGINE 4.0 = cérebro único +
+múltiplos mercados + seleção dinâmica da melhor oportunidade. Nada do 2.1–3.0 é descartado; o 4.0
+orquestra.
+
+Regras:
+1. **O Asset Selector NÃO cria entradas.** Só escolhe entre oportunidades já produzidas pelo
+   Prediction/Opportunity Engine; o Risk Engine valida depois.
+2. Ranking multidimensional (MARKET OPPORTUNITY SCORE), nunca "score 90 > score 80". Pesos iniciais
+   a serem testados pelo Validation Engine.
+3. Separar QUALIDADE HISTÓRICA de OPORTUNIDADE ATUAL e medir OPPORTUNITY DECAY: não basta existir
+   vantagem; precisa existir vantagem para entrar AGORA.
+4. STATISTICAL CONFIDENCE: o vencedor não é o de maior expectancy, e sim o de maior expectancy
+   ajustada ao tamanho e à estabilidade da amostra.
+5. PORTFOLIO EXPOSURE: "estou diversificando ou fazendo a mesma aposta três vezes?" Limites
+   MAX_TOTAL_OPEN_RISK, MAX_CORRELATED_RISK, MAX_PORTFOLIO_POSITIONS, MAX_ASSET_EXPOSURE.
+6. Fases: 1 EURUSD, US500, XAUUSD, USDJPY, WTI · 2 NAS100, GBPUSD · 3 BTCUSD, ETHUSD — provar que o
+   cérebro generaliza antes de transformar volatilidade em falso edge.
+7. Nenhum filtro de entrada arbitrário novo; nasce em PAPER.

@@ -209,7 +209,7 @@ class LiveCycleTests(unittest.TestCase):
         self.assertIsNotNone(res.signal)
         self.assertTrue(res.decision.startswith("🟢 PAPER OPEN"))
         self.assertEqual(len(eng.managed), 1)
-        self.assertTrue(any("GOLD AI" in m and "SELL XAUUSD" in m for m in res.messages))
+        self.assertTrue(any("MARKET AI" in m and "SELL XAUUSD" in m for m in res.messages))
         tr = eng.managed[0]
         self.assertGreater(tr.plan.lots, 0)
         # próximo ciclo: cenário virou → tese invalidada → encerra, capital atualizado

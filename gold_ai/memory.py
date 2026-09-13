@@ -143,9 +143,23 @@ class PredictionMemory:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """4.0: coluna `ativo` (símbolo) nas tabelas por mercado; bancos antigos = XAUUSD."""
+        for table in ("predictions", "trades", "decisions"):
+            cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "ativo" not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN ativo TEXT DEFAULT 'XAUUSD'")
+        self.conn.commit()
+
+    @staticmethod
+    def _where_symbol(symbol: Optional[str], prefix: str = "WHERE") -> tuple[str, tuple]:
+        return (f" {prefix} ativo=?", (symbol,)) if symbol else ("", ())
 
     # ------------------------------------------------------------------ registro
-    def record(self, a: Assessment, signal_type: Optional[str] = None, atr: Optional[float] = None, horizon_min: int = 240) -> int:
+    def record(self, a: Assessment, signal_type: Optional[str] = None, atr: Optional[float] = None, horizon_min: int = 240,
+               symbol: str = "XAUUSD") -> int:
         from .evaluation import technical_details
 
         t = a.time.astimezone(timezone.utc)
@@ -155,15 +169,15 @@ class PredictionMemory:
         cur = self.conn.execute(
             """INSERT INTO predictions (data, hora, sessao, preco, previsao, probabilidade, confianca, score,
                horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo, nivel_evidencia,
-               fatores_ratio, tecnico_detalhe, atr, horizonte_min)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               fatores_ratio, tecnico_detalhe, atr, horizonte_min, ativo)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 t.strftime("%Y-%m-%d"), t.strftime("%H:%M:%S"), session_label(t), a.price, direction, prob,
                 a.confidence, a.score, a.horizon, a.premove.stage.value, json.dumps(fund, ensure_ascii=False),
                 json.dumps([], ensure_ascii=False), fund.get("dolar"), fund.get("juros_reais"), fund.get("fluxo"),
                 fund.get("tecnico"), a.next_event.name if a.next_event else None, signal_type, int(a.evidence_level),
                 json.dumps({f.name: round(f.ratio, 3) for f in a.factors if f.available}), json.dumps(technical_details(a)),
-                atr, horizon_min,
+                atr, horizon_min, symbol,
             ),
         )
         self.conn.commit()
@@ -276,12 +290,12 @@ class PredictionMemory:
         return done
 
     # ------------------------------------------------------------------ 2.2: operações simuladas
-    def open_trade(self, plan, mode: str, prediction_id: Optional[int] = None, horizon_min: int = 240) -> int:
+    def open_trade(self, plan, mode: str, prediction_id: Optional[int] = None, horizon_min: int = 240, symbol: str = "XAUUSD") -> int:
         cur = self.conn.execute(
             """INSERT INTO trades (prediction_id, aberta_em, modo, sinal_tipo, direcao, entrada, stop, atr, lote, risco_usd, alvos,
-               estrategia, horizonte_min) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               estrategia, horizonte_min, ativo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (prediction_id, plan.time.astimezone(timezone.utc).isoformat(), mode, plan.signal_type, plan.direction.value, plan.entry,
-             plan.stop, plan.atr, plan.lots, plan.risk_usd, json.dumps(plan.targets), plan.recommended, horizon_min))
+             plan.stop, plan.atr, plan.lots, plan.risk_usd, json.dumps(plan.targets), plan.recommended, horizon_min, symbol))
         self.conn.commit()
         return int(cur.lastrowid)
 
@@ -314,6 +328,12 @@ class PredictionMemory:
     def equity_curve(self) -> list[tuple[datetime, float]]:
         return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
 
+    def per_market_summary(self) -> list[dict]:
+        """4.0: operações, expectancy e win rate por ativo (o que foi vivido)."""
+        rows = self.conn.execute("SELECT ativo, COUNT(*) n, AVG(resultado_r) e, SUM(CASE WHEN resultado_r>0 THEN 1 ELSE 0 END) w, SUM(resultado_financeiro) p "
+                                 "FROM trades WHERE resultado_r IS NOT NULL GROUP BY ativo ORDER BY e DESC").fetchall()
+        return [{"symbol": r["ativo"], "n": r["n"], "expectancy": r["e"] or 0.0, "win_rate": (r["w"] / r["n"]) if r["n"] else 0.0, "pnl": r["p"] or 0.0} for r in rows]
+
     def performance_summary(self) -> str:
         rows = self.conn.execute("SELECT resultado_financeiro AS p, resultado_r AS r, modo FROM trades WHERE resultado_financeiro IS NOT NULL").fetchall()
         curve = self.equity_curve()
@@ -331,6 +351,8 @@ class PredictionMemory:
                 by_mode.setdefault(r["modo"], []).append(r["p"])
             for m, v in by_mode.items():
                 lines.append(f"    {m}: n={len(v)} {sum(v):+,.2f} USD")
+            for m in self.per_market_summary():
+                lines.append(f"    {m['symbol']}: n={m['n']} E={m['expectancy']:+.2f}R win {m['win_rate']:.0%} {m['pnl']:+,.2f} USD")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ 2.3: trade monitor
@@ -355,14 +377,15 @@ class PredictionMemory:
                           (result_r, reason, t.isoformat(), json.dumps(state), trade_id))
         self.conn.commit()
 
-    def managed_trades(self) -> list:
+    def managed_trades(self, symbol: Optional[str] = None) -> list:
         """Reconstrói as operações abertas gerenciadas pelo monitor (ManagedTrade)."""
         from .models import Direction
         from .monitor import ManagedTrade, Thesis
         from .trading import TradePlan
 
         out = []
-        for r in self.conn.execute("SELECT * FROM trades WHERE status='OPEN' AND tese IS NOT NULL ORDER BY id").fetchall():
+        w, args = self._where_symbol(symbol, "AND")
+        for r in self.conn.execute(f"SELECT * FROM trades WHERE status='OPEN' AND tese IS NOT NULL{w} ORDER BY id", args).fetchall():
             plan = TradePlan(Direction(r["direcao"]), r["entrada"], r["stop"], r["atr"] or 0.0, datetime.fromisoformat(r["aberta_em"]),
                              targets=json.loads(r["alvos"] or "{}"), recommended=r["estrategia"] or "3R", signal_type=r["sinal_tipo"] or "", lots=r["lote"], risk_usd=r["risco_usd"])
             tr = ManagedTrade(r["id"], plan, Thesis.from_dict(json.loads(r["tese"]))).load_state(json.loads(r["estado"] or "{}"))
@@ -424,10 +447,11 @@ class PredictionMemory:
             self.conn.commit()
         return done
 
-    def r_stats(self):
+    def r_stats(self, symbol: Optional[str] = None):
         from .trading import ExcursionProfile, r_stats
 
-        rows = self.conn.execute("SELECT * FROM trades WHERE status='CLOSED'").fetchall()
+        w, args = self._where_symbol(symbol, "AND")
+        rows = self.conn.execute(f"SELECT * FROM trades WHERE status='CLOSED'{w}", args).fetchall()
         recs = []
         for r in rows:
             results = json.loads(r["resultados"] or "{}")
@@ -438,10 +462,10 @@ class PredictionMemory:
         return r_stats(recs)
 
     # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
-    def record_decision(self, rec) -> int:
+    def record_decision(self, rec, symbol: str = "XAUUSD") -> int:
         cur = self.conn.execute(
-            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca) VALUES (?,?,?,?,?,?,?,?,?)",
-            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence))
+            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca, ativo) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence, symbol))
         self.conn.commit()
         return int(cur.lastrowid)
 
@@ -480,24 +504,31 @@ class PredictionMemory:
         self.conn.commit()
         return n
 
-    def decisions(self, since: Optional[datetime] = None) -> list:
+    def decisions(self, since: Optional[datetime] = None, symbol: Optional[str] = None) -> list:
         from .opportunity import DecisionRecord
 
-        q = "SELECT * FROM decisions" + (" WHERE hora >= ?" if since else "") + " ORDER BY id"
-        rows = self.conn.execute(q, (since.isoformat(),) if since else ()).fetchall()
+        conds, args = [], []
+        if since:
+            conds.append("hora >= ?"); args.append(since.isoformat())
+        if symbol:
+            conds.append("ativo = ?"); args.append(symbol)
+        q = "SELECT * FROM decisions" + (" WHERE " + " AND ".join(conds) if conds else "") + " ORDER BY id"
+        rows = self.conn.execute(q, tuple(args)).fetchall()
         return [DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
                                r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0) for r in rows]
 
-    def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None):
+    def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None, symbol: Optional[str] = None):
         from .opportunity import opportunity_report
 
-        decisions = self.decisions(since)
+        decisions = self.decisions(since, symbol)
         prices = self.prices(since)
-        entries = [(datetime.fromisoformat(r["aberta_em"]), r["direcao"]) for r in self.conn.execute("SELECT aberta_em, direcao FROM trades").fetchall()]
-        atrs = [r["atr"] for r in self.conn.execute("SELECT atr FROM trades WHERE atr IS NOT NULL").fetchall()] or [d.atr for d in decisions if d.atr]
+        w, args = self._where_symbol(symbol)
+        entries = [(datetime.fromisoformat(r["aberta_em"]), r["direcao"]) for r in self.conn.execute(f"SELECT aberta_em, direcao FROM trades{w}", args).fetchall()]
+        w2, args2 = self._where_symbol(symbol, "AND")
+        atrs = [r["atr"] for r in self.conn.execute(f"SELECT atr FROM trades WHERE atr IS NOT NULL{w2}", args2).fetchall()] or [d.atr for d in decisions if d.atr]
         threshold = (sum(atrs) / len(atrs)) if atrs else 9.0
         trade_rows = [{"score": r["score_entrada"] or 0.0, "r": r["resultado_r"]} for r in
-                      self.conn.execute("SELECT score_entrada, resultado_r FROM trades WHERE resultado_r IS NOT NULL").fetchall()]
+                      self.conn.execute(f"SELECT score_entrada, resultado_r FROM trades WHERE resultado_r IS NOT NULL{w2}", args2).fetchall()]
         # decisões bloqueadas com resultado hipotético também alimentam a curva de limiar
         trade_rows += [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         return opportunity_report(decisions, prices, entries, threshold, horizon_min, trade_rows)

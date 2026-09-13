@@ -133,9 +133,10 @@ class PerformanceEngine:
                 + (" · 🚨 TRADING STOP" if self.trading_stop else ""))
 
 
-def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float) -> tuple[float, float]:
-    """(lote, risco real em USD). CAPITAL + RISCO + STOP + CONTRATO — nada mais."""
-    per_lot = stop_distance * limits.contract_size
+def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float, point_value_usd: Optional[float] = None) -> tuple[float, float]:
+    """(lote, risco real em USD). CAPITAL + RISCO + STOP + CONTRATO — nada mais.
+    `point_value_usd` (USD por 1.0 de preço por lote) vem do MarketSpec no 4.0; padrão = contract_size (XAUUSD)."""
+    per_lot = stop_distance * (point_value_usd if point_value_usd else limits.contract_size)
     if per_lot <= 0:
         return 0.0, 0.0
     lots = min(limits.max_lot, risk_usd / per_lot)

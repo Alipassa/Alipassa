@@ -98,6 +98,11 @@ class EngineConfig:
     # Janela (min) antes de evento de alto impacto em que a confiança é penalizada.
     event_window_minutes: int = 90
 
+    # 4.0: sinal com que cada fator (calculado na convenção do ouro) afeta o mercado analisado.
+    # +1 mesma direção, −1 oposta, 0 sem relação conhecida (fator marcado como indisponível).
+    factor_signs: dict[str, int] = field(default_factory=dict)
+    symbol: str = "XAUUSD"
+
     # Vantagem estatística (GOLD AI 2.0 — "saber dizer NÃO SEI").
     min_edge_probability: float = 0.55
     min_edge_confidence: float = 50.0

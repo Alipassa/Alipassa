@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Gera o entrypoint único `gold_ai_engine_v3.py` a partir do pacote `gold_ai/`.
+"""Gera o entrypoint único `market_ai_engine_v4.py` a partir do pacote `gold_ai/`.
 
 Uso:  python tools/build_single_file.py
 O arquivo gerado é o ÚNICO bundle suportado; versões anteriores (v1/v2) foram removidas
-para evitar execução acidental da versão errada.
+para evitar execução acidental da versão errada. Bundles v1/v2/v3 foram removidos.
 """
 
 from __future__ import annotations
@@ -13,18 +13,28 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "gold_ai_engine_v3.py"
-VERSION = "3.0.0"
+OUT = ROOT / "market_ai_engine_v4.py"
+VERSION = "4.0.0"
 
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "trading", "monitor",
-         "execution", "guard", "validation", "evaluation", "opportunity", "live_engine", "cli"]
+         "markets", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "live_engine", "data/multi", "market_engine", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
-"""GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE — entrypoint único (XAU/USD).
+"""MARKET AI ENGINE 4.0 — cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade.
 
 Gerado por tools/build_single_file.py a partir do pacote gold_ai/ (versão {VERSION}).
-Equivalente a `python -m gold_ai`. Não existem outros bundles suportados.
+Equivalente a `python -m gold_ai`. Não existem outros bundles suportados (v1/v2/v3 removidos).
+
+"Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor vantagem
+estatística disponível naquele momento, respeitando risco, correlação, qualidade dos dados e custo de
+execução." A IA não precisa operar ouro; precisa encontrar onde existe vantagem.
+
+XAUUSD · EURUSD · US500 · USDJPY · WTI (fase 1) → 📡 DATA ENGINE (macro uma vez + candles por mercado)
+→ 🧠 PREDICTION ENGINE (cérebro único; cada mercado declara o sinal de cada fator)
+→ 🔥 OPPORTUNITY ENGINE → 🏆 ASSET SELECTOR (histórico ajustado à amostra × oportunidade atual × decay)
+→ 📐 PORTFOLIO EXPOSURE (correlação; mesma aposta três vezes ≠ diversificação) → RISK ENGINE (capital único)
+→ TRADE ENGINE → MT5 → confirmação → 🔄 TRADE MONITOR 24/7 → ADAPTIVE EXIT → resultado → capital
 
 🌎 MUNDO → 📡 DATA ENGINE (Yahoo · FRED · CFTC · RSS · calendário · MetaTrader 5)
 → MARKET SNAPSHOT → 🧠 PREDICTION ENGINE (score · probabilidade · confiança · pré-movimento)
@@ -39,13 +49,13 @@ Equivalente a `python -m gold_ai`. Não existem outros bundles suportados.
 Modos: 🟢 PAPER (padrão) · 🟡 AUTHORIZE · 🟠 SEMI-LIVE · 🔴 LIVE (exige --authorize)
 Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 
-Uso:
-    python gold_ai_engine_v3.py demo
-    python gold_ai_engine_v3.py live --source mt5 --mode paper --send
-    python gold_ai_engine_v3.py live --source mt5 --mode authorize --send [--authorize]
-    python gold_ai_engine_v3.py live --source mt5 --mode semi-live --send
-    python gold_ai_engine_v3.py live --source mt5 --mode live --authorize --send
-    python gold_ai_engine_v3.py status | stats | validate | simulate | calibrate | backtest | metrics | event
+Uso (4.0, multi-mercado):
+    python market_ai_engine_v4.py markets                                              # ranking agora, não opera
+    python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
+    python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
+Uso (3.0, um mercado):
+    python market_ai_engine_v4.py live --source mt5 --mode paper|authorize|semi-live|live [--authorize] --send
+    python market_ai_engine_v4.py status | stats | validate | simulate | calibrate | backtest | metrics | demo | event
 
 Credenciais e limites no .env (ver .env.example). Sem dependências externas (MetaTrader5 opcional, Windows).
 """
@@ -113,7 +123,7 @@ def strip_imports(text: str) -> str:
                 multi = False
             continue
         if SKIP.match(ln):
-            if ln.rstrip().endswith("("):
+            if "(" in ln and ")" not in ln:   # import multilinha (parêntese aberto)
                 multi = True
             continue
         out.append(ln)

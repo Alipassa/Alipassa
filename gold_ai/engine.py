@@ -33,6 +33,14 @@ class GoldAIEngine:
             factors.append(SCORERS[name](s, weight))
         tech, readings = score_tecnico(s, self.cfg.weights["tecnico"])
         factors.append(tech)
+        if self.cfg.factor_signs:
+            for f in factors:
+                sign = self.cfg.factor_signs.get(f.name, 1)
+                if sign == 0:
+                    f.score, f.available, f.rationale = 0.0, False, f"sem relação conhecida com {self.cfg.symbol}"
+                elif sign < 0:
+                    f.score = -f.score
+                    f.rationale = f"(sinal invertido para {self.cfg.symbol}) " + f.rationale
         return factors, readings
 
     @staticmethod

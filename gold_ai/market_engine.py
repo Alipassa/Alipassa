@@ -1,0 +1,157 @@
+"""MARKET AI ENGINE 4.0 — cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade.
+
+Objetivo: "Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor
+vantagem estatística disponível naquele momento, respeitando risco, correlação, qualidade dos dados
+e custo de execução." A IA não precisa operar ouro; precisa encontrar onde existe vantagem.
+
+Preserva integralmente os motores do 3.0 (um LiveExecutionEngine por mercado, capital compartilhado).
+O Asset Selector NÃO cria entradas: só ordena as que o Prediction/Opportunity Engine já produziu.
+Nenhum filtro de entrada novo: os vetos do 4.0 são exclusivamente de PORTFÓLIO (exposição/correlação)
+e de PRIORIDADE (um ciclo, uma entrada: a melhor).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable, Optional
+
+from .config import EngineConfig
+from .data.multi import MarketSnapshotSet
+from .engine import GoldAIEngine
+from .guard import GuardLimits, KillSwitch, PerformanceEngine, TelegramCommands, TradingMode
+from .live_engine import CycleResult, LiveExecutionEngine
+from .markets import MarketSpec, get_market
+from .memory import PredictionMemory
+from .models import Direction, SignalType
+from .selector import (AssetSelector, Candidate, OpenExposure, PortfolioExposureEngine, PortfolioLimits, StatConfidence, render_rank,
+                       statistical_confidence)
+from .telegram import TelegramSender
+
+
+@dataclass
+class PortfolioCycle:
+    time: datetime
+    results: dict[str, CycleResult] = field(default_factory=dict)
+    ranked: list[Candidate] = field(default_factory=list)
+    chosen: Optional[str] = None
+    decision: str = ""
+    messages: list[str] = field(default_factory=list)
+
+    def render(self) -> str:
+        lines = [f"🌎 MARKET AI — ciclo {self.time:%Y-%m-%d %H:%M} UTC"]
+        for sym, r in self.results.items():
+            a = r.assessment
+            if a is None:
+                lines.append(f"  {sym:<7} sem dados")
+                continue
+            lines.append(f"  {sym:<7} score {a.score:+4.0f} prob {max(a.prob_up, a.prob_down):.0%} {a.regime:<8} {a.premove.stage.value:<14} "
+                         f"{'sinal ' + r.signal.type.value if r.signal else 'sem sinal'} → {r.decision}")
+        lines.append(f"DECISÃO: {self.decision}")
+        return "\n".join(lines)
+
+
+class MarketAIEngine:
+    def __init__(self, mem: PredictionMemory, limits: GuardLimits, symbols: tuple[str, ...], mode: TradingMode = TradingMode.PAPER,
+                 equity: float = 10000.0, portfolio: Optional[PortfolioLimits] = None, executors: Optional[dict] = None,
+                 sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None, commands: Optional[TelegramCommands] = None,
+                 horizon_min: int = 240, log: Callable[[str], None] = print, authorized: bool = False,
+                 selector: Optional[AssetSelector] = None, calibrator=None) -> None:
+        self.mem = mem
+        self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
+        self.mode, self.limits = mode, limits
+        self.portfolio = PortfolioExposureEngine(portfolio or PortfolioLimits())
+        self.sender = sender or TelegramSender(dry_run=True, quiet=True)
+        self.ks = kill_switch or KillSwitch()
+        self.commands = commands
+        self.log = log
+        self.selector = selector or AssetSelector()
+        start_equity = mem.last_equity() or equity
+        self.perf = PerformanceEngine(limits, start_equity)   # capital ÚNICO compartilhado
+        if mem.last_equity() is None:
+            mem.record_equity(datetime.now(), start_equity, None, "capital inicial")
+        self.engines: dict[str, LiveExecutionEngine] = {}
+        for sym, spec in self.specs.items():
+            cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
+            brain = GoldAIEngine(cfg, calibrator=calibrator)
+            self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,
+                                                    horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)
+        self.history: dict[str, StatConfidence] = {}
+        self.refresh_history()
+
+    # ------------------------------------------------------------------ histórico por mercado
+    def refresh_history(self) -> None:
+        for sym in self.specs:
+            rs = self.mem.r_stats(sym)
+            results = []
+            for row in self.mem.conn.execute("SELECT resultado_r FROM trades WHERE ativo=? AND resultado_r IS NOT NULL", (sym,)).fetchall():
+                results.append(row["resultado_r"])
+            self.history[sym] = statistical_confidence(results)
+            self.engines[sym].mpe.history = self.engines[sym].monitor.history = rs
+
+    def open_exposures(self) -> list[OpenExposure]:
+        out = []
+        for sym, eng in self.engines.items():
+            for tr in eng.managed:
+                out.append(OpenExposure(sym, tr.thesis.direction, (tr.plan.risk_usd or 0.0) * tr.remaining))
+        return out
+
+    def _portfolio_gate(self, symbol: str, direction: Direction, risk_usd: float) -> list[str]:
+        return self.portfolio.check(symbol, direction, risk_usd, self.open_exposures(), self.perf.equity)
+
+    # ------------------------------------------------------------------ ciclo de carteira
+    def run_cycle(self, snaps: MarketSnapshotSet) -> PortfolioCycle:
+        pc = PortfolioCycle(snaps.time)
+        # comandos (/STOP /PAUSE /STATUS /CLOSE) tratados pelo primeiro motor, com o kill switch compartilhado
+        first = next(iter(self.engines.values()))
+        first.commands = self.commands
+        # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
+        for sym, eng in self.engines.items():
+            snap = snaps.by_symbol.get(sym)
+            if snap is None:
+                pc.results[sym] = CycleResult(None, None, decision="sem dados")
+                continue
+            r = eng.run_cycle(snap, new_event_key=(snap.news[0].headline if snap.news else None), defer_entry=True)
+            pc.results[sym] = r
+            pc.messages += r.messages
+        self.refresh_history()
+        # 2) candidatos = oportunidades já produzidas (sinal operacional + vantagem estatística)
+        cands: list[Candidate] = []
+        for sym, r in pc.results.items():
+            a, sig = r.assessment, r.signal
+            if a is None or sig is None or sig.type not in LiveExecutionEngine.EXECUTABLE or sig.direction == Direction.LATERAL or not a.has_edge:
+                continue
+            opp = self.mem.opportunity_report(symbol=sym)
+            cands.append(Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0)))
+        for sym in self.specs:
+            if sym not in {c.spec.symbol for c in cands}:
+                self.selector.forget(sym)
+        # 3) ASSET SELECTOR — ordena; a melhor tenta entrar (Risk Engine + exposição validam depois)
+        pc.ranked = self.selector.rank(cands, snaps.time)
+        self.log(render_rank(pc.ranked, self.history))
+        entered = False
+        for c in pc.ranked:
+            sym = c.spec.symbol
+            r = pc.results[sym]
+            if entered:
+                self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — {pc.chosen} foi a melhor oportunidade do ciclo (OPP {pc.ranked[0].opportunity_score:.1f} vs {c.opportunity_score:.1f})")
+                continue
+            self.engines[sym].enter(r, snaps.by_symbol[sym])
+            pc.messages += [m for m in r.messages if m not in pc.messages]
+            if r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")):
+                entered, pc.chosen = True, sym
+        # mercados sem candidatura: registrar a decisão (regra que bloqueou) para o Opportunity Engine
+        for sym, r in pc.results.items():
+            if r.assessment is not None and sym not in {c.spec.symbol for c in pc.ranked}:
+                self.engines[sym].enter(r, snaps.by_symbol[sym])
+        pc.decision = (f"ENTRADA em {pc.chosen}" if pc.chosen else ("melhor oportunidade não passou no Risk Engine/exposição — " + pc.results[pc.ranked[0].spec.symbol].decision
+                                                                   if pc.ranked else "nenhuma oportunidade com vantagem neste ciclo"))
+        self.log(self.portfolio.render(self.open_exposures(), self.perf.equity))
+        return pc
+
+    def status_text(self) -> str:
+        lines = [f"📋 MARKET AI STATUS · modo {self.mode.value} · mercados {', '.join(self.specs)}", self.perf.render(),
+                 self.portfolio.render(self.open_exposures(), self.perf.equity), "Histórico por mercado:"]
+        for sym, h in self.history.items():
+            lines.append(f"  {sym:<7} {h.render()}")
+        return "\n".join(lines)

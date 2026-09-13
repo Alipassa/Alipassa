@@ -6,7 +6,7 @@ import unittest
 
 from gold_ai.cli import main
 
-EXPECTED = {"demo", "run", "stats", "event", "live", "status", "backtest", "metrics", "validate", "simulate", "calibrate"}
+EXPECTED = {"demo", "run", "stats", "event", "live", "status", "backtest", "metrics", "validate", "simulate", "calibrate", "markets"}
 
 
 class CliTests(unittest.TestCase):

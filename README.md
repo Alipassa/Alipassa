@@ -1,6 +1,7 @@
-# GOLD AI ENGINE
+# MARKET AI ENGINE 4.0
 
-Centro Global de Inteligência do Ouro — motor probabilístico de antecipação para **XAU/USD**.
+Cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade. Nasceu como GOLD AI ENGINE
+(motor probabilístico de antecipação para XAU/USD) e preserva integralmente os motores validados nas versões 2.1–3.0.
 
 Implementa a [Diretriz de Inteligência Preditiva do Ouro](docs/DIRETRIZ.md): em vez de explicar
 por que o ouro subiu ou caiu, o motor procura **o que está começando a mudar** (dólar, juros
@@ -11,18 +12,51 @@ reais, Fed, inflação, geopolítica, fluxo, COT, opções, sentimento, técnico
 
 Python 3.10+, sem dependências externas.
 
+## 4.0 — MARKET AI ENGINE
+
+> "Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor vantagem estatística disponível
+> naquele momento, respeitando risco, correlação, qualidade dos dados e custo de execução." A IA não precisa operar ouro; precisa
+> encontrar onde existe vantagem.
+
+```text
+XAUUSD ─┐
+EURUSD ─┤
+US500  ─┼──→ 📡 DATA (macro uma vez + candles por mercado) → 🧠 CÉREBRO ÚNICO → 🔥 OPPORTUNITY → 🏆 ASSET SELECTOR
+USDJPY ─┤        → 📐 EXPOSIÇÃO/CORRELAÇÃO → RISK ENGINE (capital único) → TRADE ENGINE → MT5 → 🔄 MONITOR 24/7
+WTI    ─┘
+```
+
+| Módulo | O que faz |
+| --- | --- |
+| `markets.py` | registro dos mercados (fase 1: EURUSD, US500, XAUUSD, USDJPY, WTI; fase 2: NAS100, GBPUSD; fase 3: BTCUSD) com o **sinal de cada fator** (dólar ↓ é + para XAUUSD/EURUSD e − para USDJPY; geopolítica ↑ é + para ouro e petróleo, − para EURUSD/US500/USDJPY; fator sem relação conhecida = 0, indisponível — nada de inventar edge), valor do ponto, spread típico, sessão, código COT próprio, correlações de referência |
+| `engine.py` | o mesmo cérebro: os fatores macro são calculados uma vez e multiplicados pelo sinal do mercado; técnico e fluxo vêm dos candles do próprio mercado |
+| `data/multi.py` | macro coletada uma vez; snapshot por mercado com candles/preço/ATR/fluxo próprios (Yahoo ou MT5), qualidade dos dados por mercado |
+| `selector.py` | **MARKET OPPORTUNITY SCORE** = 25 % expectancy histórica (encolhida pela amostra) + 20 % probabilidade calibrada + 15 % score + 15 % pré‑movimento + 10 % regime + 5 % captura + 5 % execução + 5 % dados; **três dimensões separadas**: histórico · agora · **OPPORTUNITY DECAY** (estágio × ATR já percorrido × idade do sinal); **STATISTICAL CONFIDENCE** (HIGH/MEDIUM/LOW: 37 trades a +0.9R não vencem 487 a +0.42R); `PortfolioExposureEngine` com risco agregado e **correlacionado** (EURUSD BUY + GBPUSD BUY + XAUUSD BUY = a mesma aposta) |
+| `market_engine.py` | um `LiveExecutionEngine` (3.0) por mercado com capital compartilhado; monitor de todas as posições antes de qualquer decisão; **o Asset Selector não cria entradas** — só ordena as que o Prediction/Opportunity Engine produziu; um ciclo, uma entrada (a melhor); os demais recebem veto de PRIORIDADE (registrado no Opportunity Engine) |
+| `evaluation.validate_markets` | "qual mercado tem melhor expectativa fora da amostra?" — tabela por ativo (trades OOS, expectancy, ajustada, PF, win, capture, entry, confiança) ordenada pela expectancy **ajustada à amostra** |
+
+Limites novos no `.env`: `MAX_TOTAL_OPEN_RISK`, `MAX_CORRELATED_RISK`, `MAX_PORTFOLIO_POSITIONS`, `MAX_ASSET_EXPOSURE`, `CORRELATION_THRESHOLD`
+e `MT5_SYMBOL_<ATIVO>` para símbolos do broker. Nenhum filtro de entrada novo: os vetos do 4.0 são exclusivamente de portfólio e de prioridade.
+
+```bash
+python market_ai_engine_v4.py markets                                                          # ranking agora (não opera)
+python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
+python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI --csv-dir dados/   # <SYMBOL>_h1.csv por mercado
+python market_ai_engine_v4.py stats                                                            # inclui resultado por ativo
+```
+
 ## Entrypoint único
 
-Existem exatamente **duas** formas equivalentes de executar, ambas na versão 3.0:
+Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:
 
 | Forma | Quando usar |
 | --- | --- |
 | `python -m gold_ai …` | trabalhando no repositório (pacote `gold_ai/`) |
-| `python gold_ai_engine_v3.py …` | arquivo único gerado por `python tools/build_single_file.py` a partir do pacote |
+| `python market_ai_engine_v4.py …` | arquivo único gerado por `python tools/build_single_file.py` a partir do pacote |
 
-Bundles antigos (`gold_ai_engine.py` 1.0 e `gold_ai_engine_v2.py` 2.x) **foram removidos** para impedir a execução acidental
-de uma versão errada. Se algum deles ainda existir na sua máquina, apague-o. O número da versão está em `gold_ai.__version__`
-e no cabeçalho do bundle, e é impresso no início de `live`.
+Bundles antigos (`gold_ai_engine.py`, `gold_ai_engine_v2.py`, `gold_ai_engine_v3.py`) **foram removidos** para impedir a execução
+acidental de uma versão errada. Se algum deles ainda existir na sua máquina, apague-o. O número da versão está em
+`gold_ai.__version__` e no cabeçalho do bundle, e é impresso no início de `live`.
 
 ## O que mudou na 2.0
 

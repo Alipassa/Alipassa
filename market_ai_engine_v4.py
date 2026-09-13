@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE — entrypoint único (XAU/USD).
+"""MARKET AI ENGINE 4.0 — cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade.
 
-Gerado por tools/build_single_file.py a partir do pacote gold_ai/ (versão 3.0.0).
-Equivalente a `python -m gold_ai`. Não existem outros bundles suportados.
+Gerado por tools/build_single_file.py a partir do pacote gold_ai/ (versão 4.0.0).
+Equivalente a `python -m gold_ai`. Não existem outros bundles suportados (v1/v2/v3 removidos).
+
+"Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor vantagem
+estatística disponível naquele momento, respeitando risco, correlação, qualidade dos dados e custo de
+execução." A IA não precisa operar ouro; precisa encontrar onde existe vantagem.
+
+XAUUSD · EURUSD · US500 · USDJPY · WTI (fase 1) → 📡 DATA ENGINE (macro uma vez + candles por mercado)
+→ 🧠 PREDICTION ENGINE (cérebro único; cada mercado declara o sinal de cada fator)
+→ 🔥 OPPORTUNITY ENGINE → 🏆 ASSET SELECTOR (histórico ajustado à amostra × oportunidade atual × decay)
+→ 📐 PORTFOLIO EXPOSURE (correlação; mesma aposta três vezes ≠ diversificação) → RISK ENGINE (capital único)
+→ TRADE ENGINE → MT5 → confirmação → 🔄 TRADE MONITOR 24/7 → ADAPTIVE EXIT → resultado → capital
 
 🌎 MUNDO → 📡 DATA ENGINE (Yahoo · FRED · CFTC · RSS · calendário · MetaTrader 5)
 → MARKET SNAPSHOT → 🧠 PREDICTION ENGINE (score · probabilidade · confiança · pré-movimento)
@@ -17,13 +27,13 @@ Equivalente a `python -m gold_ai`. Não existem outros bundles suportados.
 Modos: 🟢 PAPER (padrão) · 🟡 AUTHORIZE · 🟠 SEMI-LIVE · 🔴 LIVE (exige --authorize)
 Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 
-Uso:
-    python gold_ai_engine_v3.py demo
-    python gold_ai_engine_v3.py live --source mt5 --mode paper --send
-    python gold_ai_engine_v3.py live --source mt5 --mode authorize --send [--authorize]
-    python gold_ai_engine_v3.py live --source mt5 --mode semi-live --send
-    python gold_ai_engine_v3.py live --source mt5 --mode live --authorize --send
-    python gold_ai_engine_v3.py status | stats | validate | simulate | calibrate | backtest | metrics | event
+Uso (4.0, multi-mercado):
+    python market_ai_engine_v4.py markets                                              # ranking agora, não opera
+    python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
+    python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
+Uso (3.0, um mercado):
+    python market_ai_engine_v4.py live --source mt5 --mode paper|authorize|semi-live|live [--authorize] --send
+    python market_ai_engine_v4.py status | stats | validate | simulate | calibrate | backtest | metrics | demo | event
 
 Credenciais e limites no .env (ver .env.example). Sem dependências externas (MetaTrader5 opcional, Windows).
 """
@@ -58,7 +68,7 @@ try:  # MetaTrader5 só existe no Windows com o terminal instalado
 except Exception:  # noqa: BLE001
     _mt5 = None
 
-__version__ = "3.0.0"
+__version__ = "4.0.0"
 
 
 # ============================================================================
@@ -162,6 +172,11 @@ class EngineConfig:
 
     # Janela (min) antes de evento de alto impacto em que a confiança é penalizada.
     event_window_minutes: int = 90
+
+    # 4.0: sinal com que cada fator (calculado na convenção do ouro) afeta o mercado analisado.
+    # +1 mesma direção, −1 oposta, 0 sem relação conhecida (fator marcado como indisponível).
+    factor_signs: dict[str, int] = field(default_factory=dict)
+    symbol: str = "XAUUSD"
 
     # Vantagem estatística (GOLD AI 2.0 — "saber dizer NÃO SEI").
     min_edge_probability: float = 0.55
@@ -1767,9 +1782,23 @@ class PredictionMemory:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """4.0: coluna `ativo` (símbolo) nas tabelas por mercado; bancos antigos = XAUUSD."""
+        for table in ("predictions", "trades", "decisions"):
+            cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "ativo" not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN ativo TEXT DEFAULT 'XAUUSD'")
+        self.conn.commit()
+
+    @staticmethod
+    def _where_symbol(symbol: Optional[str], prefix: str = "WHERE") -> tuple[str, tuple]:
+        return (f" {prefix} ativo=?", (symbol,)) if symbol else ("", ())
 
     # ------------------------------------------------------------------ registro
-    def record(self, a: Assessment, signal_type: Optional[str] = None, atr: Optional[float] = None, horizon_min: int = 240) -> int:
+    def record(self, a: Assessment, signal_type: Optional[str] = None, atr: Optional[float] = None, horizon_min: int = 240,
+               symbol: str = "XAUUSD") -> int:
 
         t = a.time.astimezone(timezone.utc)
         direction = a.direction.value
@@ -1778,15 +1807,15 @@ class PredictionMemory:
         cur = self.conn.execute(
             """INSERT INTO predictions (data, hora, sessao, preco, previsao, probabilidade, confianca, score,
                horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo, nivel_evidencia,
-               fatores_ratio, tecnico_detalhe, atr, horizonte_min)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               fatores_ratio, tecnico_detalhe, atr, horizonte_min, ativo)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 t.strftime("%Y-%m-%d"), t.strftime("%H:%M:%S"), session_label(t), a.price, direction, prob,
                 a.confidence, a.score, a.horizon, a.premove.stage.value, json.dumps(fund, ensure_ascii=False),
                 json.dumps([], ensure_ascii=False), fund.get("dolar"), fund.get("juros_reais"), fund.get("fluxo"),
                 fund.get("tecnico"), a.next_event.name if a.next_event else None, signal_type, int(a.evidence_level),
                 json.dumps({f.name: round(f.ratio, 3) for f in a.factors if f.available}), json.dumps(technical_details(a)),
-                atr, horizon_min,
+                atr, horizon_min, symbol,
             ),
         )
         self.conn.commit()
@@ -1899,12 +1928,12 @@ class PredictionMemory:
         return done
 
     # ------------------------------------------------------------------ 2.2: operações simuladas
-    def open_trade(self, plan, mode: str, prediction_id: Optional[int] = None, horizon_min: int = 240) -> int:
+    def open_trade(self, plan, mode: str, prediction_id: Optional[int] = None, horizon_min: int = 240, symbol: str = "XAUUSD") -> int:
         cur = self.conn.execute(
             """INSERT INTO trades (prediction_id, aberta_em, modo, sinal_tipo, direcao, entrada, stop, atr, lote, risco_usd, alvos,
-               estrategia, horizonte_min) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               estrategia, horizonte_min, ativo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (prediction_id, plan.time.astimezone(timezone.utc).isoformat(), mode, plan.signal_type, plan.direction.value, plan.entry,
-             plan.stop, plan.atr, plan.lots, plan.risk_usd, json.dumps(plan.targets), plan.recommended, horizon_min))
+             plan.stop, plan.atr, plan.lots, plan.risk_usd, json.dumps(plan.targets), plan.recommended, horizon_min, symbol))
         self.conn.commit()
         return int(cur.lastrowid)
 
@@ -1937,6 +1966,12 @@ class PredictionMemory:
     def equity_curve(self) -> list[tuple[datetime, float]]:
         return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
 
+    def per_market_summary(self) -> list[dict]:
+        """4.0: operações, expectancy e win rate por ativo (o que foi vivido)."""
+        rows = self.conn.execute("SELECT ativo, COUNT(*) n, AVG(resultado_r) e, SUM(CASE WHEN resultado_r>0 THEN 1 ELSE 0 END) w, SUM(resultado_financeiro) p "
+                                 "FROM trades WHERE resultado_r IS NOT NULL GROUP BY ativo ORDER BY e DESC").fetchall()
+        return [{"symbol": r["ativo"], "n": r["n"], "expectancy": r["e"] or 0.0, "win_rate": (r["w"] / r["n"]) if r["n"] else 0.0, "pnl": r["p"] or 0.0} for r in rows]
+
     def performance_summary(self) -> str:
         rows = self.conn.execute("SELECT resultado_financeiro AS p, resultado_r AS r, modo FROM trades WHERE resultado_financeiro IS NOT NULL").fetchall()
         curve = self.equity_curve()
@@ -1954,6 +1989,8 @@ class PredictionMemory:
                 by_mode.setdefault(r["modo"], []).append(r["p"])
             for m, v in by_mode.items():
                 lines.append(f"    {m}: n={len(v)} {sum(v):+,.2f} USD")
+            for m in self.per_market_summary():
+                lines.append(f"    {m['symbol']}: n={m['n']} E={m['expectancy']:+.2f}R win {m['win_rate']:.0%} {m['pnl']:+,.2f} USD")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ 2.3: trade monitor
@@ -1978,11 +2015,12 @@ class PredictionMemory:
                           (result_r, reason, t.isoformat(), json.dumps(state), trade_id))
         self.conn.commit()
 
-    def managed_trades(self) -> list:
+    def managed_trades(self, symbol: Optional[str] = None) -> list:
         """Reconstrói as operações abertas gerenciadas pelo monitor (ManagedTrade)."""
 
         out = []
-        for r in self.conn.execute("SELECT * FROM trades WHERE status='OPEN' AND tese IS NOT NULL ORDER BY id").fetchall():
+        w, args = self._where_symbol(symbol, "AND")
+        for r in self.conn.execute(f"SELECT * FROM trades WHERE status='OPEN' AND tese IS NOT NULL{w} ORDER BY id", args).fetchall():
             plan = TradePlan(Direction(r["direcao"]), r["entrada"], r["stop"], r["atr"] or 0.0, datetime.fromisoformat(r["aberta_em"]),
                              targets=json.loads(r["alvos"] or "{}"), recommended=r["estrategia"] or "3R", signal_type=r["sinal_tipo"] or "", lots=r["lote"], risk_usd=r["risco_usd"])
             tr = ManagedTrade(r["id"], plan, Thesis.from_dict(json.loads(r["tese"]))).load_state(json.loads(r["estado"] or "{}"))
@@ -2040,9 +2078,10 @@ class PredictionMemory:
             self.conn.commit()
         return done
 
-    def r_stats(self):
+    def r_stats(self, symbol: Optional[str] = None):
 
-        rows = self.conn.execute("SELECT * FROM trades WHERE status='CLOSED'").fetchall()
+        w, args = self._where_symbol(symbol, "AND")
+        rows = self.conn.execute(f"SELECT * FROM trades WHERE status='CLOSED'{w}", args).fetchall()
         recs = []
         for r in rows:
             results = json.loads(r["resultados"] or "{}")
@@ -2053,10 +2092,10 @@ class PredictionMemory:
         return r_stats(recs)
 
     # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
-    def record_decision(self, rec) -> int:
+    def record_decision(self, rec, symbol: str = "XAUUSD") -> int:
         cur = self.conn.execute(
-            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca) VALUES (?,?,?,?,?,?,?,?,?)",
-            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence))
+            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca, ativo) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence, symbol))
         self.conn.commit()
         return int(cur.lastrowid)
 
@@ -2093,22 +2132,29 @@ class PredictionMemory:
         self.conn.commit()
         return n
 
-    def decisions(self, since: Optional[datetime] = None) -> list:
+    def decisions(self, since: Optional[datetime] = None, symbol: Optional[str] = None) -> list:
 
-        q = "SELECT * FROM decisions" + (" WHERE hora >= ?" if since else "") + " ORDER BY id"
-        rows = self.conn.execute(q, (since.isoformat(),) if since else ()).fetchall()
+        conds, args = [], []
+        if since:
+            conds.append("hora >= ?"); args.append(since.isoformat())
+        if symbol:
+            conds.append("ativo = ?"); args.append(symbol)
+        q = "SELECT * FROM decisions" + (" WHERE " + " AND ".join(conds) if conds else "") + " ORDER BY id"
+        rows = self.conn.execute(q, tuple(args)).fetchall()
         return [DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
                                r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0) for r in rows]
 
-    def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None):
+    def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None, symbol: Optional[str] = None):
 
-        decisions = self.decisions(since)
+        decisions = self.decisions(since, symbol)
         prices = self.prices(since)
-        entries = [(datetime.fromisoformat(r["aberta_em"]), r["direcao"]) for r in self.conn.execute("SELECT aberta_em, direcao FROM trades").fetchall()]
-        atrs = [r["atr"] for r in self.conn.execute("SELECT atr FROM trades WHERE atr IS NOT NULL").fetchall()] or [d.atr for d in decisions if d.atr]
+        w, args = self._where_symbol(symbol)
+        entries = [(datetime.fromisoformat(r["aberta_em"]), r["direcao"]) for r in self.conn.execute(f"SELECT aberta_em, direcao FROM trades{w}", args).fetchall()]
+        w2, args2 = self._where_symbol(symbol, "AND")
+        atrs = [r["atr"] for r in self.conn.execute(f"SELECT atr FROM trades WHERE atr IS NOT NULL{w2}", args2).fetchall()] or [d.atr for d in decisions if d.atr]
         threshold = (sum(atrs) / len(atrs)) if atrs else 9.0
         trade_rows = [{"score": r["score_entrada"] or 0.0, "r": r["resultado_r"]} for r in
-                      self.conn.execute("SELECT score_entrada, resultado_r FROM trades WHERE resultado_r IS NOT NULL").fetchall()]
+                      self.conn.execute(f"SELECT score_entrada, resultado_r FROM trades WHERE resultado_r IS NOT NULL{w2}", args2).fetchall()]
         # decisões bloqueadas com resultado hipotético também alimentam a curva de limiar
         trade_rows += [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         return opportunity_report(decisions, prices, entries, threshold, horizon_min, trade_rows)
@@ -2318,11 +2364,11 @@ def format_monitor(tr, reading) -> str:
 
 
 # --------------------------------------------------------------------------- 3.0: TELEGRAM TRADE MANAGER
-def format_entry(plan, assessment, mode: str, execution=None) -> str:
-    side = "🟢 BUY" if plan.direction.value == "ALTA" else "🔴 SELL"
+def format_entry(plan, assessment, mode: str, execution=None, symbol: str = "XAUUSD") -> str:
+    side = f"🟢 BUY {symbol}" if plan.direction.value == "ALTA" else f"🔴 SELL {symbol}"
     tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
     rr = plan.recommended[0] if plan.recommended[:1].isdigit() else "3"
-    lines = ["🚨 GOLD AI", "", f"{side} XAUUSD", "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
+    lines = ["🚨 MARKET AI", "", side, "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
              f"Confiança: {assessment.confidence:.0f}", "", f"Entrada: {plan.entry:.2f}", f"Stop: {plan.stop:.2f}", f"TP: {tp:.2f}" if tp else "TP: trailing",
              "", f"R:R = 1:{rr}", "", f"Lote: {plan.lots:.2f}" if plan.lots else "Lote: n/d", f"Risco: {plan.risk_usd:.2f} USD" if plan.risk_usd else "",
              "", "PRE-MOVE CONFIRMADO" if "CONFIRM" in plan.signal_type.upper() or "BUY" in plan.signal_type or "SELL" in plan.signal_type else plan.signal_type,
@@ -2397,6 +2443,14 @@ class GoldAIEngine:
             factors.append(SCORERS[name](s, weight))
         tech, readings = score_tecnico(s, self.cfg.weights["tecnico"])
         factors.append(tech)
+        if self.cfg.factor_signs:
+            for f in factors:
+                sign = self.cfg.factor_signs.get(f.name, 1)
+                if sign == 0:
+                    f.score, f.available, f.rationale = 0.0, False, f"sem relação conhecida com {self.cfg.symbol}"
+                elif sign < 0:
+                    f.score = -f.score
+                    f.rationale = f"(sinal invertido para {self.cfg.symbol}) " + f.rationale
         return factors, readings
 
     @staticmethod
@@ -4582,6 +4636,104 @@ def exit_learning(rows: Sequence[dict]) -> str:
 
 
 # ============================================================================
+# MARKETS
+# ============================================================================
+
+"""MARKET AI ENGINE 4.0 — registro de mercados.
+
+Cérebro único, múltiplos mercados: os fatores macro são calculados uma vez (na convenção do ouro,
+"+ = favorável à alta") e cada mercado declara o SINAL com que cada fator o afeta.
+    XAUUSD: dólar ↓ → +, juros reais ↓ → +, geopolítica ↑ → +
+    EURUSD: dólar ↓ → +, juros reais ↓ → +, geopolítica ↑ (risk-off, USD) → −
+    US500 : juros ↓ → +, Fed dovish → +, geopolítica ↑ → −, risco sistêmico → −
+    USDJPY: dólar ↑ → +, juros ↑ → + (o oposto do ouro), geopolítica ↑ (JPY refúgio) → −
+    WTI   : dólar ↓ → +, geopolítica ↑ → +, crescimento → +
+Fatores sem relação conhecida ficam com sinal 0 (indisponíveis para aquele mercado) — nada de
+inventar edge. O técnico e o fluxo vêm sempre dos candles do próprio mercado.
+"""
+
+
+
+# Grupos de exposição: (bucket, direção da exposição quando o mercado SOBE)
+# USD_SHORT = o mercado sobe quando o dólar cai; RISK_ON = sobe com apetite a risco; OIL = petróleo.
+
+
+@dataclass(frozen=True)
+class MarketSpec:
+    symbol: str                        # nome canônico (XAUUSD, EURUSD, US500, USDJPY, WTI)
+    yahoo: str                         # símbolo Yahoo para candles
+    mt5: str                           # símbolo típico no MT5 (ajustável por .env: MT5_SYMBOL_<symbol>)
+    contract_size: float               # unidades por lote (USD por 1.0 de preço por lote = contract_size × valor do ponto)
+    point_value_usd: float             # USD por 1.0 de variação de preço por lote padrão
+    factor_signs: dict[str, int]       # fator → +1 / −1 / 0
+    exposures: dict[str, float]        # bucket → peso (+ = mesma direção do mercado)
+    cftc_code: Optional[str] = None    # COT (disaggregated/legacy) do próprio mercado
+    typical_spread: float = 0.0        # em unidades de preço (custo de execução)
+    min_stop_atr: float = 0.6
+    max_stop_atr: float = 2.5
+    session_hours_utc: tuple[int, int] = (0, 24)   # janela de liquidez principal
+    phase: int = 1
+
+    def risk_usd_per_lot(self, stop_distance: float) -> float:
+        return stop_distance * self.point_value_usd
+
+
+GOLD_SIGNS = {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": 1, "fluxo": 1, "cot": 1, "opcoes": 1, "sentimento": 1, "tecnico": 1}
+
+MARKETS: dict[str, MarketSpec] = {
+    "XAUUSD": MarketSpec("XAUUSD", "GC=F", "XAUUSD", 100.0, 100.0, GOLD_SIGNS, {"USD_SHORT": 0.6, "SAFE_HAVEN": 0.8}, "088691", 0.30),
+    "EURUSD": MarketSpec("EURUSD", "EURUSD=X", "EURUSD", 100000.0, 100000.0,
+                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"USD_SHORT": 1.0, "RISK_ON": 0.3}, "099741", 0.00008),
+    "US500": MarketSpec("US500", "ES=F", "US500", 1.0, 1.0,
+                        {"dolar": 0, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                        {"RISK_ON": 1.0}, "13874A", 0.4, session_hours_utc=(13, 21)),
+    "USDJPY": MarketSpec("USDJPY", "JPY=X", "USDJPY", 100000.0, 680.0,   # ≈ 100000 / 147 USD por 1.0 de preço
+                         {"dolar": -1, "juros_reais": -1, "fed": -1, "inflacao": -1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"USD_SHORT": -1.0, "RISK_ON": 0.5}, "097741", 0.012),
+    "WTI": MarketSpec("WTI", "CL=F", "XTIUSD", 1000.0, 1000.0,
+                      {"dolar": 1, "juros_reais": 0, "fed": 1, "inflacao": 0, "geopolitica": 1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                      {"OIL": 1.0, "USD_SHORT": 0.3, "RISK_ON": 0.3}, "067651", 0.03),
+    # FASE 2
+    "NAS100": MarketSpec("NAS100", "NQ=F", "NAS100", 1.0, 1.0,
+                         {"dolar": 0, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"RISK_ON": 1.0}, None, 1.5, session_hours_utc=(13, 21), phase=2),
+    "GBPUSD": MarketSpec("GBPUSD", "GBPUSD=X", "GBPUSD", 100000.0, 100000.0,
+                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"USD_SHORT": 1.0, "RISK_ON": 0.4}, "096742", 0.00012, phase=2),
+    # FASE 3 (não provar volatilidade como falso edge antes de generalizar)
+    "BTCUSD": MarketSpec("BTCUSD", "BTC-USD", "BTCUSD", 1.0, 1.0,
+                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 0, "geopolitica": 0, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"RISK_ON": 1.0, "USD_SHORT": 0.3}, None, 30.0, phase=3),
+}
+
+PHASE1 = ("EURUSD", "US500", "XAUUSD", "USDJPY", "WTI")
+
+# Correlação estática de referência entre retornos (usada até haver correlação empírica suficiente).
+DEFAULT_CORRELATION: dict[tuple[str, str], float] = {
+    ("EURUSD", "GBPUSD"): 0.75, ("EURUSD", "XAUUSD"): 0.35, ("EURUSD", "USDJPY"): -0.30, ("EURUSD", "US500"): 0.20, ("EURUSD", "WTI"): 0.15,
+    ("GBPUSD", "XAUUSD"): 0.30, ("GBPUSD", "USDJPY"): -0.25, ("GBPUSD", "US500"): 0.25,
+    ("XAUUSD", "USDJPY"): -0.35, ("XAUUSD", "US500"): 0.05, ("XAUUSD", "WTI"): 0.20,
+    ("USDJPY", "US500"): 0.35, ("USDJPY", "WTI"): 0.10,
+    ("US500", "WTI"): 0.30, ("US500", "NAS100"): 0.90, ("US500", "BTCUSD"): 0.40, ("NAS100", "BTCUSD"): 0.45,
+}
+
+
+def correlation(a: str, b: str, table: Optional[dict[tuple[str, str], float]] = None) -> float:
+    if a == b:
+        return 1.0
+    table = table or DEFAULT_CORRELATION
+    return table.get((a, b), table.get((b, a), 0.0))
+
+
+def get_market(symbol: str) -> MarketSpec:
+    try:
+        return MARKETS[symbol.upper()]
+    except KeyError as e:
+        raise KeyError(f"mercado desconhecido: {symbol} (disponíveis: {', '.join(MARKETS)})") from e
+
+
+# ============================================================================
 # EXECUTION
 # ============================================================================
 
@@ -4895,9 +5047,10 @@ class PerformanceEngine:
                 + (" · 🚨 TRADING STOP" if self.trading_stop else ""))
 
 
-def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float) -> tuple[float, float]:
-    """(lote, risco real em USD). CAPITAL + RISCO + STOP + CONTRATO — nada mais."""
-    per_lot = stop_distance * limits.contract_size
+def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float, point_value_usd: Optional[float] = None) -> tuple[float, float]:
+    """(lote, risco real em USD). CAPITAL + RISCO + STOP + CONTRATO — nada mais.
+    `point_value_usd` (USD por 1.0 de preço por lote) vem do MarketSpec no 4.0; padrão = contract_size (XAUUSD)."""
+    per_lot = stop_distance * (point_value_usd if point_value_usd else limits.contract_size)
     if per_lot <= 0:
         return 0.0, 0.0
     lots = min(limits.max_lot, risk_usd / per_lot)
@@ -5679,6 +5832,64 @@ def validate(frame: HistoryFrame, cfg: Optional[EngineConfig] = None, n_folds: i
     return rep
 
 
+# --------------------------------------------------------------------------- 4.0: validação multi-mercado
+@dataclass
+class MarketValidation:
+    symbol: str
+    n_trades: int
+    expectancy: float
+    profit_factor: Optional[float]
+    win_rate: float
+    capture_rate: Optional[float]
+    entry_rate: Optional[float]
+    confidence: object            # selector.StatConfidence
+    status: str                   # 🟢 🟡 🔴
+    report: object                # ValidationReport
+
+
+def validate_markets(frames: dict, cfg_factory=None, n_folds: int = 4, step: int = 1, warmup: int = 220, horizon_min: int = 240,
+                     strategy: str = "adaptive") -> list[MarketValidation]:
+    """Responde: qual mercado apresenta melhor expectativa FORA DA AMOSTRA, ponderada pelo tamanho da amostra?
+    O ranking usa a expectancy encolhida pela confiança estatística — 37 trades a +0.9R não vencem 487 a +0.42R."""
+
+    out: list[MarketValidation] = []
+    for symbol, frame in frames.items():
+        spec = get_market(symbol)
+        cfg = cfg_factory(symbol) if cfg_factory else EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
+        rep = validate(frame, cfg, n_folds=n_folds, step=step, warmup=warmup, horizon_min=horizon_min, audit_every=200)
+        bt = Backtester(frame, cfg, warmup=warmup, step=step, horizon_min=horizon_min)
+        wf = walk_forward(bt, n_folds=n_folds)
+        rows = [r for _, res in wf.folds for r in res.trade_rows]
+        rs = [row["results"].get(strategy, row["results"].get("3R", 0.0)) for row in rows]
+        conf = statistical_confidence(rs)
+        wins = [x for x in rs if x > 0]
+        losses = [x for x in rs if x <= 0]
+        pf = (sum(wins) / -sum(losses)) if losses and sum(losses) < 0 else (None if not wins else float("inf"))
+        caps = [res.opportunity.capture_rate for _, res in wf.folds if res.opportunity and res.opportunity.capture_rate is not None]
+        ents = [res.opportunity.entry_rate for _, res in wf.folds if res.opportunity and res.opportunity.entry_rate is not None]
+        status = "🟢" if (conf.level in ("HIGH", "MEDIUM") and conf.shrunk > 0.1) else "🟡" if conf.shrunk > 0 else "🔴"
+        out.append(MarketValidation(symbol, len(rs), conf.expectancy, (round(pf, 2) if pf not in (None, float("inf")) else pf), (len(wins) / len(rs)) if rs else 0.0,
+                                    (statistics.fmean(caps) if caps else None), (statistics.fmean(ents) if ents else None), conf, status, rep))
+    return sorted(out, key=lambda m: -m.confidence.shrunk)
+
+
+def render_market_validation(rows: Sequence[MarketValidation]) -> str:
+    lines = ["🧪 VALIDAÇÃO MULTI-MERCADO (fora da amostra, walk-forward) — ranking pela expectancy ajustada à amostra",
+             f"{'Ativo':<8}{'Trades':>7}{'Expect.':>9}{'Ajust.':>8}{'PF':>7}{'Win':>6}{'Capture':>9}{'Entry':>7}  Conf.   Status"]
+    for m in rows:
+        pf = "n/d" if m.profit_factor is None else ("∞" if m.profit_factor == float("inf") else f"{m.profit_factor:.2f}")
+        cap = "n/d" if m.capture_rate is None else f"{m.capture_rate:.0%}"
+        ent = "n/d" if m.entry_rate is None else f"{m.entry_rate:.0%}"
+        lines.append(f"{m.symbol:<8}{m.n_trades:>7}{m.expectancy:>+9.2f}{m.confidence.shrunk:>+8.2f}{pf:>7}{m.win_rate:>6.0%}{cap:>9}{ent:>7}  {m.confidence.level:<7} {m.status}")
+    if rows:
+        best = rows[0]
+        lines.append(f"Melhor expectativa OOS ajustada: {best.symbol} ({best.confidence.render()})")
+        low = [m.symbol for m in rows if m.confidence.level == "LOW" and m.expectancy > rows[0].expectancy]
+        if low:
+            lines.append(f"⚠️ {', '.join(low)}: expectancy maior mas amostra pequena — NÃO escolher automaticamente")
+    return "\n".join(lines)
+
+
 # ============================================================================
 # OPPORTUNITY
 # ============================================================================
@@ -5845,6 +6056,247 @@ def opportunity_report(decisions: Sequence[DecisionRecord], prices: Sequence[tup
 
 
 # ============================================================================
+# SELECTOR
+# ============================================================================
+
+"""MARKET AI ENGINE 4.0 — ASSET SELECTOR · MARKET OPPORTUNITY SCORE · OPPORTUNITY DECAY · PORTFOLIO EXPOSURE.
+
+Regra: o Asset Selector NÃO cria entradas. Ele só ordena oportunidades que o Prediction/Opportunity
+Engine já produziu (sinal operacional + vantagem estatística) e o Risk Engine ainda valida depois.
+
+MARKET OPPORTUNITY SCORE (pesos iniciais, a serem testados pelo Validation Engine):
+    25% expectancy histórica (encolhida pela confiança estatística)
+    20% probabilidade calibrada
+    15% score atual
+    15% qualidade do pré-movimento
+    10% compatibilidade de regime
+     5% captura histórica de oportunidades
+     5% liquidez / custo de execução
+     5% qualidade dos dados
+Três dimensões separadas: QUALIDADE HISTÓRICA · OPORTUNIDADE ATUAL · DECAY (ainda existe vantagem AGORA?).
+"""
+
+
+
+
+WEIGHTS = {"expectancy": 0.25, "probability": 0.20, "score": 0.15, "premove": 0.15, "regime": 0.10, "capture": 0.05, "execution": 0.05, "data": 0.05}
+
+
+# --------------------------------------------------------------------------- confiança estatística
+@dataclass
+class StatConfidence:
+    n: int
+    expectancy: float
+    std: float
+    level: str            # HIGH | MEDIUM | LOW | NONE
+    lower_bound: float    # limite inferior ~90% da expectancy
+    shrunk: float         # expectancy encolhida para 0 conforme a amostra
+
+    def render(self) -> str:
+        return f"E={self.expectancy:+.2f}R n={self.n} conf={self.level} (LB {self.lower_bound:+.2f}R, ajustada {self.shrunk:+.2f}R)"
+
+
+def statistical_confidence(results_r: Sequence[float], k: int = 30) -> StatConfidence:
+    """Encolhimento bayesiano simples E×n/(n+k) e limite inferior E − 1.28·σ/√n. HIGH exige n≥100 e LB>0."""
+    n = len(results_r)
+    if n == 0:
+        return StatConfidence(0, 0.0, 0.0, "NONE", 0.0, 0.0)
+    e = statistics.fmean(results_r)
+    sd = statistics.pstdev(results_r) if n > 1 else 1.0
+    lb = e - 1.28 * sd / math.sqrt(n)
+    shrunk = e * n / (n + k)
+    level = "HIGH" if (n >= 100 and lb > 0) else "MEDIUM" if (n >= 30 and lb > -0.05) else "LOW"
+    return StatConfidence(n, round(e, 3), round(sd, 3), level, round(lb, 3), round(shrunk, 3))
+
+
+# --------------------------------------------------------------------------- decay
+def opportunity_decay(a: Assessment, first_seen: Optional[datetime], now: datetime, half_life_min: float = 45.0) -> tuple[float, str]:
+    """0..1 — quanto da vantagem ainda existe para entrar AGORA: estágio × preço já percorrido × idade do sinal."""
+    stage = {Stage.PRE_MOVIMENTO: 1.0, Stage.CONFIRMACAO: 0.85, Stage.NEUTRO: 0.6, Stage.MOVIMENTO: 0.2}[a.premove.stage]
+    moved = max(0.0, 1.0 - abs(a.premove.move_in_atr) / 2.0)
+    age_min = (now - first_seen).total_seconds() / 60 if first_seen else 0.0
+    age = 0.5 ** (age_min / half_life_min)
+    decay = round(stage * moved * (0.4 + 0.6 * age), 3)
+    why = f"estágio {a.premove.stage.value} · {abs(a.premove.move_in_atr):.1f} ATR percorridos · idade {age_min:.0f} min"
+    return decay, why
+
+
+# --------------------------------------------------------------------------- candidato
+@dataclass
+class Candidate:
+    spec: MarketSpec
+    assessment: Assessment
+    signal: Signal
+    snapshot: MarketSnapshot
+    history: StatConfidence
+    capture_rate: Optional[float] = None
+    data_quality: float = 1.0          # fração de fatores disponíveis
+    first_seen: Optional[datetime] = None
+    components: dict[str, float] = field(default_factory=dict)
+    decay: float = 1.0
+    decay_note: str = ""
+    opportunity_score: float = 0.0
+    status: str = "🟠"
+
+    @property
+    def direction(self) -> Direction:
+        return self.signal.direction
+
+    def render_row(self) -> str:
+        a = self.assessment
+        return (f"{self.spec.symbol:<7} {self.status} OPP {self.opportunity_score:>5.1f} · hist {self.history.shrunk:+.2f}R ({self.history.level}, n={self.history.n}) · "
+                f"agora score {a.score:+.0f} prob {max(a.prob_up, a.prob_down):.0%} {a.premove.stage.value} · decay {self.decay:.2f} · "
+                f"{'BUY' if self.direction == Direction.ALTA else 'SELL'}")
+
+
+def regime_compatibility(a: Assessment, direction: Direction) -> float:
+    r = a.regime
+    if direction == Direction.ALTA:
+        return 1.0 if r.startswith("BULLISH") else 0.6 if r == "RANGE" else 0.3 if r == "VOLATILE" else 0.2
+    return 1.0 if r.startswith("BEARISH") else 0.6 if r == "RANGE" else 0.3 if r == "VOLATILE" else 0.2
+
+
+def premove_quality(a: Assessment) -> float:
+    base = {Stage.PRE_MOVIMENTO: 1.0, Stage.CONFIRMACAO: 0.8, Stage.NEUTRO: 0.4, Stage.MOVIMENTO: 0.1}[a.premove.stage]
+    return base * (0.5 + 0.5 * a.premove.probability) * (0.6 + 0.4 * int(a.evidence_level) / 4)
+
+
+def execution_quality(spec: MarketSpec, snap: MarketSnapshot, spread: Optional[float]) -> float:
+    atr = snap.atr or 0.0
+    sp = spread if spread is not None else spec.typical_spread
+    if atr <= 0:
+        return 0.5
+    ratio = sp / atr  # spread como fração do ATR
+    q = max(0.0, 1.0 - ratio / 0.15)
+    h = snap.time.hour
+    lo, hi = spec.session_hours_utc
+    in_session = lo <= h < hi if lo < hi else (h >= lo or h < hi)
+    return round(q * (1.0 if in_session else 0.6), 3)
+
+
+class AssetSelector:
+    def __init__(self, weights: Optional[dict[str, float]] = None) -> None:
+        self.weights = weights or dict(WEIGHTS)
+        self.first_seen: dict[str, tuple[Direction, datetime]] = {}
+
+    def score(self, c: Candidate, now: datetime, spread: Optional[float] = None) -> Candidate:
+        a = c.assessment
+        key = c.spec.symbol
+        seen = self.first_seen.get(key)
+        if seen is None or seen[0] != c.direction:
+            self.first_seen[key] = (c.direction, now)
+            seen = self.first_seen[key]
+        c.first_seen = seen[1]
+        c.decay, c.decay_note = opportunity_decay(a, c.first_seen, now)
+        comp = {
+            "expectancy": max(0.0, min(1.0, 0.5 + c.history.shrunk)),          # +0.5R → 1.0 ; 0 → 0.5 ; −0.5R → 0
+            "probability": max(0.0, min(1.0, (max(a.prob_up, a.prob_down) - 0.5) * 2)),
+            "score": min(1.0, abs(a.score) / 100.0),
+            "premove": premove_quality(a),
+            "regime": regime_compatibility(a, c.direction),
+            "capture": c.capture_rate if c.capture_rate is not None else 0.5,
+            "execution": execution_quality(c.spec, c.snapshot, spread),
+            "data": c.data_quality,
+        }
+        raw = sum(self.weights[k] * v for k, v in comp.items()) * 100.0
+        c.components = {k: round(v, 3) for k, v in comp.items()}
+        c.opportunity_score = round(raw * (0.5 + 0.5 * c.decay), 1)
+        c.status = "🟢" if c.opportunity_score >= 60 else "🟡" if c.opportunity_score >= 45 else "🟠"
+        return c
+
+    def rank(self, candidates: Sequence[Candidate], now: datetime, spreads: Optional[dict[str, float]] = None) -> list[Candidate]:
+        scored = [self.score(c, now, (spreads or {}).get(c.spec.symbol)) for c in candidates]
+        return sorted(scored, key=lambda c: -c.opportunity_score)
+
+    def forget(self, symbol: str) -> None:
+        self.first_seen.pop(symbol, None)
+
+
+def render_rank(ranked: Sequence[Candidate], history: Optional[dict[str, StatConfidence]] = None) -> str:
+    lines = ["🏆 MARKET OPPORTUNITY RANK", "        HISTÓRICO            AGORA"]
+    for c in ranked:
+        a = c.assessment
+        now_flag = "🟢" if (a.has_edge and c.decay >= 0.5) else "🟡" if a.has_edge else "🔴"
+        lines.append(f"{c.spec.symbol:<7} {c.history.shrunk:+.2f}R {c.history.level:<6}  {now_flag} score {a.score:+.0f} prob {max(a.prob_up, a.prob_down):.0%} "
+                     f"decay {c.decay:.2f} → OPP {c.opportunity_score:.1f} {c.status}")
+    if history:
+        rest = [s for s in history if s not in {c.spec.symbol for c in ranked}]
+        for s in rest:
+            h = history[s]
+            lines.append(f"{s:<7} {h.shrunk:+.2f}R {h.level:<6}  🔴 sem oportunidade agora")
+    if ranked:
+        lines.append(f"MELHOR OPORTUNIDADE: {ranked[0].spec.symbol} ({'BUY' if ranked[0].direction == Direction.ALTA else 'SELL'}) — {ranked[0].decay_note}")
+    else:
+        lines.append("Nenhuma oportunidade com vantagem estatística neste ciclo.")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- exposição de carteira
+@dataclass
+class OpenExposure:
+    symbol: str
+    direction: Direction
+    risk_usd: float
+
+
+@dataclass
+class PortfolioLimits:
+    max_total_open_risk_pct: float = 1.5
+    max_correlated_risk_pct: float = 1.0
+    max_positions: int = 3
+    max_asset_exposure: int = 1
+    correlation_threshold: float = 0.5   # acima disto, duas posições são "a mesma aposta"
+
+    @classmethod
+    def from_env(cls, env: dict[str, str]) -> "PortfolioLimits":
+        g = lambda k, d: type(d)(env.get(k, d))  # noqa: E731
+        return cls(g("MAX_TOTAL_OPEN_RISK", 1.5), g("MAX_CORRELATED_RISK", 1.0), g("MAX_PORTFOLIO_POSITIONS", 3), g("MAX_ASSET_EXPOSURE", 1), g("CORRELATION_THRESHOLD", 0.5))
+
+
+class PortfolioExposureEngine:
+    """"Estou diversificando ou fazendo a mesma aposta três vezes?" Risco agregado e correlacionado."""
+
+    def __init__(self, limits: PortfolioLimits, corr_table: Optional[dict[tuple[str, str], float]] = None) -> None:
+        self.limits = limits
+        self.corr_table = corr_table
+
+    def correlated_risk(self, symbol: str, direction: Direction, risk_usd: float, open_: Sequence[OpenExposure]) -> float:
+        """Risco da nova posição + risco das abertas na mesma aposta (correlação assinada pela direção)."""
+        total = risk_usd
+        for o in open_:
+            rho = correlation(symbol, o.symbol, self.corr_table)
+            same = 1.0 if o.direction == direction else -1.0
+            signed = rho * same
+            if signed > 0:
+                total += o.risk_usd * signed
+        return round(total, 2)
+
+    def check(self, symbol: str, direction: Direction, risk_usd: float, open_: Sequence[OpenExposure], equity: float) -> list[str]:
+        reasons: list[str] = []
+        if len(open_) >= self.limits.max_positions:
+            reasons.append(f"posições abertas {len(open_)} ≥ MAX_PORTFOLIO_POSITIONS {self.limits.max_positions}")
+        if sum(1 for o in open_ if o.symbol == symbol) >= self.limits.max_asset_exposure:
+            reasons.append(f"já existe posição em {symbol} (MAX_ASSET_EXPOSURE)")
+        total = sum(o.risk_usd for o in open_) + risk_usd
+        if total > equity * self.limits.max_total_open_risk_pct / 100.0:
+            reasons.append(f"risco total aberto {total / equity:.2%} > MAX_TOTAL_OPEN_RISK {self.limits.max_total_open_risk_pct}%")
+        corr = self.correlated_risk(symbol, direction, risk_usd, open_)
+        if corr > equity * self.limits.max_correlated_risk_pct / 100.0:
+            same = [o.symbol for o in open_ if correlation(symbol, o.symbol, self.corr_table) * (1 if o.direction == direction else -1) >= self.limits.correlation_threshold]
+            reasons.append(f"risco correlacionado {corr / equity:.2%} > MAX_CORRELATED_RISK {self.limits.max_correlated_risk_pct}% (mesma aposta: {', '.join(same) or 'parcial'})")
+        return reasons
+
+    def render(self, open_: Sequence[OpenExposure], equity: float) -> str:
+        if not open_:
+            return "📐 EXPOSIÇÃO: nenhuma posição aberta"
+        total = sum(o.risk_usd for o in open_)
+        lines = [f"📐 EXPOSIÇÃO: {len(open_)} posição(ões) · risco total {total / equity:.2%} do capital"]
+        for o in open_:
+            lines.append(f"  {o.symbol} {'BUY' if o.direction == Direction.ALTA else 'SELL'} risco {o.risk_usd:.2f} USD")
+        return "\n".join(lines)
+
+
+# ============================================================================
 # LIVE_ENGINE
 # ============================================================================
 
@@ -5868,6 +6320,7 @@ class CycleResult:
     assessment: Optional[Assessment]
     signal: Optional[Signal]
     decision: str = ""
+    pid: Optional[int] = None
     plan: Optional[TradePlan] = None
     readings: list[tuple[ManagedTrade, MonitorReading]] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
@@ -5880,7 +6333,13 @@ class LiveExecutionEngine:
     def __init__(self, mem: PredictionMemory, limits: GuardLimits, mode: TradingMode = TradingMode.PAPER, equity: float = 10000.0,
                  executor=None, sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None,
                  commands: Optional[TelegramCommands] = None, horizon_min: int = 240, engine: Optional[GoldAIEngine] = None,
-                 log: Callable[[str], None] = print, authorized: bool = False) -> None:
+                 log: Callable[[str], None] = print, authorized: bool = False, spec=None, perf: Optional[PerformanceEngine] = None,
+                 entry_gate: Optional[Callable] = None) -> None:
+        """`spec` (markets.MarketSpec) torna o motor específico de um mercado; `perf` permite capital compartilhado
+        entre mercados (4.0); `entry_gate(symbol, direction, risk_usd)` → lista de bloqueios do portfólio (exposição)."""
+        self.spec = spec or get_market("XAUUSD")
+        self.symbol = self.spec.symbol
+        self.entry_gate = entry_gate
         self.mem, self.limits, self.mode = mem, limits, mode
         self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
         self.sender = sender or TelegramSender(dry_run=True)
@@ -5891,12 +6350,14 @@ class LiveExecutionEngine:
         self.log = log
         self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
         start_equity = mem.last_equity() or equity
-        self.perf = PerformanceEngine(limits, start_equity)
+        self.perf = perf or PerformanceEngine(limits, start_equity)
         if mem.last_equity() is None:
             mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
-        self.monitor = TradeMonitor(history=mem.r_stats())
-        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(), horizon_min, limits.min_rr_to_structure)
-        self.managed: list[ManagedTrade] = mem.managed_trades()
+        if engine is not None and self.spec.factor_signs and not engine.cfg.factor_signs:
+            engine.cfg.factor_signs, engine.cfg.symbol = dict(self.spec.factor_signs), self.symbol
+        self.monitor = TradeMonitor(history=mem.r_stats(self.symbol))
+        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(self.symbol), horizon_min, limits.min_rr_to_structure)
+        self.managed: list[ManagedTrade] = mem.managed_trades(self.symbol)
         self.tickets: dict[int, int] = {}             # trade_id → ticket no broker
         for tr in self.managed:
             row = mem.conn.execute("SELECT ticket FROM trades WHERE id=?", (tr.trade_id,)).fetchone()
@@ -5929,7 +6390,7 @@ class LiveExecutionEngine:
                 self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
 
     # ------------------------------------------------------------------ ciclo
-    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None) -> CycleResult:
+    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None, defer_entry: bool = False) -> CycleResult:
         res = CycleResult(None, None)
         now = snap.time
         self.handle_commands(res, now)
@@ -5951,7 +6412,7 @@ class LiveExecutionEngine:
         for tid, sim in self.mem.auto_resolve_trades(fine, now):
             pr = sim["profile"]
             res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
-        self.mpe.history = self.monitor.history = self.mem.r_stats()
+        self.mpe.history = self.monitor.history = self.mem.r_stats(self.symbol)
         self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
 
         self.mem.store_prices(fine)
@@ -5961,17 +6422,30 @@ class LiveExecutionEngine:
         # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
         for tr in list(self.managed):
             self._monitor_trade(tr, a, snap, fine, res)
-        # DECISION ENGINE
+        res.pid = None
         if sig is not None:
             self._send(sig.text, res)
-            pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon)
-            res.decision = self._decide_entry(sig, a, snap, pid, res)
+            res.pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon, symbol=self.symbol)
+        if defer_entry:
+            res.decision = "ANALISADO — decisão de entrada delegada ao Asset Selector" if sig is not None else "SEM SINAL — " + a.edge_status
+            return res
+        return self.enter(res, snap)
+
+    def enter(self, res: CycleResult, snap: MarketSnapshot, veto: Optional[str] = None) -> CycleResult:
+        """DECISION ENGINE. `veto` = motivo externo (Asset Selector/exposição) para não entrar neste ciclo."""
+        a, sig = res.assessment, res.signal
+        if a is None:
+            return res
+        if sig is not None and veto:
+            res.decision = veto
+        elif sig is not None:
+            res.decision = self._decide_entry(sig, a, snap, res.pid or 0, res)
         else:
             res.decision = "SEM SINAL — " + a.edge_status
         # OPPORTUNITY ENGINE: toda oportunidade analisada vira um registro (entrada ou regra que bloqueou)
         direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
-        self.mem.record_decision(DecisionRecord(now, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
-                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence))
+        self.mem.record_decision(DecisionRecord(snap.time, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
+                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence), symbol=self.symbol)
         return res
 
     # ------------------------------------------------------------------ entrada
@@ -5997,14 +6471,18 @@ class LiveExecutionEngine:
             return "🟡 NÃO OPERAR — " + "; ".join(reasons)
         # uma posição por ativo (memória + broker)
         if self.managed or (self.executor is not None and self.executor.positions()):
-            return "BLOQUEADA — já existe posição ativa em XAUUSD (MAX_POSITIONS)"
+            return f"BLOQUEADA — já existe posição ativa em {self.symbol} (MAX_POSITIONS)"
         plan = self.mpe.plan(a, snap, sig.direction, sig.type.value)
         res.plan = plan
         if not plan.viable:
             return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
-        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value)   # capital + risco + stop + contrato
+        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value, self.spec.point_value_usd)   # capital + risco + stop + contrato
         if not plan.lots:
             return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+        if self.entry_gate is not None:
+            blocked = self.entry_gate(self.symbol, sig.direction, plan.risk_usd)
+            if blocked:
+                return "BLOQUEADA — exposição de carteira: " + "; ".join(blocked)
         self.log(plan.render())
         if self.mode == TradingMode.AUTHORIZE and not self.authorized:
             self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render(), res)
@@ -6024,7 +6502,7 @@ class LiveExecutionEngine:
                     self.executor.close(execution.ticket)
                     return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
             self.authorized = False
-        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon)
+        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon, symbol=self.symbol)
         thesis = Thesis.from_assessment(a, plan.direction)
         tr = ManagedTrade(tid, plan, thesis)
         if execution is not None:
@@ -6033,7 +6511,7 @@ class LiveExecutionEngine:
         self.mem.save_thesis(tid, thesis, tr.state_dict())
         self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
         self.managed.append(tr)
-        self._send(format_entry(plan, a, self.mode.value, execution), res)
+        self._send(format_entry(plan, a, self.mode.value, execution, self.symbol), res)
         return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
 
     # ------------------------------------------------------------------ monitor
@@ -6141,6 +6619,292 @@ class LiveExecutionEngine:
 
 
 # ============================================================================
+# DATA · MULTI
+# ============================================================================
+
+"""MARKET AI ENGINE 4.0 — dados multi-mercado sobre o Data Engine existente.
+
+Macro (dólar, juros, Fed, inflação, geopolítica, risco sistêmico, notícias, COT do ouro) é coletada UMA vez;
+cada mercado recebe os próprios candles/preço/ATR/fluxo (Yahoo ou MT5) e o COT do próprio contrato quando houver.
+"""
+
+
+import copy
+
+
+
+@dataclass
+class MarketSnapshotSet:
+    time: datetime
+    base: MarketSnapshot                       # snapshot macro (convenção do ouro)
+    by_symbol: dict[str, MarketSnapshot] = field(default_factory=dict)
+    status: dict[str, str] = field(default_factory=dict)
+    data_quality: dict[str, float] = field(default_factory=dict)
+
+
+MACRO_FIELDS = ("dxy", "dxy_change_pct", "us2y", "us10y", "us10y_change_bp", "real_yield_10y", "real_yield_change_bp", "breakeven_10y_change_bp",
+                "fed_cut_prob_change_pp", "fed_tone", "inflation_surprise_sigma", "inflation_trend", "geopolitical_risk", "geopolitical_risk_change",
+                "vix", "vix_change_pct", "credit_spread_bp", "credit_spread_change_bp", "equity_change_pct", "bank_stress", "sentiment", "sentiment_change",
+                "silver_change_pct", "oil_change_pct", "btc_change_pct", "usdcnh_change_pct", "news", "events")
+
+
+def derive_market_snapshot(base: MarketSnapshot, spec: MarketSpec, candles: dict, now: datetime, window_minutes: int = 60,
+                           cot: Optional[dict] = None) -> MarketSnapshot:
+    """Snapshot do mercado: macro compartilhada + candles/preço/ATR/fluxo próprios."""
+    s = MarketSnapshot(time=now)
+    for f in MACRO_FIELDS:
+        setattr(s, f, copy.copy(getattr(base, f)))
+    s.candles = candles
+    ref = candles.get("H1") or candles.get("M15") or []
+    if ref:
+        s.price = ref[-1].close
+        s.atr = (_atr(candles["H1"]) or 0.0) if "H1" in candles else 0.0
+        fine = candles.get("M5") or ref
+        cutoff = fine[-1].time.timestamp() - window_minutes * 60
+        prev = next((c for c in reversed(fine[:-1]) if c.time.timestamp() <= cutoff), fine[0])
+        s.price_change_pct = (fine[-1].close / prev.close - 1) * 100 if prev.close else 0.0
+        recent = [c for c in fine if (now - c.time).total_seconds() <= window_minutes * 60]
+        vol = sum(c.volume for c in recent)
+        if vol > 0:
+            s.order_flow_imbalance = round((sum(c.volume for c in recent if c.close > c.open) - sum(c.volume for c in recent if c.close < c.open)) / vol, 3)
+    if spec.symbol == "XAUUSD":
+        s.cot_managed_money_net, s.cot_managed_money_net_change = base.cot_managed_money_net, base.cot_managed_money_net_change
+        s.cot_managed_money_percentile, s.cot_commercial_net_change = base.cot_managed_money_percentile, base.cot_commercial_net_change
+        s.etf_flow_musd, s.put_call_ratio, s.implied_vol_change_pct = base.etf_flow_musd, base.put_call_ratio, base.implied_vol_change_pct
+        s.gamma_wall_above, s.gamma_wall_below = base.gamma_wall_above, base.gamma_wall_below
+    elif cot:
+        s.cot_managed_money_net, s.cot_managed_money_net_change = cot.get("net"), cot.get("change")
+        s.cot_managed_money_percentile, s.cot_commercial_net_change = cot.get("percentile"), cot.get("commercial_change")
+    return s
+
+
+def data_quality(s: MarketSnapshot, spec: MarketSpec) -> float:
+    """Fração dos fatores relevantes para o mercado com dado disponível."""
+    checks = {
+        "dolar": s.dxy_change_pct is not None, "juros_reais": s.real_yield_change_bp is not None or s.us10y_change_bp is not None,
+        "fed": s.fed_cut_prob_change_pp is not None or s.fed_tone is not None, "inflacao": s.inflation_surprise_sigma is not None,
+        "geopolitica": s.geopolitical_risk is not None, "fluxo": s.order_flow_imbalance is not None, "cot": s.cot_managed_money_net_change is not None,
+        "opcoes": s.put_call_ratio is not None, "sentimento": s.sentiment is not None, "tecnico": bool(s.candles.get("H1")),
+    }
+    relevant = [k for k, sign in spec.factor_signs.items() if sign != 0]
+    if not relevant:
+        return 0.0
+    return round(sum(1 for k in relevant if checks.get(k)) / len(relevant), 2)
+
+
+class MultiMarketData:
+    """Coleta macro uma vez e candles por mercado (Yahoo por padrão; MT5 quando `mt5_client` é fornecido)."""
+
+    def __init__(self, symbols: tuple[str, ...], cfg: Optional[DataEngineConfig] = None, http: Optional[HttpClient] = None,
+                 mt5_client: Any = None, mt5_symbol_map: Optional[dict[str, str]] = None) -> None:
+        self.specs = [get_market(s) for s in symbols]
+        self.engine = DataEngine(cfg, http)
+        self.yahoo = YahooCollector(self.engine.http)
+        self.mt5 = mt5_client
+        self.mt5_symbol_map = mt5_symbol_map or {}
+        self.status: dict[str, str] = {}
+
+    @classmethod
+    def symbol_map_from_env(cls, env: dict[str, str]) -> dict[str, str]:
+        return {sym: env[f"MT5_SYMBOL_{sym}"] for sym in MARKETS if f"MT5_SYMBOL_{sym}" in env}
+
+    def market_candles(self, spec: MarketSpec) -> dict:
+        if self.mt5 is not None:
+            orig = self.mt5.cfg.symbol
+            self.mt5.cfg.symbol = self.mt5_symbol_map.get(spec.symbol, spec.mt5)
+            try:
+                if not self.mt5.connected:
+                    self.mt5.connect()
+                self.mt5.mt5.symbol_select(self.mt5.cfg.symbol, True)
+                return {tf: cs for tf in TF_TO_MT5 if (cs := self.mt5.candles(tf))}
+            finally:
+                self.mt5.cfg.symbol = orig
+        return self.yahoo.all_timeframes(spec.yahoo)
+
+    def market_cot(self, spec: MarketSpec) -> Optional[dict]:
+        if not spec.cftc_code or spec.symbol == "XAUUSD" or not self.engine.cfg.enable_cot:
+            return None
+        try:
+            r = self.engine.cftc.gold(code=spec.cftc_code)
+            return {"net": r.managed_money_net, "change": r.managed_money_net_change, "percentile": r.managed_money_percentile, "commercial_change": r.commercial_net_change}
+        except Exception as e:  # noqa: BLE001
+            self.status[f"cot:{spec.symbol}"] = f"erro: {e}"
+            return None
+
+    def collect(self, now: Optional[datetime] = None) -> MarketSnapshotSet:
+        now = now or datetime.now(timezone.utc)
+        base = self.engine.collect(now)          # macro + XAU
+        self.status = dict(self.engine.status)
+        out = MarketSnapshotSet(now, base)
+        for spec in self.specs:
+            try:
+                candles = base.candles if spec.symbol == "XAUUSD" and base.candles else self.market_candles(spec)
+                if not candles:
+                    raise RuntimeError("sem candles")
+                s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec))
+                out.by_symbol[spec.symbol] = s
+                out.data_quality[spec.symbol] = data_quality(s, spec)
+                self.status[spec.symbol] = "ok"
+            except Exception as e:  # noqa: BLE001
+                self.status[spec.symbol] = f"erro: {e}"
+        out.status = dict(self.status)
+        return out
+
+    def coverage(self) -> str:
+        ok = [k for k, v in self.status.items() if v == "ok"]
+        bad = [f"  ✗ {k}: {v}" for k, v in self.status.items() if v != "ok"]
+        return "\n".join([f"MULTI-MARKET DATA — ok: {', '.join(ok) or 'nenhum'}"] + bad)
+
+
+# ============================================================================
+# MARKET_ENGINE
+# ============================================================================
+
+"""MARKET AI ENGINE 4.0 — cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade.
+
+Objetivo: "Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor
+vantagem estatística disponível naquele momento, respeitando risco, correlação, qualidade dos dados
+e custo de execução." A IA não precisa operar ouro; precisa encontrar onde existe vantagem.
+
+Preserva integralmente os motores do 3.0 (um LiveExecutionEngine por mercado, capital compartilhado).
+O Asset Selector NÃO cria entradas: só ordena as que o Prediction/Opportunity Engine já produziu.
+Nenhum filtro de entrada novo: os vetos do 4.0 são exclusivamente de PORTFÓLIO (exposição/correlação)
+e de PRIORIDADE (um ciclo, uma entrada: a melhor).
+"""
+
+
+
+
+
+@dataclass
+class PortfolioCycle:
+    time: datetime
+    results: dict[str, CycleResult] = field(default_factory=dict)
+    ranked: list[Candidate] = field(default_factory=list)
+    chosen: Optional[str] = None
+    decision: str = ""
+    messages: list[str] = field(default_factory=list)
+
+    def render(self) -> str:
+        lines = [f"🌎 MARKET AI — ciclo {self.time:%Y-%m-%d %H:%M} UTC"]
+        for sym, r in self.results.items():
+            a = r.assessment
+            if a is None:
+                lines.append(f"  {sym:<7} sem dados")
+                continue
+            lines.append(f"  {sym:<7} score {a.score:+4.0f} prob {max(a.prob_up, a.prob_down):.0%} {a.regime:<8} {a.premove.stage.value:<14} "
+                         f"{'sinal ' + r.signal.type.value if r.signal else 'sem sinal'} → {r.decision}")
+        lines.append(f"DECISÃO: {self.decision}")
+        return "\n".join(lines)
+
+
+class MarketAIEngine:
+    def __init__(self, mem: PredictionMemory, limits: GuardLimits, symbols: tuple[str, ...], mode: TradingMode = TradingMode.PAPER,
+                 equity: float = 10000.0, portfolio: Optional[PortfolioLimits] = None, executors: Optional[dict] = None,
+                 sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None, commands: Optional[TelegramCommands] = None,
+                 horizon_min: int = 240, log: Callable[[str], None] = print, authorized: bool = False,
+                 selector: Optional[AssetSelector] = None, calibrator=None) -> None:
+        self.mem = mem
+        self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
+        self.mode, self.limits = mode, limits
+        self.portfolio = PortfolioExposureEngine(portfolio or PortfolioLimits())
+        self.sender = sender or TelegramSender(dry_run=True, quiet=True)
+        self.ks = kill_switch or KillSwitch()
+        self.commands = commands
+        self.log = log
+        self.selector = selector or AssetSelector()
+        start_equity = mem.last_equity() or equity
+        self.perf = PerformanceEngine(limits, start_equity)   # capital ÚNICO compartilhado
+        if mem.last_equity() is None:
+            mem.record_equity(datetime.now(), start_equity, None, "capital inicial")
+        self.engines: dict[str, LiveExecutionEngine] = {}
+        for sym, spec in self.specs.items():
+            cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
+            brain = GoldAIEngine(cfg, calibrator=calibrator)
+            self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,
+                                                    horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)
+        self.history: dict[str, StatConfidence] = {}
+        self.refresh_history()
+
+    # ------------------------------------------------------------------ histórico por mercado
+    def refresh_history(self) -> None:
+        for sym in self.specs:
+            rs = self.mem.r_stats(sym)
+            results = []
+            for row in self.mem.conn.execute("SELECT resultado_r FROM trades WHERE ativo=? AND resultado_r IS NOT NULL", (sym,)).fetchall():
+                results.append(row["resultado_r"])
+            self.history[sym] = statistical_confidence(results)
+            self.engines[sym].mpe.history = self.engines[sym].monitor.history = rs
+
+    def open_exposures(self) -> list[OpenExposure]:
+        out = []
+        for sym, eng in self.engines.items():
+            for tr in eng.managed:
+                out.append(OpenExposure(sym, tr.thesis.direction, (tr.plan.risk_usd or 0.0) * tr.remaining))
+        return out
+
+    def _portfolio_gate(self, symbol: str, direction: Direction, risk_usd: float) -> list[str]:
+        return self.portfolio.check(symbol, direction, risk_usd, self.open_exposures(), self.perf.equity)
+
+    # ------------------------------------------------------------------ ciclo de carteira
+    def run_cycle(self, snaps: MarketSnapshotSet) -> PortfolioCycle:
+        pc = PortfolioCycle(snaps.time)
+        # comandos (/STOP /PAUSE /STATUS /CLOSE) tratados pelo primeiro motor, com o kill switch compartilhado
+        first = next(iter(self.engines.values()))
+        first.commands = self.commands
+        # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
+        for sym, eng in self.engines.items():
+            snap = snaps.by_symbol.get(sym)
+            if snap is None:
+                pc.results[sym] = CycleResult(None, None, decision="sem dados")
+                continue
+            r = eng.run_cycle(snap, new_event_key=(snap.news[0].headline if snap.news else None), defer_entry=True)
+            pc.results[sym] = r
+            pc.messages += r.messages
+        self.refresh_history()
+        # 2) candidatos = oportunidades já produzidas (sinal operacional + vantagem estatística)
+        cands: list[Candidate] = []
+        for sym, r in pc.results.items():
+            a, sig = r.assessment, r.signal
+            if a is None or sig is None or sig.type not in LiveExecutionEngine.EXECUTABLE or sig.direction == Direction.LATERAL or not a.has_edge:
+                continue
+            opp = self.mem.opportunity_report(symbol=sym)
+            cands.append(Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0)))
+        for sym in self.specs:
+            if sym not in {c.spec.symbol for c in cands}:
+                self.selector.forget(sym)
+        # 3) ASSET SELECTOR — ordena; a melhor tenta entrar (Risk Engine + exposição validam depois)
+        pc.ranked = self.selector.rank(cands, snaps.time)
+        self.log(render_rank(pc.ranked, self.history))
+        entered = False
+        for c in pc.ranked:
+            sym = c.spec.symbol
+            r = pc.results[sym]
+            if entered:
+                self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — {pc.chosen} foi a melhor oportunidade do ciclo (OPP {pc.ranked[0].opportunity_score:.1f} vs {c.opportunity_score:.1f})")
+                continue
+            self.engines[sym].enter(r, snaps.by_symbol[sym])
+            pc.messages += [m for m in r.messages if m not in pc.messages]
+            if r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")):
+                entered, pc.chosen = True, sym
+        # mercados sem candidatura: registrar a decisão (regra que bloqueou) para o Opportunity Engine
+        for sym, r in pc.results.items():
+            if r.assessment is not None and sym not in {c.spec.symbol for c in pc.ranked}:
+                self.engines[sym].enter(r, snaps.by_symbol[sym])
+        pc.decision = (f"ENTRADA em {pc.chosen}" if pc.chosen else ("melhor oportunidade não passou no Risk Engine/exposição — " + pc.results[pc.ranked[0].spec.symbol].decision
+                                                                   if pc.ranked else "nenhuma oportunidade com vantagem neste ciclo"))
+        self.log(self.portfolio.render(self.open_exposures(), self.perf.equity))
+        return pc
+
+    def status_text(self) -> str:
+        lines = [f"📋 MARKET AI STATUS · modo {self.mode.value} · mercados {', '.join(self.specs)}", self.perf.render(),
+                 self.portfolio.render(self.open_exposures(), self.perf.equity), "Histórico por mercado:"]
+        for sym, h in self.history.items():
+            lines.append(f"  {sym:<7} {h.render()}")
+        return "\n".join(lines)
+
+
+# ============================================================================
 # CLI
 # ============================================================================
 
@@ -6223,8 +6987,82 @@ def _load_frame(args: argparse.Namespace):
                         vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
 
 
+def cmd_live_markets(args: argparse.Namespace) -> int:
+    """4.0 MARKET AI ENGINE: vários mercados → cérebro único → Asset Selector → melhor oportunidade → risco/exposição → execução → monitor."""
+
+    env = load_env_file()
+    limits, plim = GuardLimits.from_env(env), PortfolioLimits.from_env(env)
+    mode = TradingMode(args.mode.upper().replace("-", "_"))
+    if mode == TradingMode.LIVE and not args.authorize:
+        print("modo LIVE exige --authorize explícito; rebaixando para SEMI_LIVE")
+        mode = TradingMode.SEMI_LIVE
+    symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+    ks = KillSwitch.from_env(env, file_path=args.kill_switch_file)
+    dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot, enable_fred=not args.no_fred, enable_news=not args.no_news)
+    mt5_client, executors = None, {}
+    if args.source == "mt5":
+
+        mcfg = MT5Config.from_env(env)
+        if args.mt5_path:
+            mcfg.path = args.mt5_path
+        mt5_client = MT5Client(mcfg)
+        mt5_client.connect()
+        if mode != TradingMode.PAPER:
+            symbol_map = MultiMarketData.symbol_map_from_env(env)
+            for sym in symbols:
+                c = MT5Client(MT5Config(path=mcfg.path, symbol=symbol_map.get(sym, get_market(sym).mt5), login=mcfg.login, password=mcfg.password, server=mcfg.server))
+                c.mt5, c.connected = mt5_client.mt5, True
+                executors[sym] = ExecutionEngine(c, max_slippage=limits.max_slippage)
+    elif mode != TradingMode.PAPER:
+        print("execução real exige --source mt5; rebaixando para PAPER")
+        mode = TradingMode.PAPER
+    data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env(env))
+    sender = TelegramSender(dry_run=not args.send)
+    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
+    mem = PredictionMemory(args.db)
+    engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize)
+    print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
+    print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
+    try:
+        while True:
+            snaps = data.collect()
+            print(data.coverage())
+            pc = engine.run_cycle(snaps)
+            print(pc.render())
+            if args.once:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(engine.status_text())
+        mem.close()
+        if mt5_client is not None:
+            mt5_client.close()
+    return 0
+
+
+def cmd_markets(args: argparse.Namespace) -> int:
+    """Ranking de oportunidades AGORA (sem operar) + histórico por mercado no SQLite."""
+
+    symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+    data = MultiMarketData(symbols, DataEngineConfig(enable_cot=not args.no_cot, enable_fred=not args.no_fred, enable_news=not args.no_news))
+    mem = PredictionMemory(args.db)
+    engine = MarketAIEngine(mem, GuardLimits.from_env(load_env_file()), symbols, TradingMode.PAPER, 10000.0, PortfolioLimits(),
+                            kill_switch=KillSwitch(enabled_env=False), log=print)   # kill switch: só ranqueia, nunca entra
+    snaps = data.collect()
+    print(data.coverage())
+    pc = engine.run_cycle(snaps)
+    print(pc.render())
+    print(engine.status_text())
+    mem.close()
+    return 0
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """3.0 LIVE EXECUTION ENGINE: dados reais → predição → decisão → plano → risco → lote → MT5 → confirmação → monitor → resultado → capital."""
+    if args.markets:
+        return cmd_live_markets(args)
 
     env = load_env_file()
     limits = GuardLimits.from_env(env)
@@ -6336,7 +7174,25 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    """2.1 VALIDATION ENGINE: backtest + walk-forward rolante + calibração + score por fator + auditoria."""
+    """2.1 VALIDATION ENGINE: backtest + walk-forward rolante + calibração + score por fator + auditoria.
+    Com --markets: validação multi-mercado (4.0) — qual mercado tem melhor expectativa fora da amostra, ajustada à amostra."""
+
+    if args.markets:
+
+        frames = {}
+        for sym in (s.strip().upper() for s in args.markets.split(",") if s.strip()):
+            ns = argparse.Namespace(**vars(args))
+            ns.symbol = get_market(sym).yahoo
+            ns.csv = os.path.join(args.csv_dir, f"{sym}_h1.csv") if args.csv_dir else None
+            ns.dxy_csv = os.path.join(args.csv_dir, "DXY_h1.csv") if args.csv_dir and os.path.exists(os.path.join(args.csv_dir, "DXY_h1.csv")) else None
+            ns.us10y_csv = os.path.join(args.csv_dir, "US10Y_h1.csv") if args.csv_dir and os.path.exists(os.path.join(args.csv_dir, "US10Y_h1.csv")) else None
+            frames[sym] = _load_frame(ns)
+        rows = validate_markets(frames, n_folds=args.folds, step=args.step, horizon_min=args.horizon)
+        print(render_market_validation(rows))
+        if args.verbose_markets:
+            for m in rows:
+                print(f"\n{'=' * 30} {m.symbol} {'=' * 30}\n" + m.report.render())
+        return 0
 
     frame = _load_frame(args)
     rep = validate(frame, EngineConfig(), n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
@@ -6489,7 +7345,16 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")
     lv.add_argument("--kill-switch-file", default="STOP_TRADING", help="se o arquivo existir, nenhuma entrada nova")
     lv.add_argument("-v", "--verbose", action="store_true")
+    lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.set_defaults(func=cmd_live)
+
+    mk = sub.add_parser("markets", help="4.0: ranking de oportunidades agora (não opera) + histórico por mercado")
+    mk.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
+    mk.add_argument("--db", default="gold_ai.db")
+    mk.add_argument("--no-cot", action="store_true")
+    mk.add_argument("--no-fred", action="store_true")
+    mk.add_argument("--no-news", action="store_true")
+    mk.set_defaults(func=cmd_markets)
 
     st = sub.add_parser("status", help="capital, performance, operações abertas, aprendizado")
     st.add_argument("--db", default="gold_ai.db")
@@ -6525,6 +7390,9 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--threshold-atr", type=float, default=1.0)
     va.add_argument("--horizon", type=int, default=240)
     va.add_argument("--out", default=None, help="salva o relatório em arquivo")
+    va.add_argument("--markets", default=None, help="4.0: validação multi-mercado, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
+    va.add_argument("--csv-dir", default=None, help="pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv opcionais)")
+    va.add_argument("--verbose-markets", action="store_true", help="imprime o relatório completo de cada mercado")
     va.set_defaults(func=cmd_validate)
 
     si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy, oportunidades")

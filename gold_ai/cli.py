@@ -97,8 +97,98 @@ def _load_frame(args: argparse.Namespace):
                         vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
 
 
+def cmd_live_markets(args: argparse.Namespace) -> int:
+    """4.0 MARKET AI ENGINE: vários mercados → cérebro único → Asset Selector → melhor oportunidade → risco/exposição → execução → monitor."""
+    from .data import DataEngineConfig
+    from .data.multi import MultiMarketData
+    from .guard import GuardLimits, KillSwitch, TelegramCommands, TradingMode
+    from .market_engine import MarketAIEngine
+    from .selector import PortfolioLimits
+    from .telegram import load_env_file
+    from . import __version__
+
+    env = load_env_file()
+    limits, plim = GuardLimits.from_env(env), PortfolioLimits.from_env(env)
+    mode = TradingMode(args.mode.upper().replace("-", "_"))
+    if mode == TradingMode.LIVE and not args.authorize:
+        print("modo LIVE exige --authorize explícito; rebaixando para SEMI_LIVE")
+        mode = TradingMode.SEMI_LIVE
+    symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+    ks = KillSwitch.from_env(env, file_path=args.kill_switch_file)
+    dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot, enable_fred=not args.no_fred, enable_news=not args.no_news)
+    mt5_client, executors = None, {}
+    if args.source == "mt5":
+        from .data.mt5 import MT5Client, MT5Config
+        from .execution import ExecutionEngine
+
+        mcfg = MT5Config.from_env(env)
+        if args.mt5_path:
+            mcfg.path = args.mt5_path
+        mt5_client = MT5Client(mcfg)
+        mt5_client.connect()
+        if mode != TradingMode.PAPER:
+            from .markets import get_market
+            symbol_map = MultiMarketData.symbol_map_from_env(env)
+            for sym in symbols:
+                c = MT5Client(MT5Config(path=mcfg.path, symbol=symbol_map.get(sym, get_market(sym).mt5), login=mcfg.login, password=mcfg.password, server=mcfg.server))
+                c.mt5, c.connected = mt5_client.mt5, True
+                executors[sym] = ExecutionEngine(c, max_slippage=limits.max_slippage)
+    elif mode != TradingMode.PAPER:
+        print("execução real exige --source mt5; rebaixando para PAPER")
+        mode = TradingMode.PAPER
+    data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env(env))
+    sender = TelegramSender(dry_run=not args.send)
+    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
+    mem = PredictionMemory(args.db)
+    engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize)
+    print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
+    print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
+    try:
+        while True:
+            snaps = data.collect()
+            print(data.coverage())
+            pc = engine.run_cycle(snaps)
+            print(pc.render())
+            if args.once:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(engine.status_text())
+        mem.close()
+        if mt5_client is not None:
+            mt5_client.close()
+    return 0
+
+
+def cmd_markets(args: argparse.Namespace) -> int:
+    """Ranking de oportunidades AGORA (sem operar) + histórico por mercado no SQLite."""
+    from .data import DataEngineConfig
+    from .data.multi import MultiMarketData
+    from .guard import GuardLimits, KillSwitch, TradingMode
+    from .market_engine import MarketAIEngine
+    from .selector import PortfolioLimits
+    from .telegram import load_env_file
+
+    symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+    data = MultiMarketData(symbols, DataEngineConfig(enable_cot=not args.no_cot, enable_fred=not args.no_fred, enable_news=not args.no_news))
+    mem = PredictionMemory(args.db)
+    engine = MarketAIEngine(mem, GuardLimits.from_env(load_env_file()), symbols, TradingMode.PAPER, 10000.0, PortfolioLimits(),
+                            kill_switch=KillSwitch(enabled_env=False), log=print)   # kill switch: só ranqueia, nunca entra
+    snaps = data.collect()
+    print(data.coverage())
+    pc = engine.run_cycle(snaps)
+    print(pc.render())
+    print(engine.status_text())
+    mem.close()
+    return 0
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """3.0 LIVE EXECUTION ENGINE: dados reais → predição → decisão → plano → risco → lote → MT5 → confirmação → monitor → resultado → capital."""
+    if args.markets:
+        return cmd_live_markets(args)
     from .data import DataEngine, DataEngineConfig
     from .guard import GuardLimits, KillSwitch, TelegramCommands, TradingMode
     from .live_engine import LiveExecutionEngine
@@ -222,8 +312,28 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    """2.1 VALIDATION ENGINE: backtest + walk-forward rolante + calibração + score por fator + auditoria."""
+    """2.1 VALIDATION ENGINE: backtest + walk-forward rolante + calibração + score por fator + auditoria.
+    Com --markets: validação multi-mercado (4.0) — qual mercado tem melhor expectativa fora da amostra, ajustada à amostra."""
     from .evaluation import validate
+
+    if args.markets:
+        from .evaluation import render_market_validation, validate_markets
+        from .markets import get_market
+
+        frames = {}
+        for sym in (s.strip().upper() for s in args.markets.split(",") if s.strip()):
+            ns = argparse.Namespace(**vars(args))
+            ns.symbol = get_market(sym).yahoo
+            ns.csv = os.path.join(args.csv_dir, f"{sym}_h1.csv") if args.csv_dir else None
+            ns.dxy_csv = os.path.join(args.csv_dir, "DXY_h1.csv") if args.csv_dir and os.path.exists(os.path.join(args.csv_dir, "DXY_h1.csv")) else None
+            ns.us10y_csv = os.path.join(args.csv_dir, "US10Y_h1.csv") if args.csv_dir and os.path.exists(os.path.join(args.csv_dir, "US10Y_h1.csv")) else None
+            frames[sym] = _load_frame(ns)
+        rows = validate_markets(frames, n_folds=args.folds, step=args.step, horizon_min=args.horizon)
+        print(render_market_validation(rows))
+        if args.verbose_markets:
+            for m in rows:
+                print(f"\n{'=' * 30} {m.symbol} {'=' * 30}\n" + m.report.render())
+        return 0
 
     frame = _load_frame(args)
     rep = validate(frame, EngineConfig(), n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
@@ -378,7 +488,16 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")
     lv.add_argument("--kill-switch-file", default="STOP_TRADING", help="se o arquivo existir, nenhuma entrada nova")
     lv.add_argument("-v", "--verbose", action="store_true")
+    lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.set_defaults(func=cmd_live)
+
+    mk = sub.add_parser("markets", help="4.0: ranking de oportunidades agora (não opera) + histórico por mercado")
+    mk.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
+    mk.add_argument("--db", default="gold_ai.db")
+    mk.add_argument("--no-cot", action="store_true")
+    mk.add_argument("--no-fred", action="store_true")
+    mk.add_argument("--no-news", action="store_true")
+    mk.set_defaults(func=cmd_markets)
 
     st = sub.add_parser("status", help="capital, performance, operações abertas, aprendizado")
     st.add_argument("--db", default="gold_ai.db")
@@ -414,6 +533,9 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--threshold-atr", type=float, default=1.0)
     va.add_argument("--horizon", type=int, default=240)
     va.add_argument("--out", default=None, help="salva o relatório em arquivo")
+    va.add_argument("--markets", default=None, help="4.0: validação multi-mercado, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
+    va.add_argument("--csv-dir", default=None, help="pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv opcionais)")
+    va.add_argument("--verbose-markets", action="store_true", help="imprime o relatório completo de cada mercado")
     va.set_defaults(func=cmd_validate)
 
     si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy, oportunidades")

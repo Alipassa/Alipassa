@@ -30,6 +30,7 @@ class CycleResult:
     assessment: Optional[Assessment]
     signal: Optional[Signal]
     decision: str = ""
+    pid: Optional[int] = None
     plan: Optional[TradePlan] = None
     readings: list[tuple[ManagedTrade, MonitorReading]] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
@@ -42,7 +43,14 @@ class LiveExecutionEngine:
     def __init__(self, mem: PredictionMemory, limits: GuardLimits, mode: TradingMode = TradingMode.PAPER, equity: float = 10000.0,
                  executor=None, sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None,
                  commands: Optional[TelegramCommands] = None, horizon_min: int = 240, engine: Optional[GoldAIEngine] = None,
-                 log: Callable[[str], None] = print, authorized: bool = False) -> None:
+                 log: Callable[[str], None] = print, authorized: bool = False, spec=None, perf: Optional[PerformanceEngine] = None,
+                 entry_gate: Optional[Callable] = None) -> None:
+        """`spec` (markets.MarketSpec) torna o motor específico de um mercado; `perf` permite capital compartilhado
+        entre mercados (4.0); `entry_gate(symbol, direction, risk_usd)` → lista de bloqueios do portfólio (exposição)."""
+        from .markets import get_market
+        self.spec = spec or get_market("XAUUSD")
+        self.symbol = self.spec.symbol
+        self.entry_gate = entry_gate
         self.mem, self.limits, self.mode = mem, limits, mode
         self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
         self.sender = sender or TelegramSender(dry_run=True)
@@ -53,12 +61,14 @@ class LiveExecutionEngine:
         self.log = log
         self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
         start_equity = mem.last_equity() or equity
-        self.perf = PerformanceEngine(limits, start_equity)
+        self.perf = perf or PerformanceEngine(limits, start_equity)
         if mem.last_equity() is None:
             mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
-        self.monitor = TradeMonitor(history=mem.r_stats())
-        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(), horizon_min, limits.min_rr_to_structure)
-        self.managed: list[ManagedTrade] = mem.managed_trades()
+        if engine is not None and self.spec.factor_signs and not engine.cfg.factor_signs:
+            engine.cfg.factor_signs, engine.cfg.symbol = dict(self.spec.factor_signs), self.symbol
+        self.monitor = TradeMonitor(history=mem.r_stats(self.symbol))
+        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(self.symbol), horizon_min, limits.min_rr_to_structure)
+        self.managed: list[ManagedTrade] = mem.managed_trades(self.symbol)
         self.tickets: dict[int, int] = {}             # trade_id → ticket no broker
         for tr in self.managed:
             row = mem.conn.execute("SELECT ticket FROM trades WHERE id=?", (tr.trade_id,)).fetchone()
@@ -91,7 +101,7 @@ class LiveExecutionEngine:
                 self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
 
     # ------------------------------------------------------------------ ciclo
-    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None) -> CycleResult:
+    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None, defer_entry: bool = False) -> CycleResult:
         res = CycleResult(None, None)
         now = snap.time
         self.handle_commands(res, now)
@@ -113,7 +123,7 @@ class LiveExecutionEngine:
         for tid, sim in self.mem.auto_resolve_trades(fine, now):
             pr = sim["profile"]
             res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
-        self.mpe.history = self.monitor.history = self.mem.r_stats()
+        self.mpe.history = self.monitor.history = self.mem.r_stats(self.symbol)
         self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
 
         self.mem.store_prices(fine)
@@ -123,18 +133,31 @@ class LiveExecutionEngine:
         # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
         for tr in list(self.managed):
             self._monitor_trade(tr, a, snap, fine, res)
-        # DECISION ENGINE
+        res.pid = None
         if sig is not None:
             self._send(sig.text, res)
-            pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon)
-            res.decision = self._decide_entry(sig, a, snap, pid, res)
+            res.pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon, symbol=self.symbol)
+        if defer_entry:
+            res.decision = "ANALISADO — decisão de entrada delegada ao Asset Selector" if sig is not None else "SEM SINAL — " + a.edge_status
+            return res
+        return self.enter(res, snap)
+
+    def enter(self, res: CycleResult, snap: MarketSnapshot, veto: Optional[str] = None) -> CycleResult:
+        """DECISION ENGINE. `veto` = motivo externo (Asset Selector/exposição) para não entrar neste ciclo."""
+        a, sig = res.assessment, res.signal
+        if a is None:
+            return res
+        if sig is not None and veto:
+            res.decision = veto
+        elif sig is not None:
+            res.decision = self._decide_entry(sig, a, snap, res.pid or 0, res)
         else:
             res.decision = "SEM SINAL — " + a.edge_status
         # OPPORTUNITY ENGINE: toda oportunidade analisada vira um registro (entrada ou regra que bloqueou)
         from .opportunity import DecisionRecord, classify_reason
         direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
-        self.mem.record_decision(DecisionRecord(now, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
-                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence))
+        self.mem.record_decision(DecisionRecord(snap.time, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
+                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence), symbol=self.symbol)
         return res
 
     # ------------------------------------------------------------------ entrada
@@ -160,14 +183,18 @@ class LiveExecutionEngine:
             return "🟡 NÃO OPERAR — " + "; ".join(reasons)
         # uma posição por ativo (memória + broker)
         if self.managed or (self.executor is not None and self.executor.positions()):
-            return "BLOQUEADA — já existe posição ativa em XAUUSD (MAX_POSITIONS)"
+            return f"BLOQUEADA — já existe posição ativa em {self.symbol} (MAX_POSITIONS)"
         plan = self.mpe.plan(a, snap, sig.direction, sig.type.value)
         res.plan = plan
         if not plan.viable:
             return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
-        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value)   # capital + risco + stop + contrato
+        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value, self.spec.point_value_usd)   # capital + risco + stop + contrato
         if not plan.lots:
             return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+        if self.entry_gate is not None:
+            blocked = self.entry_gate(self.symbol, sig.direction, plan.risk_usd)
+            if blocked:
+                return "BLOQUEADA — exposição de carteira: " + "; ".join(blocked)
         self.log(plan.render())
         if self.mode == TradingMode.AUTHORIZE and not self.authorized:
             self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render(), res)
@@ -187,7 +214,7 @@ class LiveExecutionEngine:
                     self.executor.close(execution.ticket)
                     return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
             self.authorized = False
-        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon)
+        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon, symbol=self.symbol)
         thesis = Thesis.from_assessment(a, plan.direction)
         tr = ManagedTrade(tid, plan, thesis)
         if execution is not None:
@@ -196,7 +223,7 @@ class LiveExecutionEngine:
         self.mem.save_thesis(tid, thesis, tr.state_dict())
         self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
         self.managed.append(tr)
-        self._send(format_entry(plan, a, self.mode.value, execution), res)
+        self._send(format_entry(plan, a, self.mode.value, execution, self.symbol), res)
         return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
 
     # ------------------------------------------------------------------ monitor

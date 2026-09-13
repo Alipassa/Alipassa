@@ -167,11 +167,11 @@ def format_monitor(tr, reading) -> str:
 
 
 # --------------------------------------------------------------------------- 3.0: TELEGRAM TRADE MANAGER
-def format_entry(plan, assessment, mode: str, execution=None) -> str:
-    side = "🟢 BUY" if plan.direction.value == "ALTA" else "🔴 SELL"
+def format_entry(plan, assessment, mode: str, execution=None, symbol: str = "XAUUSD") -> str:
+    side = f"🟢 BUY {symbol}" if plan.direction.value == "ALTA" else f"🔴 SELL {symbol}"
     tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
     rr = plan.recommended[0] if plan.recommended[:1].isdigit() else "3"
-    lines = ["🚨 GOLD AI", "", f"{side} XAUUSD", "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
+    lines = ["🚨 MARKET AI", "", side, "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
              f"Confiança: {assessment.confidence:.0f}", "", f"Entrada: {plan.entry:.2f}", f"Stop: {plan.stop:.2f}", f"TP: {tp:.2f}" if tp else "TP: trailing",
              "", f"R:R = 1:{rr}", "", f"Lote: {plan.lots:.2f}" if plan.lots else "Lote: n/d", f"Risco: {plan.risk_usd:.2f} USD" if plan.risk_usd else "",
              "", "PRE-MOVE CONFIRMADO" if "CONFIRM" in plan.signal_type.upper() or "BUY" in plan.signal_type or "SELL" in plan.signal_type else plan.signal_type,
