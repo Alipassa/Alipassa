@@ -11,6 +11,19 @@ reais, Fed, inflação, geopolítica, fluxo, COT, opções, sentimento, técnico
 
 Python 3.10+, sem dependências externas.
 
+## Entrypoint único
+
+Existem exatamente **duas** formas equivalentes de executar, ambas na versão 3.0:
+
+| Forma | Quando usar |
+| --- | --- |
+| `python -m gold_ai …` | trabalhando no repositório (pacote `gold_ai/`) |
+| `python gold_ai_engine_v3.py …` | arquivo único gerado por `python tools/build_single_file.py` a partir do pacote |
+
+Bundles antigos (`gold_ai_engine.py` 1.0 e `gold_ai_engine_v2.py` 2.x) **foram removidos** para impedir a execução acidental
+de uma versão errada. Se algum deles ainda existir na sua máquina, apague-o. O número da versão está em `gold_ai.__version__`
+e no cabeçalho do bundle, e é impresso no início de `live`.
+
 ## O que mudou na 2.0
 
 | Componente | Situação |

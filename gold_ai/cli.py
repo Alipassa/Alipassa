@@ -143,7 +143,8 @@ def cmd_live(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
     live = LiveExecutionEngine(mem, limits, mode, args.equity, executor, sender, ks, commands, args.horizon,
                                GoldAIEngine(EngineConfig(), calibrator=calibrator), authorized=args.authorize)
-    print(f"GOLD AI ENGINE 3.0 · modo {mode.value} · {live.perf.render()}")
+    from . import __version__
+    print(f"GOLD AI ENGINE {__version__} · modo {mode.value} · {live.perf.render()}")
     print(f"limites: risco/trade {limits.risk_per_trade_pct}% · perda diária {limits.max_daily_loss_pct}% · drawdown {limits.max_drawdown_pct}% · "
           f"posições {limits.max_positions} · lote máx {limits.max_lot} · spread máx {limits.max_spread} · kill switch: {ks.new_entries_allowed()[1]}")
     if live.managed:

@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
-"""GOLD AI ENGINE 3.0 — arquivo único (LIVE EXECUTION ENGINE) (XAU/USD).
+"""GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE — entrypoint único (XAU/USD).
+
+Gerado por tools/build_single_file.py a partir do pacote gold_ai/ (versão 3.0.0).
+Equivalente a `python -m gold_ai`. Não existem outros bundles suportados.
 
 🌎 MUNDO → 📡 DATA ENGINE (Yahoo · FRED · CFTC · RSS · calendário · MetaTrader 5)
-→ MARKET SNAPSHOT → 🧠 GOLD AI ENGINE (score · probabilidade · confiança)
-→ CADEIA DE RACIOCÍNIO (9 passos) · NÍVEL DE EVIDÊNCIA 1–4 · VANTAGEM ESTATÍSTICA ("NÃO SEI")
-→ ⚠️ WATCH · 🚨 PRE-MOVE · 🟢 SIGNAL (confirmado) → 📲 TELEGRAM → 📚 SQLite
-→ RESULTADO REAL → 📊 precisão · recall · MFE · MAE · lead time · ⏱️ GOLD LEAD SCORE
-→ backtest / walk-forward → 🧾 MT5 (execução só com --authorize)
+→ MARKET SNAPSHOT → 🧠 PREDICTION ENGINE (score · probabilidade · confiança · pré-movimento)
+→ CADEIA DE RACIOCÍNIO · NÍVEL DE EVIDÊNCIA · VANTAGEM ESTATÍSTICA ("NÃO SEI")
+→ DECISION ENGINE → 🧾 TRADE ENGINE (stop inteligente · 1R–4R · MAX PROFIT ENGINE · viabilidade)
+→ RISK ENGINE (capital → risco % fixo → lote; TRADING STOP; drawdown; kill switch)
+→ EXECUTION ENGINE (MT5 → broker → confirmação real · EXECUTION MISMATCH)
+→ 🔄 TRADE MONITOR (TRADE/THESIS/EXIT SCORE · PROFIT POTENTIAL · MANTER/PROTEGER/REDUZIR/ESTENDER/ENCERRAR)
+→ RESULTADO → SQLite → PERFORMANCE → NOVO CAPITAL → NOVO LOTE
+→ VALIDATION (anti look-ahead · walk-forward · calibração · score por fator · lead time · MFE/MAE)
 
-Sem dependências externas (MetaTrader5 opcional, Windows). Python 3.10+.
+Modos: 🟢 PAPER (padrão) · 🟡 AUTHORIZE · 🟠 SEMI-LIVE · 🔴 LIVE (exige --authorize)
+Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 
 Uso:
-    python gold_ai_engine_v2.py demo                          # cenários sintéticos
-    python gold_ai_engine_v2.py live --once                   # DADOS REAIS (web) → relatório + cobertura das fontes
-    python gold_ai_engine_v2.py live --interval 300 --send    # loop + Telegram (.env: TOKEN_TELEGRAM, CHAT_ID)
-    python gold_ai_engine_v2.py live --source mt5 --once      # preço/candles do MetaTrader 5 (.env: MT5_PATH)
-    python gold_ai_engine_v2.py live --source mt5 --execute [--authorize]
-    python gold_ai_engine_v2.py backtest [--csv xau_h1.csv] [--walk-forward]
-    python gold_ai_engine_v2.py metrics --db gold_ai.db --path-csv precos.csv
-    python gold_ai_engine_v2.py stats --db gold_ai.db
-    python gold_ai_engine_v2.py validate --csv xau_h1.csv --folds 4   # auditoria + walk-forward + calibração + score por fator + VEREDITO
-    python gold_ai_engine_v2.py calibrate --min-n 30                   # gera calibrator.json usado por `live`
-    python gold_ai_engine_v2.py simulate --csv xau_h1.csv --dxy-csv dxy_h1.csv --us10y-csv tnx_h1.csv   # 1R/2R/3R antes do stop, melhor saída
-    python gold_ai_engine_v2.py live --source mt5 --mode paper|authorize|semi-live|live [--authorize] --send   # 🟢 🟡 🟠 🔴
-    python gold_ai_engine_v2.py status                                 # capital, performance, posições abertas, aprendizado
+    python gold_ai_engine_v3.py demo
+    python gold_ai_engine_v3.py live --source mt5 --mode paper --send
+    python gold_ai_engine_v3.py live --source mt5 --mode authorize --send [--authorize]
+    python gold_ai_engine_v3.py live --source mt5 --mode semi-live --send
+    python gold_ai_engine_v3.py live --source mt5 --mode live --authorize --send
+    python gold_ai_engine_v3.py status | stats | validate | simulate | calibrate | backtest | metrics | event
+
+Credenciais e limites no .env (ver .env.example). Sem dependências externas (MetaTrader5 opcional, Windows).
 """
 
 from __future__ import annotations
@@ -5990,7 +5992,7 @@ def cmd_live(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
     live = LiveExecutionEngine(mem, limits, mode, args.equity, executor, sender, ks, commands, args.horizon,
                                GoldAIEngine(EngineConfig(), calibrator=calibrator), authorized=args.authorize)
-    print(f"GOLD AI ENGINE 3.0 · modo {mode.value} · {live.perf.render()}")
+    print(f"GOLD AI ENGINE {__version__} · modo {mode.value} · {live.perf.render()}")
     print(f"limites: risco/trade {limits.risk_per_trade_pct}% · perda diária {limits.max_daily_loss_pct}% · drawdown {limits.max_drawdown_pct}% · "
           f"posições {limits.max_positions} · lote máx {limits.max_lot} · spread máx {limits.max_spread} · kill switch: {ks.new_entries_allowed()[1]}")
     if live.managed:
