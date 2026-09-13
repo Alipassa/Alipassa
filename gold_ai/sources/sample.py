@@ -12,7 +12,7 @@ TF_MINUTES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1":
 
 def make_candles(tf: str, n: int, start_price: float, drift: float, vol: float, end: datetime, seed: int = 7, volume_trend: float = 0.0) -> list[Candle]:
     """Série de candles com deriva (`drift` por candle, em USD) e volatilidade `vol` (USD)."""
-    rnd = random.Random(seed + hash(tf) % 1000)
+    rnd = random.Random(seed + sum(ord(ch) * (i + 1) for i, ch in enumerate(tf)))  # determinístico entre processos
     step = timedelta(minutes=TF_MINUTES[tf])
     price = start_price
     out: list[Candle] = []

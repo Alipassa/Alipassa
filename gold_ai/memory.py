@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     dolar REAL, juros REAL, fluxo REAL, tecnico REAL,
     evento TEXT,
     sinal_tipo TEXT,
+    nivel_evidencia INTEGER DEFAULT 0,
     resultado TEXT,
     tempo_ate_reacao_min REAL,
     maxima_favoravel REAL,
@@ -80,13 +81,13 @@ class PredictionMemory:
         fund = {f.name: f.score for f in a.factors}
         cur = self.conn.execute(
             """INSERT INTO predictions (data, hora, sessao, preco, previsao, probabilidade, confianca, score,
-               horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               horizonte, estagio, fundamentos, noticias, dolar, juros, fluxo, tecnico, evento, sinal_tipo, nivel_evidencia)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 t.strftime("%Y-%m-%d"), t.strftime("%H:%M:%S"), session_label(t), a.price, direction, prob,
                 a.confidence, a.score, a.horizon, a.premove.stage.value, json.dumps(fund, ensure_ascii=False),
                 json.dumps([], ensure_ascii=False), fund.get("dolar"), fund.get("juros_reais"), fund.get("fluxo"),
-                fund.get("tecnico"), a.next_event.name if a.next_event else None, signal_type,
+                fund.get("tecnico"), a.next_event.name if a.next_event else None, signal_type, int(a.evidence_level),
             ),
         )
         self.conn.commit()
@@ -140,7 +141,7 @@ class PredictionMemory:
             key = "CASE WHEN score>=70 THEN '>=70' WHEN score>=50 THEN '50-69' WHEN score>-50 THEN '-49..49' WHEN score>-70 THEN '-69..-50' ELSE '<=-70' END"
         elif by == "hora":
             key = "substr(hora,1,2)"
-        elif by in ("sessao", "previsao", "horizonte", "estagio", "evento", "sinal_tipo"):
+        elif by in ("sessao", "previsao", "horizonte", "estagio", "evento", "sinal_tipo", "nivel_evidencia"):
             key = by
         else:
             raise ValueError(by)
@@ -172,6 +173,16 @@ class PredictionMemory:
             me = sum(d["ERRO"]) / len(d["ERRO"]) if d["ERRO"] else 0.0
             out.append({"fator": name, "media_acertos": round(ma, 2), "media_erros": round(me, 2), "poder": round(ma - me, 2), "n": len(d["ACERTO"]) + len(d["ERRO"])})
         return sorted(out, key=lambda x: -x["poder"])
+
+    def metrics(self, path: Iterable[tuple[datetime, float]], threshold: float, horizon_min: int = 240):
+        """Precisão, recall, MFE/MAE, lead time e GOLD LEAD SCORE das previsões direcionais registradas,
+        confrontadas com o caminho real do preço (evaluation.evaluate)."""
+        from .evaluation import SignalRecord, evaluate
+
+        rows = self.conn.execute("SELECT * FROM predictions WHERE previsao IN ('ALTA','BAIXA') ORDER BY id").fetchall()
+        sigs = [SignalRecord(datetime.fromisoformat(f"{r['data']}T{r['hora']}").replace(tzinfo=timezone.utc), r["previsao"],
+                             r["sinal_tipo"] or "", r["preco"], threshold, r["nivel_evidencia"] or 0, r["probabilidade"], r["confianca"]) for r in rows]
+        return evaluate(sigs, list(path), threshold, horizon_min)
 
     def pending(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM predictions WHERE resultado IS NULL ORDER BY id").fetchall()

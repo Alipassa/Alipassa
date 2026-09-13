@@ -257,3 +257,53 @@ direção · surgimento de pré-movimento · confirmação de movimento · rever
 O sistema **não adivinha** o ouro. É um **motor probabilístico de antecipação**: o diferencial é
 detectar a **mudança de regime antes da confirmação completa no preço**. A conexão com MT5 deve
 converter o sinal em operação somente mediante autorização explícita.
+
+
+---
+
+# ADENDO 2.0 — DO NÚCLEO AO SISTEMA REAL
+
+## A. DATA ENGINE `[gold_ai/data/]`
+
+🌎 MERCADO REAL → COLETOR → NORMALIZAÇÃO → MarketSnapshot. Cada fonte é isolada: falha vira
+status, não exceção. Cobertura reportada a cada ciclo.
+
+## B. CADEIA DE RACIOCÍNIO `[evidence.event_chain]`
+
+Nunca "notícia → sentimento → compra". Sempre:
+1. O que aconteceu? 2. O que o mercado esperava? 3. Surpresa? 4. Juros? 5. Dólar?
+6. Ouro (já reagiu?)? 7. Fluxo? 8. Pressão latente? 9. Só então: PRE-MOVE · prob · confiança.
+
+## C. NÍVEL DE EVIDÊNCIA `[EvidenceLevel]`
+
+🟢 NÍVEL 1 (1–2 fatores) observação · 🟢 NÍVEL 2 (3 famílias independentes) alerta ·
+🟢 NÍVEL 3 (macro + fluxo + técnico) sinal · 🔥 NÍVEL 4 (+ notícia/evento + divergência
+preço/fundamento) PRE-MOVE FORTE.
+
+## D. TRÊS MENSAGENS `[telegram.format_signal]`
+
+⚠️ GOLD WATCH (ainda não há operação) · 🚨 GOLD PRE-MOVE (preço não confirmou) ·
+🟢 GOLD SIGNAL — PRE-MOVE CONFIRMADO. Previsão nunca se confunde com confirmação.
+
+## E. SABER DIZER "NÃO SEI" `[evidence.edge_status]`
+
+🟡 SEM VANTAGEM ESTATÍSTICA — NÃO ENVIAR SINAL quando probabilidade dominante < 55 %,
+confiança < 50/100 ou |score| < 25. Uma IA boa não dá sinal o tempo inteiro.
+
+## F. AVALIAÇÃO HONESTA `[evaluation]`
+
+Precisão (compra/venda) · Recall (movimentos relevantes detectados antes de ficarem
+evidentes) · MFE · MAE · Lead time · ⏱️ GOLD LEAD SCORE. Um sistema que acerta 80 % mas só
+sinaliza depois que o ouro subiu não atende ao objetivo.
+
+## G. VALIDAÇÃO `[Backtester, walk_forward]`
+
+Backtest sem look-ahead (snapshots reconstruídos só com o passado) e walk-forward:
+calibra limiares no treino, mede fora da amostra. Só isso diz se a IA antecipa o ouro ou
+apenas explica bem depois do movimento.
+
+## H. EXECUÇÃO `[data.mt5.MT5Executor]`
+
+Sinal → plano de ordem (entrada, invalidação = stop, alvo por risco/retorno). Nada é
+enviado ao broker sem autorização explícita (`--authorize`) e sem nível de evidência e
+confiança mínimos.

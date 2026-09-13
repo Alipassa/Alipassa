@@ -47,6 +47,11 @@ def render_report(a: Assessment) -> str:
         f"Risco de reversão: {a.reversal.risk:.0f}/100" + (f" — {'; '.join(a.reversal.evidence)}" if a.reversal.evidence else ""),
         f"Evento próximo: {a.next_event.name + ' ' + a.next_event.time.strftime('%H:%M') + ' UTC' if a.next_event else 'nenhum na janela'}",
         f"Confirmações: {', '.join(a.confirmations) or 'nenhuma'}",
+        f"Evidência: {a.evidence_level.label}",
+        "",
+        f"STATUS: {a.edge_status}",
+        "",
+        a.chain,
         "",
         f"Conclusão: {a.conclusion}",
     ]

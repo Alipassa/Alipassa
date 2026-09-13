@@ -11,6 +11,38 @@ reais, Fed, inflação, geopolítica, fluxo, COT, opções, sentimento, técnico
 
 Python 3.10+, sem dependências externas.
 
+## O que mudou na 2.0
+
+| Componente | Situação |
+| --- | --- |
+| 📡 Data Engine (mercado real → coletor → normalização → `MarketSnapshot`) | 🟢 `gold_ai/data/` — Yahoo (XAU, DXY, ^TNX, ZQ=F, VIX, S&P, prata, petróleo, BTC, USD/CNH), FRED (DFII10, T10YIE, HY OAS), CFTC (COT), RSS + calendário |
+| MetaTrader 5 como fonte primária de preço | 🟢 `gold_ai/data/mt5.py` (`MT5Source`) — candles M1…W1, bid/ask, tick volume |
+| Execução no MT5 | 🟢 `MT5Executor` — **só envia ordem com `--authorize`**; por padrão simula |
+| Cadeia de raciocínio (9 passos: aconteceu → esperava → surpresa → juros → dólar → ouro → fluxo → pressão → veredito) | 🟢 `gold_ai/evidence.py` |
+| Nível de evidência 1–4 | 🟢 `EvidenceLevel` |
+| "NÃO SEI" — sem vantagem estatística, não envia | 🟢 `edge_status` (prob. < 55 %, confiança < 50 ou \|score\| < 25) |
+| Três mensagens: ⚠️ GOLD WATCH · 🚨 GOLD PRE-MOVE · 🟢 GOLD SIGNAL (PRE-MOVE CONFIRMADO) | 🟢 `gold_ai/telegram.py` |
+| Precisão, recall, MFE, MAE, lead time, ⏱️ GOLD LEAD SCORE | 🟢 `gold_ai/evaluation.py` |
+| Backtest + walk-forward (calibra no treino, avalia fora da amostra) | 🟢 `Backtester`, `walk_forward` |
+| Registro previsão → resultado real → aprendizado | 🟢 `PredictionMemory.metrics()` |
+
+### Fluxo 2.0
+
+```text
+🌎 MUNDO ──► 📡 DATA ENGINE (Yahoo · FRED · CFTC · RSS · calendário · MT5)
+                    │  normalização, falhas isoladas por fonte, cache
+                    ▼
+             MARKET SNAPSHOT
+                    ▼
+             🧠 GOLD AI ENGINE ──► score · probabilidade · confiança
+                    ▼
+        CADEIA DE RACIOCÍNIO (9 passos) + NÍVEL DE EVIDÊNCIA + VANTAGEM ESTATÍSTICA
+                    ▼
+      ⚠️ WATCH ──► 🚨 PRE-MOVE ──► 🟢 SIGNAL (confirmado)      ou      🟡 NÃO SEI (não envia)
+                    ▼
+             📲 TELEGRAM ──► 📚 SQLite ──► RESULTADO REAL ──► 📊 precisão · recall · MFE/MAE · lead time
+```
+
 ## Uso rápido
 
 ```bash
@@ -18,9 +50,21 @@ python -m gold_ai demo                 # roda 7 cenários sintéticos e imprime 
 python -m gold_ai demo --db demo.db    # idem, registrando as previsões no SQLite
 python -m gold_ai stats --db demo.db   # taxa de acerto por sessão/direção/score/estágio + poder dos fatores
 python -m gold_ai event --actual 0.1 --dxy -0.3 --us10y -5 --real -4 --gold 0.4 --flow 0.3   # árvore pré-evento + cadeia pós-evento (CPI)
-python -m gold_ai run --once -v        # um ciclo do loop contínuo
+python -m gold_ai run --once -v        # um ciclo do loop contínuo (cenário sintético)
 python -m unittest -q                  # testes
+
+# ---- DADOS REAIS (2.0) ----
+python -m gold_ai live --once                      # Yahoo + FRED + CFTC + RSS → snapshot → relatório (+ cobertura das fontes)
+python -m gold_ai live --interval 300 --send       # loop com envio ao Telegram (.env)
+python -m gold_ai live --source mt5 --once         # preço/candles do MetaTrader 5 (MT5_PATH no .env) + demais camadas web
+python -m gold_ai live --source mt5 --execute      # gera plano de ordem SIMULADO
+python -m gold_ai live --source mt5 --execute --authorize --volume 0.01   # envia ordens de verdade (sua autorização explícita)
+python -m gold_ai backtest --symbol GC=F           # backtest H1 (histórico Yahoo, ~3 meses)
+python -m gold_ai backtest --csv xau_h1.csv --walk-forward --folds 4      # walk-forward fora da amostra
+python -m gold_ai metrics --db gold_ai.db --path-csv precos.csv --threshold 9   # previsões gravadas × preço real
 ```
+
+Credenciais: copie `.env.example` para `.env` (nunca versionado) com `TOKEN_TELEGRAM`, `CHAT_ID`, `MT5_PATH`.
 
 Para enviar de fato ao Telegram, exporte `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` e use `--send`.
 
@@ -59,7 +103,24 @@ MarketSnapshot ──► factors.py ──► score por fator (limitado ao peso)
 | `gold_ai/memory.py` | §29, §30 | SQLite de previsões, resolução com MFE/MAE, taxa de acerto, poder dos fatores |
 | `gold_ai/sources/` | §3 | interface `DataSource` e `SampleSource` (cenários sintéticos) |
 
-## Conectando dados reais
+## Data Engine
+
+| Fonte | Campos do snapshot | Observação |
+| --- | --- | --- |
+| Yahoo `GC=F`/`XAUUSD=X` | candles M1…W1, preço, ATR, variação, fluxo agressor (proxy por volume), volume/média | H4 é reamostrado de H1 |
+| Yahoo `DX-Y.NYB`, `CNH=X` | DXY, Δ%, USD/CNH | janela configurável (padrão 60 min) |
+| Yahoo `^TNX`, `2YY=F` | 10Y, Δbp, 2Y | |
+| Yahoo `ZQ=F` | Δ prob. de corte (taxa implícita = 100 − preço) | aproximação de FedWatch |
+| FRED `DFII10`, `T10YIE`, `BAMLH0A0HYM2` | juros reais, breakeven, HY OAS | diário; intraday = nominal − breakeven |
+| Yahoo `^VIX`, `^GSPC`, `SI=F`, `CL=F`, `BTC-USD` | risco sistêmico e intermercado | |
+| CFTC Socrata `72hh-3qpy` (088691) | managed money líquido, Δ semanal, percentil, commercials | |
+| RSS (FXStreet, Kitco, MarketWatch) | notícias interpretadas em 3 níveis, sentimento, índice geopolítico, releases (`CPI 2.8% vs 3.0%`) | interpretador por regras; LLM plugável via `NewsInterpreter` |
+| Calendário JSON | eventos futuros com consenso/anterior | `--calendar eventos.json` |
+| MetaTrader 5 | candles/preço/tick volume do broker | Windows, `pip install MetaTrader5` |
+
+Sem ETF flows e open interest gratuitos: esses campos ficam `None` e o motor reduz a confiança.
+
+## Conectando outras fontes
 
 Implemente `gold_ai.sources.base.DataSource.snapshot()` devolvendo um `MarketSnapshot`. Cada campo
 é opcional: o motor marca o fator como indisponível e reduz a confiança em vez de falhar. Fontes

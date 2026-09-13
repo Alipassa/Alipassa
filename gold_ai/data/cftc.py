@@ -1,0 +1,59 @@
+"""Coletor CFTC — Commitment of Traders (Disaggregated, Futures Only) via API pública Socrata.
+
+Dataset 72hh-3qpy; ouro COMEX = código 088691. Campos usados:
+m_money_positions_long_all / short_all (Managed Money), prod_merc_* + swap_* (Commercials).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+from typing import Optional
+
+from .http import DataError, HttpClient
+
+CFTC_URL = ("https://publicreporting.cftc.gov/resource/72hh-3qpy.json?cftc_contract_market_code={code}"
+       "&$order=report_date_as_yyyy_mm_dd%20DESC&$limit={limit}")
+GOLD_CODE = "088691"
+
+
+@dataclass
+class CotReading:
+    report_date: date
+    managed_money_net: float
+    managed_money_net_change: float
+    managed_money_percentile: float  # 0..100 sobre a janela histórica
+    commercial_net: float
+    commercial_net_change: float
+    history_weeks: int
+
+
+def _f(row: dict, key: str) -> float:
+    try:
+        return float(row.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def parse_rows(rows: list[dict]) -> CotReading:
+    if len(rows) < 2:
+        raise DataError("COT: menos de duas semanas de dados")
+    rows = sorted(rows, key=lambda r: r.get("report_date_as_yyyy_mm_dd", ""))
+    mm = [_f(r, "m_money_positions_long_all") - _f(r, "m_money_positions_short_all") for r in rows]
+    com = [(_f(r, "prod_merc_positions_long_all") + _f(r, "swap_positions_long_all"))
+           - (_f(r, "prod_merc_positions_short_all") + _f(r, "swap_positions_short_all")) for r in rows]
+    last = mm[-1]
+    pct = 100.0 * sum(1 for x in mm if x <= last) / len(mm)
+    d = date.fromisoformat(rows[-1]["report_date_as_yyyy_mm_dd"][:10])
+    return CotReading(d, last, mm[-1] - mm[-2], round(pct, 1), com[-1], com[-1] - com[-2], len(rows))
+
+
+class CftcCollector:
+    def __init__(self, http: HttpClient) -> None:
+        self.http = http
+
+    def gold(self, weeks: int = 156, code: str = GOLD_CODE) -> CotReading:
+        rows = self.http.get_json(CFTC_URL.format(code=code, limit=weeks), ttl=6 * 3600)
+        if not isinstance(rows, list):
+            raise DataError("COT: resposta inesperada")
+        return parse_rows(rows)

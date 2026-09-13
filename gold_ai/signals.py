@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from .config import FACTOR_FAMILIES, EngineConfig
-from .models import Assessment, Direction, Signal, SignalType, Stage
+from .models import Assessment, Direction, EvidenceLevel, Signal, SignalType, Stage
 
 
 def classify(score: float, cfg: EngineConfig) -> SignalType:
@@ -67,6 +67,9 @@ class SignalGate:
         trigger: Optional[str] = None
         sig_type: Optional[SignalType] = None
 
+        # 0. "NÃO SEI": sem vantagem estatística não há sinal direcional (risco/reversão continuam passando)
+        directional_allowed = a.has_edge
+
         # 7. risco excepcional — tem prioridade e ignora intervalo mínimo
         if a.systemic_risk >= self.cfg.exceptional_systemic_risk and not self.last_risk_alert:
             self.last_risk_alert = True
@@ -84,10 +87,19 @@ class SignalGate:
         if not rev_now:
             self.last_reversal_alert = False
 
+        if not directional_allowed:
+            self.last_stage, self.last_direction, self.last_score = stage, direction, a.score
+            self.last_type = SignalType.NEUTRAL
+            return None
+
         # 4. surgimento de pré-movimento (fundamentos antecipam o preço)
         if stage == Stage.PRE_MOVIMENTO and self.last_stage != Stage.PRE_MOVIMENTO and len(confs) >= self.cfg.min_confirmations:
             sig_type, trigger = SignalType.PRE_MOVE, "surgimento de pré-movimento"
             direction = a.premove.direction
+        # 4b. GOLD WATCH: nível 2 de evidência, ainda sem sinal operacional
+        elif base_type == SignalType.NEUTRAL and a.evidence_level >= EvidenceLevel.L2_ALERTA \
+                and max(a.prob_up, a.prob_down) >= self.cfg.watch_min_probability and self.last_type != SignalType.WATCH:
+            sig_type, trigger = SignalType.WATCH, "evidência nível 2 — observação"
         # 5. confirmação de movimento
         elif stage == Stage.CONFIRMACAO and self.last_stage == Stage.PRE_MOVIMENTO and base_type != SignalType.NEUTRAL:
             sig_type, trigger = base_type, "confirmação de movimento"
@@ -111,7 +123,7 @@ class SignalGate:
             return None
 
         # filtro §27: sinal direcional exige >= 3 confirmações independentes
-        if sig_type in (SignalType.STRONG_BUY, SignalType.BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE):
+        if sig_type in (SignalType.STRONG_BUY, SignalType.BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE, SignalType.WATCH):
             if len(confs) < self.cfg.min_confirmations:
                 self.last_type = SignalType.NEUTRAL
                 return None

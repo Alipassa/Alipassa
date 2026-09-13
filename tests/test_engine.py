@@ -119,7 +119,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(a.direction, Direction.BAIXA)
         self.assertIsNotNone(sig)
         self.assertIn(sig.type, (SignalType.SELL, SignalType.STRONG_SELL))
-        self.assertIn("VIÉS: VENDA", sig.text)
+        self.assertIn("🔴 VENDA", sig.text)
 
     def test_reversal_alert(self):
         a, sig = self.engine.run_cycle(SampleSource("reversao").snapshot())

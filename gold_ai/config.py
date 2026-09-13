@@ -97,3 +97,11 @@ class EngineConfig:
 
     # Janela (min) antes de evento de alto impacto em que a confiança é penalizada.
     event_window_minutes: int = 90
+
+    # Vantagem estatística (GOLD AI 2.0 — "saber dizer NÃO SEI").
+    min_edge_probability: float = 0.55
+    min_edge_confidence: float = 50.0
+    min_edge_score: float = 25.0
+
+    # GOLD WATCH: alerta de observação (nível 2, ainda sem sinal operacional).
+    watch_min_probability: float = 0.60

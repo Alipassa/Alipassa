@@ -70,6 +70,116 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_frame(args: argparse.Namespace):
+    """HistoryFrame de CSV (time,open,high,low,close,volume) ou do Yahoo (H1, até ~3 meses)."""
+    from .evaluation import HistoryFrame
+    from .models import Candle
+    from datetime import datetime, timezone
+    import csv
+
+    def read_csv(path: str) -> list[Candle]:
+        out = []
+        with open(path, encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
+                out.append(Candle(t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r.get("volume") or 0)))
+        return sorted(out, key=lambda c: c.time)
+
+    if args.csv:
+        return HistoryFrame(xau=read_csv(args.csv), dxy=read_csv(args.dxy_csv) if args.dxy_csv else [],
+                            us10y=read_csv(args.us10y_csv) if args.us10y_csv else [])
+    from .data import DataEngineConfig, HttpClient
+    from .data.yahoo import YahooCollector
+    y = YahooCollector(HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=900))
+    return HistoryFrame(xau=y.candles(args.symbol, "H1"), dxy=y.candles("DX-Y.NYB", "H1"), us10y=y.candles("^TNX", "H1"),
+                        vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
+
+
+def cmd_live(args: argparse.Namespace) -> int:
+    """Ciclo com DADOS REAIS (Yahoo/FRED/CFTC/RSS) → MarketSnapshot → GOLD AI → Telegram/SQLite."""
+    from .data import DataEngine, DataEngineConfig
+
+    dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot,
+                            enable_fred=not args.no_fred, enable_news=not args.no_news)
+    data = DataEngine(dcfg)
+    source = data
+    executor = None
+    if args.source == "mt5":
+        from .data.mt5 import MT5Config, MT5Executor, MT5Source
+        from .telegram import load_env_file
+
+        mcfg = MT5Config.from_env(load_env_file())
+        if args.mt5_path:
+            mcfg.path = args.mt5_path
+        source = MT5Source(mcfg, data_engine=data)
+        if args.execute:
+            executor = MT5Executor(source.client, volume=args.volume)
+    engine = GoldAIEngine(EngineConfig())
+    sender = TelegramSender(dry_run=not args.send)
+    mem = PredictionMemory(args.db)
+    try:
+        while True:
+            snap = source.collect() if source is data else source.snapshot()
+            print(data.coverage())
+            if source is not data:
+                print(f"MT5: {source.status.get('mt5', 'n/d')}")
+            if not snap.candles:
+                print("sem candles XAU — ciclo abortado")
+            else:
+                assessment, signal = engine.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
+                print(render_report(assessment))
+                if signal:
+                    sender.send(signal.text)
+                    mem.record(assessment, signal.type.value)
+                    if executor is not None:
+                        plan = executor.plan(signal)
+                        if plan is not None:
+                            plan = executor.execute(plan, authorize=args.authorize)
+                            print(plan.render())
+                            if args.send:
+                                sender.send("🧾 " + plan.render())
+                else:
+                    print(">>> sem sinal — " + assessment.edge_status)
+            if args.once:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        mem.close()
+        if source is not data:
+            source.client.close()
+    return 0
+
+
+def cmd_backtest(args: argparse.Namespace) -> int:
+    from .evaluation import Backtester, walk_forward
+
+    frame = _load_frame(args)
+    bt = Backtester(frame, EngineConfig(), threshold_atr=args.threshold_atr, horizon_min=args.horizon, include_watch=args.include_watch)
+    if args.walk_forward:
+        print(walk_forward(bt, n_folds=args.folds).render())
+    else:
+        print(bt.run().render())
+    return 0
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """Confronta as previsões gravadas no SQLite com o caminho real do preço (CSV time,close)."""
+    import csv
+    from datetime import datetime, timezone
+
+    path = []
+    with open(args.path_csv, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
+            path.append((t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["close"])))
+    mem = PredictionMemory(args.db)
+    print(mem.metrics(path, args.threshold, args.horizon).render())
+    mem.close()
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
     pending = mem.pending()
@@ -122,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("stats", help="taxa de acerto e poder preditivo dos fatores")
     s.add_argument("--db", default="gold_ai.db")
-    s.add_argument("--by", nargs="*", default=["sessao", "previsao", "score_bucket", "estagio"])
+    s.add_argument("--by", nargs="*", default=["sessao", "previsao", "score_bucket", "estagio", "nivel_evidencia"])
     s.set_defaults(func=cmd_stats)
 
     e = sub.add_parser("event", help="árvore de reação pré-evento e cadeia pós-evento (exemplo CPI)")
@@ -133,6 +243,42 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--gold", type=float, default=0.0)
     e.add_argument("--flow", type=float, default=0.0)
     e.set_defaults(func=cmd_event)
+
+    lv = sub.add_parser("live", help="ciclo com dados reais (Yahoo/FRED/CFTC/RSS)")
+    lv.add_argument("--symbol", default="GC=F", help="GC=F (futuro) ou XAUUSD=X (spot)")
+    lv.add_argument("--calendar", default=None, help="JSON de eventos econômicos")
+    lv.add_argument("--interval", type=int, default=300)
+    lv.add_argument("--db", default="gold_ai.db")
+    lv.add_argument("--send", action="store_true")
+    lv.add_argument("--once", action="store_true")
+    lv.add_argument("--no-cot", action="store_true")
+    lv.add_argument("--no-fred", action="store_true")
+    lv.add_argument("--no-news", action="store_true")
+    lv.add_argument("--source", choices=["web", "mt5"], default="web", help="mt5 = candles/preço do terminal MetaTrader 5")
+    lv.add_argument("--mt5-path", default=None, help="caminho do terminal64.exe (ou MT5_PATH no .env)")
+    lv.add_argument("--execute", action="store_true", help="gera plano de ordem no MT5 (simulado, salvo com --authorize)")
+    lv.add_argument("--authorize", action="store_true", help="AUTORIZA envio real de ordens ao broker")
+    lv.add_argument("--volume", type=float, default=0.01)
+    lv.set_defaults(func=cmd_live)
+
+    bt = sub.add_parser("backtest", help="backtest / walk-forward sobre histórico H1 (CSV ou Yahoo)")
+    bt.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
+    bt.add_argument("--dxy-csv", default=None)
+    bt.add_argument("--us10y-csv", default=None)
+    bt.add_argument("--symbol", default="GC=F")
+    bt.add_argument("--threshold-atr", type=float, default=1.0)
+    bt.add_argument("--horizon", type=int, default=240, help="minutos")
+    bt.add_argument("--walk-forward", action="store_true")
+    bt.add_argument("--folds", type=int, default=4)
+    bt.add_argument("--include-watch", action="store_true")
+    bt.set_defaults(func=cmd_backtest)
+
+    mt = sub.add_parser("metrics", help="precisão/recall/MFE/MAE/lead time das previsões gravadas vs. preço real")
+    mt.add_argument("--db", default="gold_ai.db")
+    mt.add_argument("--path-csv", required=True, help="CSV time,close com o caminho real do preço")
+    mt.add_argument("--threshold", type=float, default=9.0, help="USD (ex.: 1 ATR)")
+    mt.add_argument("--horizon", type=int, default=240)
+    mt.set_defaults(func=cmd_metrics)
 
     args = p.parse_args(argv)
     return int(args.func(args))

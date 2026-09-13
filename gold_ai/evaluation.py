@@ -1,0 +1,349 @@
+"""Avaliação honesta do sistema (GOLD AI 2.0).
+
+Não basta "quantas vezes o ouro subiu depois do sinal". Mede-se:
+  PRECISÃO   dos sinais de compra e de venda
+  RECALL     quantos movimentos relevantes o sistema detectou (antes de ficarem evidentes)
+  MFE / MAE  máxima excursão favorável / adversa após o sinal
+  LEAD TIME  minutos entre o sinal e o momento em que o movimento ficou evidente
+  ⏱️ GOLD LEAD SCORE — antecipação média dos acertos e fração de acertos com antecedência útil
+
+Inclui um Backtester que reconstrói MarketSnapshots a partir de séries históricas
+alinhadas e um walk-forward (calibração no treino, avaliação fora da amostra).
+"""
+
+from __future__ import annotations
+
+import statistics
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Iterable, Optional, Sequence
+
+from .config import EngineConfig
+from .engine import GoldAIEngine
+from .models import Candle, Direction, MarketSnapshot, SignalType
+from .technical import atr as _atr
+
+
+# --------------------------------------------------------------------------- estruturas
+@dataclass
+class SignalRecord:
+    time: datetime
+    direction: str            # ALTA | BAIXA
+    type: str                 # GOLD BUY, GOLD PRE-MOVE, GOLD WATCH...
+    price: float
+    atr: float
+    evidence_level: int = 0
+    probability: float = 0.0
+    confidence: float = 0.0
+
+
+@dataclass
+class Move:
+    start: datetime
+    direction: str
+    evident_at: datetime      # quando o preço andou ≥ threshold na direção
+    magnitude: float
+    detected_by: Optional[SignalRecord] = None
+
+
+@dataclass
+class SignalOutcome:
+    signal: SignalRecord
+    result: str               # ACERTO | ERRO | LATERAL
+    mfe: float
+    mae: float
+    lead_time_min: Optional[float]
+    evident_at: Optional[datetime]
+
+
+@dataclass
+class Metrics:
+    n_signals: int = 0
+    n_buy: int = 0
+    n_sell: int = 0
+    precision_buy: Optional[float] = None
+    precision_sell: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    n_moves: int = 0
+    n_moves_detected: int = 0
+    mfe_avg: Optional[float] = None
+    mae_avg: Optional[float] = None
+    mfe_mae_ratio: Optional[float] = None
+    lead_time_avg: Optional[float] = None
+    lead_time_median: Optional[float] = None
+    lead_times: list[float] = field(default_factory=list)
+    gold_lead_score: Optional[float] = None
+    by_level: dict[int, dict[str, float]] = field(default_factory=dict)
+    outcomes: list[SignalOutcome] = field(default_factory=list)
+
+    def render(self) -> str:
+        f = lambda x, s="": ("n/d" if x is None else f"{x:.1%}" if s == "%" else f"{x:.1f}{s}")  # noqa: E731
+        lines = [
+            "📊 AVALIAÇÃO — GOLD AI",
+            f"Sinais: {self.n_signals} (compra {self.n_buy}, venda {self.n_sell})",
+            f"Precisão: total {f(self.precision, '%')} · compra {f(self.precision_buy, '%')} · venda {f(self.precision_sell, '%')}",
+            f"Recall: {f(self.recall, '%')} ({self.n_moves_detected}/{self.n_moves} movimentos relevantes detectados antes de ficarem evidentes)",
+            f"MFE médio: {f(self.mfe_avg)} · MAE médio: {f(self.mae_avg)} · MFE/MAE: {f(self.mfe_mae_ratio)}",
+            f"Lead time (acertos): média {f(self.lead_time_avg, ' min')} · mediana {f(self.lead_time_median, ' min')}",
+            f"⏱️ GOLD LEAD SCORE: {f(self.gold_lead_score)}/100",
+        ]
+        if self.lead_times:
+            lines.append("  Antecedência por sinal: " + ", ".join(f"{x:.0f} min" for x in self.lead_times[:12]) + (" …" if len(self.lead_times) > 12 else ""))
+        for lvl in sorted(self.by_level):
+            d = self.by_level[lvl]
+            lines.append(f"  Nível {lvl}: n={int(d['n'])} precisão={d['precision']:.0%} lead médio={d['lead']:.0f} min")
+        return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- movimentos relevantes
+def detect_moves(path: Sequence[tuple[datetime, float]], threshold: float, horizon_min: int = 240) -> list[Move]:
+    """Movimento relevante = deslocamento ≥ threshold (ex.: 1 ATR) dentro do horizonte, sem antes
+    andar ≥ threshold na direção contrária. Movimentos sobrepostos na mesma direção são fundidos."""
+    moves: list[Move] = []
+    n = len(path)
+    i = 0
+    while i < n:
+        t0, p0 = path[i]
+        found = None
+        for j in range(i + 1, n):
+            tj, pj = path[j]
+            if (tj - t0) > timedelta(minutes=horizon_min):
+                break
+            if pj - p0 >= threshold:
+                found = Move(t0, "ALTA", tj, pj - p0)
+                break
+            if p0 - pj >= threshold:
+                found = Move(t0, "BAIXA", tj, p0 - pj)
+                break
+        if found:
+            if moves and moves[-1].direction == found.direction and found.start <= moves[-1].evident_at:
+                moves[-1].magnitude = max(moves[-1].magnitude, found.magnitude)
+            else:
+                moves.append(found)
+            # pula até o momento em que ficou evidente
+            while i < n and path[i][0] < found.evident_at:
+                i += 1
+        else:
+            i += 1
+    return moves
+
+
+# --------------------------------------------------------------------------- avaliação
+def evaluate_signal(sig: SignalRecord, path: Sequence[tuple[datetime, float]], threshold: float, horizon_min: int) -> SignalOutcome:
+    sign = 1.0 if sig.direction == "ALTA" else -1.0
+    mfe = mae = 0.0
+    result, evident, lead = "LATERAL", None, None
+    for t, p in path:
+        if t < sig.time:
+            continue
+        if t - sig.time > timedelta(minutes=horizon_min):
+            break
+        exc = (p - sig.price) * sign
+        mfe, mae = max(mfe, exc), max(mae, -exc)
+        if result == "LATERAL":
+            if exc >= threshold:
+                result, evident, lead = "ACERTO", t, (t - sig.time).total_seconds() / 60
+            elif exc <= -threshold:
+                result, evident = "ERRO", t
+    return SignalOutcome(sig, result, round(mfe, 2), round(mae, 2), lead, evident)
+
+
+def evaluate(signals: Iterable[SignalRecord], path: Sequence[tuple[datetime, float]], threshold: float,
+             horizon_min: int = 240, useful_lead_min: float = 5.0) -> Metrics:
+    sigs = sorted(signals, key=lambda s: s.time)
+    m = Metrics(n_signals=len(sigs))
+    outcomes = [evaluate_signal(s, path, threshold, horizon_min) for s in sigs]
+    m.outcomes = outcomes
+    buys = [o for o in outcomes if o.signal.direction == "ALTA"]
+    sells = [o for o in outcomes if o.signal.direction == "BAIXA"]
+    m.n_buy, m.n_sell = len(buys), len(sells)
+    hit = lambda os_: (sum(1 for o in os_ if o.result == "ACERTO") / len(os_)) if os_ else None  # noqa: E731
+    m.precision_buy, m.precision_sell, m.precision = hit(buys), hit(sells), hit(outcomes)
+    if outcomes:
+        m.mfe_avg = statistics.fmean(o.mfe for o in outcomes)
+        m.mae_avg = statistics.fmean(o.mae for o in outcomes)
+        m.mfe_mae_ratio = (m.mfe_avg / m.mae_avg) if m.mae_avg else None
+    leads = [o.lead_time_min for o in outcomes if o.result == "ACERTO" and o.lead_time_min is not None]
+    m.lead_times = leads
+    if leads:
+        m.lead_time_avg, m.lead_time_median = statistics.fmean(leads), statistics.median(leads)
+    # recall: movimento relevante detectado se houve sinal na mesma direção entre (start − horizonte) e evident_at
+    moves = detect_moves(path, threshold, horizon_min)
+    m.n_moves = len(moves)
+    for mv in moves:
+        for s in sigs:
+            if s.direction == mv.direction and mv.start - timedelta(minutes=horizon_min) <= s.time < mv.evident_at:
+                mv.detected_by = s
+                break
+    m.n_moves_detected = sum(1 for mv in moves if mv.detected_by)
+    m.recall = (m.n_moves_detected / m.n_moves) if m.n_moves else None
+    # GOLD LEAD SCORE: acertos com antecedência útil ÷ total de sinais, escalado pela antecedência média (satura em 30 min)
+    if outcomes:
+        useful = sum(1 for o in outcomes if o.result == "ACERTO" and (o.lead_time_min or 0) >= useful_lead_min)
+        lead_factor = min(1.0, (m.lead_time_avg or 0) / 30.0)
+        m.gold_lead_score = round(100.0 * (useful / len(outcomes)) * (0.5 + 0.5 * lead_factor), 1)
+    for lvl in sorted({o.signal.evidence_level for o in outcomes}):
+        os_ = [o for o in outcomes if o.signal.evidence_level == lvl]
+        ls = [o.lead_time_min for o in os_ if o.result == "ACERTO" and o.lead_time_min is not None]
+        m.by_level[lvl] = {"n": float(len(os_)), "precision": hit(os_) or 0.0, "lead": statistics.fmean(ls) if ls else 0.0}
+    return m
+
+
+# --------------------------------------------------------------------------- histórico e backtest
+@dataclass
+class HistoryFrame:
+    """Séries H1 alinhadas por timestamp. Apenas `xau` é obrigatória."""
+
+    xau: list[Candle]
+    dxy: list[Candle] = field(default_factory=list)
+    us10y: list[Candle] = field(default_factory=list)          # em % (ex.: ^TNX)
+    vix: list[Candle] = field(default_factory=list)
+    spx: list[Candle] = field(default_factory=list)
+    real_yield_daily: list[tuple[datetime, float]] = field(default_factory=list)  # FRED DFII10 (%)
+
+    @staticmethod
+    def _at(series: list[Candle], t: datetime) -> Optional[int]:
+        lo, hi = 0, len(series) - 1
+        best = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if series[mid].time <= t:
+                best, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    def snapshot_at(self, i: int, window_bars: int = 1, lookback: int = 300) -> MarketSnapshot:
+        """Snapshot no índice i da série XAU, com candles H1/H4/D1/W1 reamostrados e variações
+        recentes calculadas na janela de `window_bars` horas (sem olhar o futuro)."""
+        from .data.yahoo import resample  # import local para manter o pacote leve
+
+        t = self.xau[i].time
+        h1 = self.xau[max(0, i - lookback + 1): i + 1]
+        h4 = resample(h1, 240)
+        d1 = resample(self.xau[max(0, i - lookback * 8 + 1): i + 1], 1440)
+        w1 = resample(d1, 10080)
+        s = MarketSnapshot(time=t, price=h1[-1].close, candles={"H1": h1, "H4": h4, "D1": d1, "W1": w1})
+        s.atr = _atr(h1) or 0.0
+        ref = h1[-1 - window_bars] if len(h1) > window_bars else h1[0]
+        s.price_change_pct = (h1[-1].close / ref.close - 1) * 100 if ref.close else 0.0
+        vol = sum(c.volume for c in h1[-window_bars:])
+        if vol > 0:
+            s.order_flow_imbalance = (sum(c.volume for c in h1[-window_bars:] if c.close > c.open) - sum(c.volume for c in h1[-window_bars:] if c.close < c.open)) / vol
+
+        def change(series: list[Candle], pct: bool) -> tuple[Optional[float], Optional[float]]:
+            j = self._at(series, t)
+            if j is None or j - window_bars < 0:
+                return None, None
+            a, b = series[j].close, series[j - window_bars].close
+            return a, ((a / b - 1) * 100 if pct else a - b) if b else None
+
+        s.dxy, s.dxy_change_pct = change(self.dxy, True)
+        y, dy = change(self.us10y, False)
+        s.us10y, s.us10y_change_bp = y, (dy * 100 if dy is not None else None)
+        s.vix, s.vix_change_pct = change(self.vix, True)
+        _, s.equity_change_pct = change(self.spx, True)
+        if self.real_yield_daily:
+            pts = [(d, v) for d, v in self.real_yield_daily if d <= t]
+            if len(pts) >= 2:
+                s.real_yield_10y = pts[-1][1]
+                s.real_yield_change_bp = (pts[-1][1] - pts[-2][1]) * 100
+        elif s.us10y_change_bp is not None:
+            s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
+        return s
+
+
+@dataclass
+class BacktestResult:
+    metrics: Metrics
+    signals: list[SignalRecord]
+    n_steps: int
+    cfg: EngineConfig
+
+    def render(self) -> str:
+        return f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
+
+
+class Backtester:
+    def __init__(self, frame: HistoryFrame, cfg: Optional[EngineConfig] = None, warmup: int = 220, step: int = 1,
+                 threshold_atr: float = 1.0, horizon_min: int = 240, include_watch: bool = False) -> None:
+        self.frame = frame
+        self.cfg = cfg or EngineConfig()
+        self.warmup, self.step = warmup, step
+        self.threshold_atr, self.horizon_min = threshold_atr, horizon_min
+        self.include_watch = include_watch
+
+    def run(self, start: Optional[int] = None, end: Optional[int] = None, cfg: Optional[EngineConfig] = None) -> BacktestResult:
+        cfg = cfg or self.cfg
+        engine = GoldAIEngine(cfg)
+        xau = self.frame.xau
+        start = max(self.warmup, start or self.warmup)
+        end = min(len(xau), end or len(xau))
+        signals: list[SignalRecord] = []
+        for i in range(start, end, self.step):
+            snap = self.frame.snapshot_at(i)
+            a, sig = engine.run_cycle(snap)
+            if sig is None or sig.type in (SignalType.RISK, SignalType.REVERSAL):
+                continue
+            if sig.type == SignalType.WATCH and not self.include_watch:
+                continue
+            if sig.direction == Direction.LATERAL:
+                continue
+            signals.append(SignalRecord(a.time, sig.direction.value, sig.type.value, a.price, snap.atr, int(a.evidence_level),
+                                        max(a.prob_up, a.prob_down), a.confidence))
+        path = [(c.time, c.close) for c in xau[start:end]]
+        atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
+        threshold = self.threshold_atr * statistics.fmean(atrs)
+        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg)
+
+
+@dataclass
+class WalkForwardResult:
+    folds: list[tuple[EngineConfig, BacktestResult]]
+    oos: Metrics
+
+    def render(self) -> str:
+        lines = ["🔁 WALK-FORWARD (fora da amostra)"]
+        for k, (cfg, r) in enumerate(self.folds, 1):
+            lines.append(f"  fold {k}: buy≥{cfg.buy} sell≤{cfg.sell} conf≥{cfg.min_confirmations} → sinais={r.metrics.n_signals} "
+                         f"precisão={'n/d' if r.metrics.precision is None else f'{r.metrics.precision:.0%}'} lead={'n/d' if r.metrics.lead_time_avg is None else f'{r.metrics.lead_time_avg:.0f} min'}")
+        lines.append("AGREGADO OOS:")
+        lines.append(self.oos.render())
+        return "\n".join(lines)
+
+
+def _objective(m: Metrics) -> float:
+    """Precisão × recall (F1) ponderada pelo GOLD LEAD SCORE; penaliza ausência de sinais."""
+    if m.n_signals == 0 or m.precision is None:
+        return 0.0
+    p, r = m.precision, m.recall or 0.0
+    f1 = 2 * p * r / (p + r) if (p + r) else 0.0
+    return f1 * (0.5 + 0.5 * (m.gold_lead_score or 0) / 100)
+
+
+def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = None) -> WalkForwardResult:
+    """Divide o histórico em folds sequenciais; calibra limiares no treino (grid) e avalia no teste."""
+    grid = grid or [{"buy": b, "sell": -b, "min_confirmations": c} for b in (40, 50, 60) for c in (2, 3)]
+    n = len(bt.frame.xau)
+    usable = n - bt.warmup
+    fold_len = usable // (n_folds + 1)
+    folds: list[tuple[EngineConfig, BacktestResult]] = []
+    for k in range(1, n_folds + 1):
+        train_start, train_end = bt.warmup, bt.warmup + k * fold_len
+        test_end = min(n, train_end + fold_len)
+        best_cfg, best_obj = None, -1.0
+        for params in grid:
+            cfg = EngineConfig(**{**bt.cfg.__dict__, **params, "weights": dict(bt.cfg.weights)})
+            r = bt.run(train_start, train_end, cfg)
+            obj = _objective(r.metrics)
+            if obj > best_obj:
+                best_cfg, best_obj = cfg, obj
+        assert best_cfg is not None
+        folds.append((best_cfg, bt.run(train_end, test_end, best_cfg)))
+    # agrega OOS
+    all_sigs = [s for _, r in folds for s in r.signals]
+    path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + fold_len:]]
+    atrs = [s.atr for s in all_sigs if s.atr] or [1.0]
+    oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
+    return WalkForwardResult(folds, oos)

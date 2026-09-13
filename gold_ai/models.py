@@ -26,6 +26,7 @@ class Stage(str, Enum):
 class SignalType(str, Enum):
     """Classificação de sinais (Diretriz §28)."""
 
+    WATCH = "GOLD WATCH"
     STRONG_BUY = "GOLD STRONG BUY"
     BUY = "GOLD BUY"
     NEUTRAL = "GOLD NEUTRAL"
@@ -226,6 +227,20 @@ class ReversalAnalysis:
     evidence: list[str] = field(default_factory=list)
 
 
+class EvidenceLevel(int, Enum):
+    """Nível de evidência (GOLD AI 2.0)."""
+
+    NONE = 0
+    L1_OBSERVACAO = 1   # 1–2 fatores
+    L2_ALERTA = 2       # 3 fatores independentes
+    L3_SINAL = 3        # macro + fluxo + técnico
+    L4_PREMOVE_FORTE = 4  # macro + fluxo + técnico + notícia/evento + divergência preço/fundamento
+
+    @property
+    def label(self) -> str:
+        return {0: "SEM EVIDÊNCIA", 1: "NÍVEL 1 — OBSERVAÇÃO", 2: "NÍVEL 2 — ALERTA", 3: "NÍVEL 3 — SINAL", 4: "🔥 NÍVEL 4 — PRE-MOVE FORTE"}[int(self)]
+
+
 @dataclass
 class Assessment:
     """Saída de um ciclo de análise (Diretriz §36)."""
@@ -250,6 +265,10 @@ class Assessment:
     conclusion: str
     confirmations: list[str]
     zone: dict[str, Optional[float]] = field(default_factory=dict)
+    evidence_level: "EvidenceLevel" = EvidenceLevel.NONE
+    edge_status: str = ""          # "VANTAGEM ESTATÍSTICA: ALTA" | "🟡 SEM VANTAGEM ESTATÍSTICA"
+    has_edge: bool = False
+    chain: str = ""                # raciocínio em cadeia do evento (9 passos)
 
     @property
     def direction(self) -> Direction:

@@ -52,6 +52,14 @@ def format_signal(sig: Signal) -> str:
     prob = a.prob_up if d == Direction.ALTA else a.prob_down if d == Direction.BAIXA else a.prob_flat
     price = f"Preço: {a.price:.2f}"
 
+    if sig.type == SignalType.WATCH:
+        lines = ["⚠️ GOLD WATCH", "XAU/USD", price, "",
+                 f"Possível movimento de {'ALTA' if d == Direction.ALTA else 'BAIXA'}.", "",
+                 f"Probabilidade: {_pct(prob)}", f"Confiança: {a.confidence:.0f}/100", f"Evidência: {a.evidence_level.label}",
+                 f"Horizonte: {a.horizon}", "", "Fatores em observação:", *[f"• {r}" for r in sig.reasons[:4]], "",
+                 "Ainda não há operação. Aguardando confirmação."]
+        return "\n".join(lines)
+
     if sig.type == SignalType.PRE_MOVE:
         emoji = "🟢 ALTA" if d == Direction.ALTA else "🔴 BAIXA"
         lines = [f"⚠️ GOLD PRE-MOVE — POSSÍVEL {'ALTA' if d == Direction.ALTA else 'BAIXA'}", "XAU/USD", price, "",
@@ -59,8 +67,9 @@ def format_signal(sig: Signal) -> str:
                  "mas o preço ainda não confirmou.", "",
                  f"Probabilidade de movimento: {_pct(a.premove.probability)}", f"Direção: {emoji}",
                  f"Status: {a.premove.stage.value}", f"Confiança: {a.confidence:.0f}/100", f"Horizonte: {a.horizon}", "",
+                 f"Evidência: {a.evidence_level.label}", "",
                  "Antecipação", *_layer_line(a, d), "", "Situação", f"{a.premove.latent_pressure or a.premove.stage.value}", "",
-                 "Zona de atenção", *_zone(a)]
+                 "Zona de atenção", *_zone(a), "", a.chain]
         return "\n".join(lines)
 
     if sig.type == SignalType.REVERSAL:
@@ -83,12 +92,14 @@ def format_signal(sig: Signal) -> str:
         return "\n".join(lines)
 
     buy = sig.type in (SignalType.BUY, SignalType.STRONG_BUY)
-    head = "🚨 GOLD AI ALERT" if buy else "🔴 GOLD AI ALERT"
-    bias = "🟢 VIÉS: COMPRA" if buy else "🔴 VIÉS: VENDA"
+    confirmed = sig.trigger == "confirmação de movimento"
+    head = ("🟢 GOLD SIGNAL" if buy else "🔴 GOLD SIGNAL") if confirmed else ("🚨 GOLD AI ALERT" if buy else "🔴 GOLD AI ALERT")
+    bias = "🟢 COMPRA" if buy else "🔴 VENDA"
     if sig.type in (SignalType.STRONG_BUY, SignalType.STRONG_SELL):
         bias += " (FORTE)"
-    lines = [head, "XAU/USD", price, "", bias, f"Score: {a.score:+.0f}", f"Probabilidade: {_pct(prob)}",
-             f"Confiança: {a.confidence:.0f}/100", f"Horizonte: {a.horizon}", "",
+    lines = [head, "XAU/USD", price, "", bias, *(["PRE-MOVE CONFIRMADO"] if confirmed else []),
+             f"Score: {a.score:+.0f}", f"Probabilidade: {_pct(prob)}",
+             f"Confiança: {a.confidence:.0f}/100", f"Evidência: {a.evidence_level.label}", f"Horizonte: {a.horizon}", "",
              "Motivos", *[f"• {r}" for r in sig.reasons], "",
              "Antecipação", *_layer_line(a, d), "",
              "Situação", f"{a.premove.latent_pressure or a.dominant_pressure}",
@@ -102,12 +113,30 @@ def format_signal(sig: Signal) -> str:
     return "\n".join(lines)
 
 
-class TelegramSender:
-    """Envio via Bot API (stdlib). Sem token/chat_id, apenas imprime (modo dry-run)."""
+def load_env_file(path: str = ".env") -> dict[str, str]:
+    """Lê um .env simples (CHAVE=valor, aspas opcionais). Nunca versionar esse arquivo."""
+    out: dict[str, str] = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln or ln.startswith("#") or "=" not in ln:
+                continue
+            k, v = ln.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
 
-    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, dry_run: bool = False) -> None:
-        self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
-        self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+
+class TelegramSender:
+    """Envio via Bot API (stdlib). Credenciais por argumento, variável de ambiente
+    (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, ou TOKEN_TELEGRAM / CHAT_ID) ou arquivo .env.
+    Sem token/chat_id, apenas imprime (modo dry-run)."""
+
+    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, dry_run: bool = False, env_file: str = ".env") -> None:
+        env = {**load_env_file(env_file), **os.environ}
+        self.token = token or env.get("TELEGRAM_BOT_TOKEN") or env.get("TOKEN_TELEGRAM")
+        self.chat_id = str(chat_id or env.get("TELEGRAM_CHAT_ID") or env.get("CHAT_ID") or "") or None
         self.dry_run = dry_run or not (self.token and self.chat_id)
 
     def send(self, text: str) -> bool:

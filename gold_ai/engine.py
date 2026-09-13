@@ -9,6 +9,7 @@ from typing import Optional
 from .config import HORIZONS, EngineConfig
 from .factors import SCORERS, accumulation_distribution, score_tecnico, sentiment_label, systemic_risk_index
 from .events import next_high_impact_event
+from .evidence import edge_status, event_chain, evidence_level
 from .models import Assessment, Direction, FactorScore, MarketSnapshot, Signal, Stage, TechnicalReading
 from .premove import analyze_premove, analyze_reversal
 from .signals import SignalGate, classify, confirmations
@@ -156,13 +157,16 @@ class GoldAIEngine:
             conclusion="", confirmations=[], zone=zone,
         )
         a.confirmations = confirmations(a, a.direction if a.direction != Direction.LATERAL else premove.direction, self.cfg)
+        a.evidence_level = evidence_level(a, s)
+        a.has_edge, a.edge_status = edge_status(a, self.cfg)
+        a.chain = event_chain(a, s)
         a.conclusion = self._conclusion(a)
         self.history.append(a)
         return a
 
     def _conclusion(self, a: Assessment) -> str:
         cls = classify(a.score, self.cfg).value
-        parts = [f"{cls} (score {a.score:+.0f}, {len(a.confirmations)} confirmações: {', '.join(a.confirmations) or 'nenhuma'})."]
+        parts = [f"{cls} (score {a.score:+.0f}, {len(a.confirmations)} confirmações: {', '.join(a.confirmations) or 'nenhuma'}). {a.evidence_level.label}. {a.edge_status}."]
         if a.premove.stage == Stage.PRE_MOVIMENTO:
             parts.append(f"{a.premove.latent_pressure}: fundamentos apontam {a.premove.direction.value.lower()} com prob. {a.premove.probability:.0%}, preço ainda não confirmou (confirmação técnica {a.premove.price_confirmation:.0%}).")
         elif a.premove.stage == Stage.CONFIRMACAO:
