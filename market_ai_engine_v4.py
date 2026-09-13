@@ -2405,12 +2405,35 @@ def format_signal(sig: Signal) -> str:
     return "\n".join(lines)
 
 
+ENV_CANDIDATES = (".env", ".env.txt", "env", "env.txt")
+
+
+def env_file_candidates(path: str = ".env") -> list[str]:
+    """Onde o .env é procurado: pasta atual e pasta do script, com os nomes que o Windows costuma dar ao arquivo."""
+    if path != ".env":
+        return [path]
+    dirs = [os.getcwd()]
+    script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else ""
+    if script_dir and script_dir != dirs[0]:
+        dirs.append(script_dir)
+    return [os.path.join(d, name) for d in dirs for name in ENV_CANDIDATES]
+
+
+def find_env_file(path: str = ".env") -> Optional[str]:
+    for cand in env_file_candidates(path):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def load_env_file(path: str = ".env") -> dict[str, str]:
-    """Lê um .env simples (CHAVE=valor, aspas opcionais). Nunca versionar esse arquivo."""
+    """Lê um .env simples (CHAVE=valor, aspas opcionais). Nunca versionar esse arquivo.
+    Aceita .env / .env.txt / env / env.txt na pasta atual ou na pasta do script."""
     out: dict[str, str] = {}
-    if not os.path.exists(path):
+    found = find_env_file(path)
+    if not found:
         return out
-    with open(path, encoding="utf-8") as f:
+    with open(found, encoding="utf-8-sig") as f:
         for ln in f:
             ln = ln.strip()
             if not ln or ln.startswith("#") or "=" not in ln:
@@ -9147,7 +9170,9 @@ def cmd_history(args: argparse.Namespace) -> int:
         elif args.action == "fetch-alfred":
             key = args.key or env.get("FRED_API_KEY") or os.environ.get("FRED_API_KEY")
             if not key:
+                found = find_env_file()
                 print("ALFRED/FRED exige chave gratuita: --key ou FRED_API_KEY no .env (https://fred.stlouisfed.org/docs/api/api_key.html)")
+                print(f"  .env lido: {found}" if found else "  nenhum .env encontrado; procurei em: " + ", ".join(env_file_candidates()))
                 return 1
             imp = ALFREDImporter(http, key, log=print)
             try:

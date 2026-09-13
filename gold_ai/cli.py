@@ -312,7 +312,10 @@ def cmd_history(args: argparse.Namespace) -> int:
             from .data.history_sources import ALFREDImporter
             key = args.key or env.get("FRED_API_KEY") or os.environ.get("FRED_API_KEY")
             if not key:
+                from .telegram import env_file_candidates, find_env_file
+                found = find_env_file()
                 print("ALFRED/FRED exige chave gratuita: --key ou FRED_API_KEY no .env (https://fred.stlouisfed.org/docs/api/api_key.html)")
+                print(f"  .env lido: {found}" if found else "  nenhum .env encontrado; procurei em: " + ", ".join(env_file_candidates()))
                 return 1
             imp = ALFREDImporter(http, key, log=print)
             try:
