@@ -105,6 +105,8 @@ class MarketAIEngine:
         # comandos (/STOP /PAUSE /STATUS /CLOSE) tratados pelo primeiro motor, com o kill switch compartilhado
         first = next(iter(self.engines.values()))
         first.commands = self.commands
+        if self.commands is not None and any(c.startswith("/EDGE") for c in getattr(self.commands, "last_cmds", [])):
+            self.daily_edge(snaps.time, pc, force=True)
         # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
         for sym, eng in self.engines.items():
             snap = snaps.by_symbol.get(sym)
@@ -147,7 +149,26 @@ class MarketAIEngine:
         pc.decision = (f"ENTRADA em {pc.chosen}" if pc.chosen else ("melhor oportunidade não passou no Risk Engine/exposição — " + pc.results[pc.ranked[0].spec.symbol].decision
                                                                    if pc.ranked else "nenhuma oportunidade com vantagem neste ciclo"))
         self.log(self.portfolio.render(self.open_exposures(), self.perf.equity))
+        # 🚨 LIVE EDGE — o teste definitivo, uma vez por dia (e sob demanda com /EDGE)
+        self.daily_edge(snaps.time, pc)
         return pc
+
+    def edge_report(self, now: Optional[datetime] = None):
+        from .edge_report import live_edge_report
+        return live_edge_report(self.mem, tuple(self.specs), now, self.perf.equity)
+
+    def daily_edge(self, now: datetime, pc: Optional[PortfolioCycle] = None, force: bool = False) -> Optional[str]:
+        today = now.strftime("%Y-%m-%d")
+        if not force and self.mem.last_edge_date() == today:
+            return None
+        rep = self.edge_report(now)
+        self.mem.save_edge_report(rep)
+        text = rep.render()
+        self.log(text)
+        self.sender.send("📊 " + text)
+        if pc is not None:
+            pc.messages.append(text)
+        return text
 
     def status_text(self) -> str:
         lines = [f"📋 MARKET AI STATUS · modo {self.mode.value} · mercados {', '.join(self.specs)}", self.perf.render(),

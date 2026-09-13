@@ -18,7 +18,7 @@ VERSION = "4.0.0"
 
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "trading", "monitor",
-         "markets", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "live_engine", "data/multi", "market_engine", "cli"]
+         "markets", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "live_engine", "data/multi", "market_engine", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
 """MARKET AI ENGINE 4.0 — cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade.
@@ -51,6 +51,7 @@ Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 
 Uso (4.0, multi-mercado):
     python market_ai_engine_v4.py markets                                              # ranking agora, não opera
+    python market_ai_engine_v4.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
     python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
     python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
 Uso (3.0, um mercado):

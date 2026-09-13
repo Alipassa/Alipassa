@@ -45,6 +45,30 @@ python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI 
 python market_ai_engine_v4.py stats                                                            # inclui resultado por ativo
 ```
 
+## 🚨 LIVE EDGE — o teste definitivo da 4.0
+
+Uma vez por dia (e sob demanda com `edge` ou `/EDGE` no Telegram) o sistema produz, **a partir do que viveu**, a tabela por mercado:
+
+```text
+╔════════════════════════════════════════════╗
+║           MARKET AI — LIVE EDGE            ║
+╠════════════════════════════════════════════╣
+║ EURUSD                                     ║
+║ OOS Trades: 427                            ║
+║ Expectancy: +0.34R  (ajustada +0.32R)      ║
+║ Probabilidade calibrada: 67% (declarada 71%)║
+║ Capture Rate: 38%  · Entry Rate: 14%       ║
+║ Status: 🟢  edge confirmado (HIGH, LB +0.21R)║
+╚════════════════════════════════════════════╝
+```
+
+- **Fora da amostra por construção**: toda previsão foi gravada antes do resultado.
+- **Probabilidade calibrada** = taxa de acerto observada das previsões direcionais, ao lado da declarada.
+- **Status** vem da confiança estatística (amostra ≥ 30, nível HIGH/MEDIUM, limite inferior positivo), não da expectancy bruta.
+- Cada relatório fica guardado em `edge_reports`; `edge` mostra a evolução diária da expectancy ajustada por mercado.
+
+Não precisamos acreditar que EURUSD é melhor. Os dados mostram.
+
 ## Entrypoint único
 
 Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:

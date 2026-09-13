@@ -154,6 +154,7 @@ class TelegramCommands:
     chat_id: Optional[str]
     offset: int = 0
     pending_close: bool = False
+    last_cmds: list[str] = field(default_factory=list)
 
     def poll(self) -> list[str]:  # pragma: no cover - rede
         if not self.token:
@@ -178,8 +179,11 @@ class TelegramCommands:
     def apply(self, cmds: list[str], ks: KillSwitch) -> list[str]:
         """Aplica ao kill switch; devolve ações que o loop deve executar: STATUS, CLOSE_CONFIRMED."""
         actions: list[str] = []
+        self.last_cmds = list(cmds)
         for c in cmds:
-            if c.startswith("/STOP"):
+            if c.startswith("/EDGE"):
+                actions.append("EDGE")
+            elif c.startswith("/STOP"):
                 ks.stopped = True
                 actions.append("STOP")
             elif c.startswith("/PAUSE"):

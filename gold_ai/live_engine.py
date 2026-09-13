@@ -89,6 +89,8 @@ class LiveExecutionEngine:
         if self.commands is None:
             return
         for action in self.commands.apply(self.commands.poll(), self.ks):
+            if action == "EDGE":
+                continue  # tratado pelo MarketAIEngine (LIVE EDGE sob demanda)
             if action == "STATUS":
                 self._send(self.status_text(), res)
             elif action in ("STOP", "PAUSE", "RESUME"):

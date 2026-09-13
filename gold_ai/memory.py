@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS prices (
     hora TEXT PRIMARY KEY,
     close REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS edge_reports (
+    data TEXT PRIMARY KEY,
+    hora TEXT NOT NULL,
+    texto TEXT NOT NULL,
+    dados TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS account (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hora TEXT NOT NULL,
@@ -327,6 +333,19 @@ class PredictionMemory:
 
     def equity_curve(self) -> list[tuple[datetime, float]]:
         return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
+
+    # ------------------------------------------------------------------ 4.0: LIVE EDGE diário
+    def save_edge_report(self, report) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO edge_reports (data, hora, texto, dados) VALUES (?,?,?,?)",
+                          (report.date, datetime.now(timezone.utc).isoformat(), report.render(), report.to_json()))
+        self.conn.commit()
+
+    def last_edge_date(self) -> Optional[str]:
+        r = self.conn.execute("SELECT data FROM edge_reports ORDER BY data DESC LIMIT 1").fetchone()
+        return r["data"] if r else None
+
+    def edge_history(self) -> list[dict]:
+        return [json.loads(r["dados"]) for r in self.conn.execute("SELECT dados FROM edge_reports ORDER BY data").fetchall()]
 
     def per_market_summary(self) -> list[dict]:
         """4.0: operações, expectancy e win rate por ativo (o que foi vivido)."""

@@ -428,3 +428,8 @@ Regras:
 6. Fases: 1 EURUSD, US500, XAUUSD, USDJPY, WTI · 2 NAS100, GBPUSD · 3 BTCUSD, ETHUSD — provar que o
    cérebro generaliza antes de transformar volatilidade em falso edge.
 7. Nenhum filtro de entrada arbitrário novo; nasce em PAPER.
+
+8. **LIVE EDGE diário** (o teste definitivo): tabela por mercado com trades fora da amostra,
+   expectancy, probabilidade calibrada (declarada × observada), capture rate e status por confiança
+   estatística — gerada a partir do que o sistema viveu, guardada todos os dias. Não precisamos
+   acreditar que um mercado é melhor: os dados mostram.

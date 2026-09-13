@@ -185,6 +185,26 @@ def cmd_markets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_edge(args: argparse.Namespace) -> int:
+    """LIVE EDGE: tabela por mercado a partir do que o sistema viveu (fora da amostra por construção) + evolução diária."""
+    from .edge_report import edge_trend, live_edge_report
+
+    mem = PredictionMemory(args.db)
+    symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+    rep = live_edge_report(mem, symbols, equity=mem.last_equity(), min_trades=args.min_trades)
+    print(rep.render())
+    if args.save:
+        mem.save_edge_report(rep)
+        print("relatório salvo")
+    hist = mem.edge_history()
+    if hist:
+        print("\nEvolução (expectancy ajustada por relatório diário):")
+        for s in symbols:
+            print("  " + edge_trend(hist, s))
+    mem.close()
+    return 0
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """3.0 LIVE EXECUTION ENGINE: dados reais → predição → decisão → plano → risco → lote → MT5 → confirmação → monitor → resultado → capital."""
     if args.markets:
@@ -490,6 +510,13 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("-v", "--verbose", action="store_true")
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.set_defaults(func=cmd_live)
+
+    ed = sub.add_parser("edge", help="4.0: LIVE EDGE — tabela diária por mercado a partir do que foi vivido (o teste definitivo)")
+    ed.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
+    ed.add_argument("--db", default="gold_ai.db")
+    ed.add_argument("--min-trades", type=int, default=30)
+    ed.add_argument("--save", action="store_true", help="guarda o relatório de hoje no SQLite")
+    ed.set_defaults(func=cmd_edge)
 
     mk = sub.add_parser("markets", help="4.0: ranking de oportunidades agora (não opera) + histórico por mercado")
     mk.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
