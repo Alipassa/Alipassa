@@ -5299,8 +5299,8 @@ class HistoricalEvent:
                 self.surprise = round(self.actual - self.previous, 4)
         if self.forecast is None and self.previous is not None and self.surprise is not None and self.surprise_basis == "forecast":
             self.surprise_basis = "previous"
-        if self.kind == "generic":
-            self.kind = kind_from_name(self.event)
+        if self.kind == "generic" and self.category in ("MACRO", "CENTRAL_BANK"):
+            self.kind = kind_from_name(self.event)     # manchete (NEWS/GEOPOLITICAL/…) nunca vira release macro
 
     def effect(self, market: str) -> Optional[float]:
         return getattr(self, EFFECT_FIELD.get(market.upper(), "_"), None)
@@ -5701,12 +5701,13 @@ class ALFREDImporter:
         self.validate_key()
         hist = EventHistory()
         for sid in series or list(ALFRED_SERIES):
-            key = f"alfred:v2:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
+            key = f"alfred:v3:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
             if progress is not None and progress.has(key):
                 continue
             obs_start = start - timedelta(days=400)     # trimestral (PIB) precisa do trimestre anterior; mensal ganha folga
+            rt_start = start - timedelta(days=60)       # a 1ª vintage é recortada pelo FRED na data pedida: fica ANTES do período = só fundo
             url = (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
-                   f"&realtime_start={start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
+                   f"&realtime_start={rt_start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
             try:
                 payload = self.http.get_json(url, ttl=24 * 3600)
             except DataError as e:
@@ -5763,6 +5764,10 @@ class ALFREDImporter:
                     continue
                 pub = datetime.fromisoformat(vint).date()
                 if pub < start:
+                    if d not in first_seen:
+                        first_seen[d] = ("", val)      # fundo: conhecido antes do período, não é evento nem gera revisão
+                    else:
+                        first_seen[d] = (first_seen[d][0], val)
                     continue
                 if d not in first_seen:
                     first_seen[d] = (vint, val)
@@ -5770,7 +5775,7 @@ class ALFREDImporter:
                     out.append(HistoricalEvent(us_release_time(pub), us_release_time(pub), f"ALFRED_{sid}_{d}", f"{name} ({d[:7]})", "US", "USD",
                                                "MUITO ALTO" if kind in ("cpi", "core_cpi", "nfp", "core_pce") else "ALTO", None, prev_val, val, None,
                                                (round(val - prev_val, 3) if prev_val is not None else None), "MACRO", kind, "alfred", surprise_basis="previous"))
-                elif first_seen[d][1] != val and vintages[first_seen[d][0]].get(d) is not None:
+                elif first_seen[d][0] and first_seen[d][1] != val:   # revisão só de publicação ocorrida dentro do período
                     # revisão: publicada na data desta vintage, mantém o event_id → substitui só a partir de published_at
                     out.append(HistoricalEvent(us_release_time(datetime.fromisoformat(first_seen[d][0]).date()), us_release_time(pub), f"ALFRED_{sid}_{d}",
                                                f"{name} ({d[:7]}) revisado", "US", "USD", "BAIXO", None, first_seen[d][1], val, val, None, "MACRO", kind, "alfred"))

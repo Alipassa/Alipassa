@@ -148,6 +148,26 @@ class ImporterTests(unittest.TestCase):
         later = [e for e in pit.available_at(datetime(2026, 2, 12, tzinfo=UTC), 24 * 40) if e.event_id.endswith("2025-12-01")]
         self.assertAlmostEqual(later[0].actual, 0.3)
 
+    def test_alfred_background_vintage_is_not_an_event(self):
+        # vintage recortada em 2025-11-02 (start − 60 d): valores de 2025 são fundo; só o que sai DENTRO do período vira evento
+        obs = [
+            {"realtime_start": "2025-11-02", "realtime_end": "2026-02-12", "date": "2025-08-01", "value": "318.0"},
+            {"realtime_start": "2025-11-02", "realtime_end": "2026-02-12", "date": "2025-09-01", "value": "319.0"},
+            {"realtime_start": "2025-11-02", "realtime_end": "9999-12-31", "date": "2025-10-01", "value": "320.0"},
+            {"realtime_start": "2026-01-13", "realtime_end": "9999-12-31", "date": "2025-12-01", "value": "321.28"},
+            {"realtime_start": "2026-02-13", "realtime_end": "9999-12-31", "date": "2025-08-01", "value": "318.2"},   # revisão sazonal de dado pré-período
+            {"realtime_start": "2026-02-13", "realtime_end": "9999-12-31", "date": "2025-09-01", "value": "319.1"},
+        ]
+        h = ALFREDImporter(FakeHttp({"CPIAUCSL": {"observations": obs}}), KEY).fetch(date(2026, 1, 1), date(2026, 3, 1), ["CPIAUCSL"])
+        self.assertEqual([e.event_id for e in h.events], ["ALFRED_CPIAUCSL_2025-12-01"])   # nem fundo, nem revisões de fundo
+        self.assertEqual(h.events[0].published_at.date(), date(2026, 1, 13))
+
+    def test_headline_never_becomes_macro_kind(self):
+        e = HistoricalEvent(T0, T0, "G", "risco: CPI will rise 1.9% in 2026", "GLOBAL", "", "MÉDIO", category="NEWS", headline="CPI will rise 1.9% in 2026")
+        self.assertEqual(e.kind, "generic")
+        m = HistoricalEvent(T0, T0, "M", "CPI MoM", category="MACRO")
+        self.assertEqual(m.kind, "cpi")
+
     def test_alfred_rows_span_vintages_when_value_unchanged(self):
         # formato real do FRED: o valor de novembro não mudou entre as vintages, então vem numa linha só (rs 14/01 → re 9999)
         obs = [

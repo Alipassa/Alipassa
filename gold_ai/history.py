@@ -105,8 +105,8 @@ class HistoricalEvent:
                 self.surprise = round(self.actual - self.previous, 4)
         if self.forecast is None and self.previous is not None and self.surprise is not None and self.surprise_basis == "forecast":
             self.surprise_basis = "previous"
-        if self.kind == "generic":
-            self.kind = kind_from_name(self.event)
+        if self.kind == "generic" and self.category in ("MACRO", "CENTRAL_BANK"):
+            self.kind = kind_from_name(self.event)     # manchete (NEWS/GEOPOLITICAL/…) nunca vira release macro
 
     def effect(self, market: str) -> Optional[float]:
         return getattr(self, EFFECT_FIELD.get(market.upper(), "_"), None)
