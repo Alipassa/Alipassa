@@ -197,6 +197,23 @@ class ImporterTests(unittest.TestCase):
         imp = GDELTImporter(http, retry_wait=60.0, sleep=slept.append, log=lambda m: None)
         h = imp.fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, checkpoint=lambda p: parts.append(len(p)))
         self.assertIn(60.0, slept)                              # esperou o limite e tentou de novo
+        # bloqueio por rajada: espera exponencial; Retry-After do servidor tem prioridade
+        http.fail_left = 2
+        slept.clear()
+        GDELTImporter(http, retry_wait=60.0, sleep=slept.append, log=lambda m: None).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
+        self.assertEqual([w for w in slept if w >= 60.0], [60.0, 120.0])
+
+        class RetryAfter(FakeHttp):
+            done = False
+
+            def get_json(self, url, ttl=None):
+                if not self.done:
+                    self.done = True
+                    raise DataError("falha ao buscar x: HTTP Error 429: Too Many Requests (Retry-After 300s)")
+                return super().get_json(url, ttl)
+        slept.clear()
+        GDELTImporter(RetryAfter({"mode=artlist": arts}), sleep=slept.append).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
+        self.assertIn(300.0, slept)
         self.assertEqual(len(h), 1)
         self.assertEqual(len(parts), 2)                         # um checkpoint por janela
         # falha persistente numa janela: registrada em `failed`, execução continua, nada levantado

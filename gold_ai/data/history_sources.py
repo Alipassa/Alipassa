@@ -199,7 +199,7 @@ class GDELTImporter:
     """GDELT limita a ~1 requisição a cada 5 s (HTTP 429 acima disso): as chamadas são espaçadas por `min_interval`,
     um 429 espera e tenta de novo, e `checkpoint` recebe o parcial após cada janela (nada se perde se cair no meio)."""
 
-    def __init__(self, http, min_interval: float = 5.5, retry_wait: float = 60.0, max_retries: int = 4, sleep=time.sleep, log=None) -> None:
+    def __init__(self, http, min_interval: float = 8.0, retry_wait: float = 60.0, max_retries: int = 5, sleep=time.sleep, log=None) -> None:
         self.http, self.min_interval, self.retry_wait, self.max_retries = http, min_interval, retry_wait, max_retries
         self._sleep, self._log, self._last = sleep, log, 0.0
 
@@ -218,9 +218,11 @@ class GDELTImporter:
                 if attempt == self.max_retries:
                     raise
                 rate = "429" in str(e)
-                wait = self.retry_wait if rate else min(self.retry_wait, 20.0)
+                m = re.search(r"Retry-After (\d+)s", str(e))
+                # 429 é bloqueio por rajada: espera exponencial (60 s, 2, 4, 8, 16 min) ou o Retry-After do servidor
+                wait = (float(m.group(1)) if m else self.retry_wait * (2 ** attempt)) if rate else min(self.retry_wait, 20.0)
                 if self._log:
-                    self._log(f"GDELT {'429 (limite de requisições)' if rate else 'falha de rede'}: aguardando {wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
+                    self._log(f"GDELT {'429 (bloqueio por excesso de requisições)' if rate else 'falha de rede'}: aguardando {wait / 60:.1f} min e tentando de novo ({attempt + 1}/{self.max_retries})")
                 self._sleep(wait)
         raise DataError("GDELT: falha persistente")
 

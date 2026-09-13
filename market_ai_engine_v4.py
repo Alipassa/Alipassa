@@ -3038,7 +3038,13 @@ class HttpClient:
                     text = resp.read().decode("utf-8", errors="replace")
                 self._cache_put(url, text)
                 return text
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:  # pragma: no cover - rede
+            except urllib.error.HTTPError as e:  # pragma: no cover - rede
+                if e.code == 429:   # limite de requisições: repetir em segundos só prolonga o bloqueio — quem decide a espera é o chamador
+                    retry_after = e.headers.get("Retry-After") if e.headers else None
+                    raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests" + (f" (Retry-After {retry_after}s)" if retry_after else "")) from e
+                last = e
+                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
+            except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
                 last = e
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
         raise DataError(f"falha ao buscar {url}: {last}")
@@ -5756,7 +5762,7 @@ class GDELTImporter:
     """GDELT limita a ~1 requisição a cada 5 s (HTTP 429 acima disso): as chamadas são espaçadas por `min_interval`,
     um 429 espera e tenta de novo, e `checkpoint` recebe o parcial após cada janela (nada se perde se cair no meio)."""
 
-    def __init__(self, http, min_interval: float = 5.5, retry_wait: float = 60.0, max_retries: int = 4, sleep=time.sleep, log=None) -> None:
+    def __init__(self, http, min_interval: float = 8.0, retry_wait: float = 60.0, max_retries: int = 5, sleep=time.sleep, log=None) -> None:
         self.http, self.min_interval, self.retry_wait, self.max_retries = http, min_interval, retry_wait, max_retries
         self._sleep, self._log, self._last = sleep, log, 0.0
 
@@ -5774,9 +5780,11 @@ class GDELTImporter:
                 if attempt == self.max_retries:
                     raise
                 rate = "429" in str(e)
-                wait = self.retry_wait if rate else min(self.retry_wait, 20.0)
+                m = re.search(r"Retry-After (\d+)s", str(e))
+                # 429 é bloqueio por rajada: espera exponencial (60 s, 2, 4, 8, 16 min) ou o Retry-After do servidor
+                wait = (float(m.group(1)) if m else self.retry_wait * (2 ** attempt)) if rate else min(self.retry_wait, 20.0)
                 if self._log:
-                    self._log(f"GDELT {'429 (limite de requisições)' if rate else 'falha de rede'}: aguardando {wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
+                    self._log(f"GDELT {'429 (bloqueio por excesso de requisições)' if rate else 'falha de rede'}: aguardando {wait / 60:.1f} min e tentando de novo ({attempt + 1}/{self.max_retries})")
                 self._sleep(wait)
         raise DataError("GDELT: falha persistente")
 
@@ -9131,7 +9139,7 @@ def cmd_history(args: argparse.Namespace) -> int:
 
             def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
                 save_history(merge(hist, partial), path)
-            imp = GDELTImporter(http, log=print)
+            imp = GDELTImporter(http, min_interval=args.pace, log=print)
             new = imp.fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint, enrich=args.enrich,
                             progress=progress)
             if imp.failed:
@@ -9624,6 +9632,7 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--chunk-days", type=int, default=30, help="GDELT: dias por janela (menos janelas = menos chamadas; o GDELT limita a 1 a cada ~5 s)")
     hi.add_argument("--max-records", type=int, default=250, help="GDELT: manchetes por tema por janela (máx. 250)")
     hi.add_argument("--enrich", action="store_true", help="GDELT: além das manchetes, baixar tom e volume (3× mais chamadas)")
+    hi.add_argument("--pace", type=float, default=8.0, help="GDELT: segundos entre chamadas (aumente se receber 429 repetidos)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")
