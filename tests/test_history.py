@@ -10,12 +10,14 @@ from datetime import date, datetime, timedelta, timezone
 from gold_ai.ablation import compare_information
 from gold_ai.data.history_sources import ALFREDImporter, GDELTImporter, TradingEconomicsImporter, us_release_time
 from gold_ai.evaluation import Backtester, HistoryFrame
-from gold_ai.history import EventHistory, HistoricalEvent, apply_rule_effects, learn_effects, load_history, merge, render_effect_table, save_history
+from gold_ai.history import (EventHistory, FetchProgress, HistoricalEvent, apply_rule_effects, coverage, learn_effects, load_history, merge,
+                             render_effect_table, save_history)
 from gold_ai.sources.sample import make_candles
 from tests.test_v2 import FakeHttp
 
 UTC = timezone.utc
 T0 = datetime(2026, 1, 14, 13, 30, tzinfo=UTC)
+KEY = "0123456789abcdef0123456789abcdef"
 
 
 def cpi(actual=0.4, forecast=0.2, published=None, event_id="CPI_202601", **kw) -> HistoricalEvent:
@@ -127,7 +129,7 @@ class ImporterTests(unittest.TestCase):
             {"realtime_start": "2026-02-11", "realtime_end": "9999-12-31", "date": "2025-12-01", "value": "320.96"},   # revisão do dezembro
             {"realtime_start": "2026-02-11", "realtime_end": "9999-12-31", "date": "2026-01-01", "value": "322.24"},
         ]
-        h = ALFREDImporter(FakeHttp({"CPIAUCSL": {"observations": obs}}), "k").fetch(date(2026, 1, 1), date(2026, 3, 1), ["CPIAUCSL"])
+        h = ALFREDImporter(FakeHttp({"CPIAUCSL": {"observations": obs}}), KEY).fetch(date(2026, 1, 1), date(2026, 3, 1), ["CPIAUCSL"])
         dec = [e for e in h.events if e.event_id == "ALFRED_CPIAUCSL_2025-12-01"]
         self.assertEqual(len(dec), 2)
         first, rev = sorted(dec, key=lambda e: e.published_at)
@@ -154,7 +156,7 @@ class ImporterTests(unittest.TestCase):
         vol = {"timeline": [{"series": "Article Count", "data": [{"date": "20260114T120000Z", "value": 1.8}]}]}
         http = FakeHttp({"mode=artlist": arts, "mode=timelinetone": tone, "mode=timelinevolraw": vol})
         slept: list[float] = []
-        h = GDELTImporter(http, sleep=slept.append).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        h = GDELTImporter(http, sleep=slept.append).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30, enrich=True)
         self.assertGreaterEqual(len(slept), 2)                 # ritmo: pausa entre chamadas (limite do GDELT)
         self.assertEqual(len(h), 2)
         strike = next(e for e in h.events if "Missile" in e.headline)
@@ -166,8 +168,15 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(cease.kind, "geopolitical_deescalation")
         self.assertEqual(cease.sentiment, "POSITIVE")
         # ids determinísticos entre execuções
-        h2 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        h2 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30, enrich=True)
         self.assertEqual([e.event_id for e in h.events], [e.event_id for e in h2.events])
+        # modo econômico (padrão): só artlist — manchete, data, tema, fonte; sem tom/volume
+        http.calls.clear()
+        h3 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        self.assertEqual(len(h3), 2)
+        self.assertTrue(all("artlist" in c for c in http.calls))
+        self.assertIsNone(h3.events[0].tone)
+        self.assertEqual(h3.events[0].kind, "geopolitical_escalation")   # a identificação qualitativa continua vindo da manchete
 
     def test_gdelt_retries_on_429_and_checkpoints(self):
         from gold_ai.data.http import DataError
@@ -190,9 +199,62 @@ class ImporterTests(unittest.TestCase):
         self.assertIn(60.0, slept)                              # esperou o limite e tentou de novo
         self.assertEqual(len(h), 1)
         self.assertEqual(len(parts), 2)                         # um checkpoint por janela
+        # falha persistente numa janela: registrada em `failed`, execução continua, nada levantado
         http.fail_left = 99
-        with self.assertRaises(DataError):
-            GDELTImporter(http, max_retries=1, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
+        imp2 = GDELTImporter(http, max_retries=1, sleep=lambda s: None)
+        h2 = imp2.fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
+        self.assertEqual(len(h2), 0)
+        self.assertEqual(len(imp2.failed), 1)
+
+    def test_gdelt_resume_skips_done_windows(self):
+        arts = {"articles": [{"title": "OPEC cuts output", "seendate": "20260114T140000Z", "domain": "x.com"}]}
+        http = FakeHttp({"mode=artlist": arts})
+        with tempfile.TemporaryDirectory() as d:
+            prog = FetchProgress(os.path.join(d, "n.csv"))
+            GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog)
+            self.assertEqual(len(http.calls), 2)
+            prog2 = FetchProgress(os.path.join(d, "n.csv"))       # relido do disco
+            GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog2)
+            self.assertEqual(len(http.calls), 2)                   # nada refeito
+
+    def test_alfred_key_validation_and_400(self):
+        from gold_ai.data.http import DataError
+        with self.assertRaises(DataError) as ctx:
+            ALFREDImporter(FakeHttp({}), "SUA_CHAVE_FRED").fetch(date(2026, 1, 1), date(2026, 3, 1))
+        self.assertIn("32 caracteres", str(ctx.exception))
+        http = FakeHttp({"CPIAUCSL": DataError("falha ao buscar x: HTTP Error 400: Bad Request"), "UNRATE": {"observations": []}})
+        imp = ALFREDImporter(http, KEY, log=lambda m: None)
+        h = imp.fetch(date(2026, 1, 1), date(2026, 3, 1), ["CPIAUCSL", "UNRATE"])
+        self.assertEqual(len(h), 0)
+        self.assertEqual(imp.failed[0][0], "CPIAUCSL")
+        self.assertIn("400", imp.failed[0][1])                     # a série seguinte ainda foi buscada
+        self.assertEqual(len(http.calls), 2)
+
+
+class CoverageTests(unittest.TestCase):
+    def test_coverage_counts_macro_by_week_and_news_by_day(self):
+        evs = []
+        for w in range(4):                      # 4 semanas com um CPI cada
+            t = datetime(2026, 1, 5, 13, 30, tzinfo=UTC) + timedelta(days=7 * w)
+            evs.append(HistoricalEvent(t, t, f"CPI{w}", "CPI MoM", forecast=0.2, actual=0.3, kind="cpi"))
+        for d in range(10):                     # 10 dias com manchete
+            t = datetime(2026, 1, 5, 9, tzinfo=UTC) + timedelta(days=d)
+            evs.append(HistoricalEvent(t, t, f"N{d}", "geopolitica: x", "GLOBAL", "", "MÉDIO", category="GEOPOLITICAL", headline="strike"))
+        evs.append(HistoricalEvent(evs[0].timestamp, evs[0].timestamp + timedelta(days=30), "CPI0", "CPI MoM revisado", actual=0.2, revised=0.2, kind="cpi"))
+        cov = coverage(EventHistory(evs), date(2026, 1, 5), date(2026, 2, 1))
+        self.assertEqual(cov.macro_events, 4)
+        self.assertEqual(cov.news_items, 10)
+        self.assertEqual(cov.revisions, 1)
+        self.assertEqual(cov.macro_weeks, 4)
+        self.assertEqual(cov.news_days, 10)
+        self.assertEqual(cov.days, 28)
+        self.assertAlmostEqual(cov.macro_pct, 1.0)
+        self.assertAlmostEqual(cov.pct, 1.0)   # toda semana tem macro
+        txt = cov.render()
+        for k in ("HISTÓRICO", "MACRO", "NEWS", "REVISÕES", "COBERTURA"):
+            self.assertIn(k, txt)
+        partial = coverage(EventHistory(evs[:2]), date(2026, 1, 1), date(2026, 3, 31))
+        self.assertLess(partial.macro_pct, 0.3)
 
 
 class BacktestIntegrationTests(unittest.TestCase):

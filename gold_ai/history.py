@@ -16,7 +16,7 @@ from __future__ import annotations
 import csv
 import statistics
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Sequence
 
 from .models import EconomicEvent, NewsItem
@@ -199,6 +199,93 @@ class EventHistory:
         emp = sum(1 for e in self.events if e.effect_source == "empirical")
         return (f"{len(self.events)} registros · {self.events[0].timestamp:%Y-%m-%d} → {self.events[-1].timestamp:%Y-%m-%d} · com actual {with_actual} · revisões {revised} · "
                 f"efeitos empíricos {emp} · por categoria: " + ", ".join(f"{k} {v}" for k, v in sorted(by_cat.items())))
+
+
+# --------------------------------------------------------------------------- cobertura do período
+@dataclass
+class Coverage:
+    start: date
+    end: date
+    days: int
+    macro_events: int
+    news_items: int
+    revisions: int
+    macro_weeks: int
+    weeks: int
+    news_days: int
+    covered_days: int
+
+    @property
+    def macro_pct(self) -> float:
+        return self.macro_weeks / self.weeks if self.weeks else 0.0
+
+    @property
+    def news_pct(self) -> float:
+        return self.news_days / self.days if self.days else 0.0
+
+    @property
+    def pct(self) -> float:
+        return self.covered_days / self.days if self.days else 0.0
+
+    def render(self) -> str:
+        return "\n".join([
+            f"HISTÓRICO {self.start:%d/%m/%Y} → {self.end:%d/%m/%Y} ({self.days} dias)",
+            f"MACRO     {self.macro_events:>8} eventos    · semanas com macro {self.macro_weeks}/{self.weeks} ({self.macro_pct:.0%})",
+            f"NEWS      {self.news_items:>8} manchetes  · dias com manchete {self.news_days}/{self.days} ({self.news_pct:.0%})",
+            f"REVISÕES  {self.revisions:>8}",
+            f"COBERTURA {self.pct:>8.1%}   (dias com macro na semana ou manchete no dia)",
+        ])
+
+
+MACRO_CATEGORIES = ("MACRO", "CENTRAL_BANK")
+
+
+def coverage(hist: "EventHistory", start: date, end: date) -> Coverage:
+    """Quanto do período o banco cobre. MACRO por semana ISO (há semanas sem release relevante, não dias); NEWS por dia."""
+    if end < start:
+        start, end = end, start
+    days = (end - start).days + 1
+    weeks_set = {(start + timedelta(days=i)).isocalendar()[:2] for i in range(days)}
+    macro_weeks: set = set()
+    news_days: set = set()
+    macro_n = news_n = rev_n = 0
+    for e in hist.events:
+        d = e.timestamp.date()
+        if not (start <= d <= end):
+            continue
+        if e.revised is not None:
+            rev_n += 1
+            continue
+        if e.category in MACRO_CATEGORIES:
+            macro_n += 1
+            macro_weeks.add(d.isocalendar()[:2])
+        else:
+            news_n += 1
+            news_days.add(d)
+    covered = sum(1 for i in range(days) if ((start + timedelta(days=i)).isocalendar()[:2] in macro_weeks) or ((start + timedelta(days=i)) in news_days))
+    return Coverage(start, end, days, macro_n, news_n, rev_n, len(macro_weeks), len(weeks_set), len(news_days), covered)
+
+
+class FetchProgress:
+    """Janelas já baixadas (sidecar JSON ao lado do CSV): permite continuar de onde parou após 429/queda de rede."""
+
+    def __init__(self, csv_path: str) -> None:
+        import os
+        self.path = csv_path + ".progress.json"
+        self.done: dict[str, int] = {}
+        if os.path.exists(self.path):
+            import json
+            with open(self.path, encoding="utf-8") as f:
+                self.done = json.load(f)
+
+    def has(self, key: str) -> bool:
+        return key in self.done
+
+    def mark(self, key: str, n: int) -> None:
+        import json
+        self.done[key] = n
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.done, f, indent=0, sort_keys=True)
 
 
 # --------------------------------------------------------------------------- CSV

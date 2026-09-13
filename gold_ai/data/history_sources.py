@@ -94,18 +94,46 @@ ALFRED_SERIES: dict[str, tuple[str, str, str]] = {
 
 
 class ALFREDImporter:
-    def __init__(self, http, api_key: str) -> None:
-        self.http, self.key = http, api_key
+    KEY_RE = re.compile(r"^[a-f0-9]{32}$")
 
-    def fetch(self, start: date, end: date, series: Optional[list[str]] = None) -> EventHistory:
+    def __init__(self, http, api_key: str, log=None) -> None:
+        self.http, self.key, self._log = http, (api_key or "").strip(), log
+        self.failed: list[tuple[str, str]] = []
+
+    def validate_key(self) -> None:
+        from .http import DataError
+        if not self.KEY_RE.match(self.key):
+            raise DataError(f"FRED_API_KEY inválida ('{self.key[:12]}…'): a chave do FRED tem 32 caracteres hexadecimais minúsculos. "
+                            "Gere a sua (gratuita) em https://fred.stlouisfed.org/docs/api/api_key.html e coloque FRED_API_KEY=... no .env")
+
+    def fetch(self, start: date, end: date, series: Optional[list[str]] = None, progress=None) -> EventHistory:
+        from .http import DataError
+        self.validate_key()
         hist = EventHistory()
         for sid in series or list(ALFRED_SERIES):
+            key = f"alfred:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
+            if progress is not None and progress.has(key):
+                continue
             obs_start = start - timedelta(days=120)
             url = (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
                    f"&realtime_start={start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
-            payload = self.http.get_json(url, ttl=24 * 3600)
-            for e in self.parse(sid, payload.get("observations", []), start).events:
+            try:
+                payload = self.http.get_json(url, ttl=24 * 3600)
+            except DataError as e:
+                msg = str(e)
+                reason = ("HTTP 400: chave rejeitada ou parâmetros inválidos (confira FRED_API_KEY)" if "400" in msg else
+                          "HTTP 429: limite de requisições do FRED" if "429" in msg else msg[-160:])
+                self.failed.append((sid, reason))
+                if self._log:
+                    self._log(f"  ALFRED {sid}: FALHOU — {reason}")
+                continue
+            part = self.parse(sid, payload.get("observations", []), start)
+            for e in part.events:
                 hist.add(e)
+            if self._log:
+                self._log(f"  ALFRED {sid} ({ALFRED_SERIES.get(sid, (sid,))[0]}): {len(part)} publicações/revisões")
+            if progress is not None:
+                progress.mark(key, len(part))
         return hist
 
     @staticmethod
@@ -187,34 +215,54 @@ class GDELTImporter:
                 return out
             except DataError as e:
                 self._last = time.monotonic()
-                if "429" not in str(e) or attempt == self.max_retries:
+                if attempt == self.max_retries:
                     raise
+                rate = "429" in str(e)
+                wait = self.retry_wait if rate else min(self.retry_wait, 20.0)
                 if self._log:
-                    self._log(f"GDELT 429 (limite de requisições): aguardando {self.retry_wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
-                self._sleep(self.retry_wait)
-        raise DataError("GDELT: limite de requisições persistente")
+                    self._log(f"GDELT {'429 (limite de requisições)' if rate else 'falha de rede'}: aguardando {wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
+                self._sleep(wait)
+        raise DataError("GDELT: falha persistente")
 
     def _url(self, query: str, mode: str, start: datetime, end: datetime, extra: str = "") -> str:
         return (f"{GDELT_DOC}?query={quote(query + ' sourcelang:english')}&mode={mode}&format=json"
                 f"&startdatetime={start:%Y%m%d%H%M%S}&enddatetime={end:%Y%m%d%H%M%S}{extra}")
 
     def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 30, max_records: int = 250,
-              checkpoint=None) -> EventHistory:
+              checkpoint=None, enrich: bool = False, progress=None) -> EventHistory:
+        """Modo econômico (padrão): só `artlist` (manchete, seendate, tema, fonte) — 1 chamada por tema e janela.
+        `enrich=True` acrescenta tom e volume (3 chamadas). Janelas já feitas (progress) são puladas; uma janela que
+        falhar depois das tentativas é registrada em `self.failed` e a execução continua."""
+        from .http import DataError
         hist = EventHistory()
+        self.failed: list[tuple[str, str, str]] = []
         t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
         t_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
         topics = topics or list(GDELT_TOPICS)
         n_chunks = max(1, -(-(t_end - t0).days // chunk_days))
+        calls = 3 if enrich else 1
         if self._log:
-            self._log(f"GDELT: {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × 3 chamadas ≈ {len(topics) * n_chunks * 3 * self.min_interval / 60:.0f} min (limite do GDELT)")
+            self._log(f"GDELT: {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × {calls} chamada(s) ≈ "
+                      f"{len(topics) * n_chunks * calls * self.min_interval / 60:.0f} min (limite do GDELT: ~1 requisição a cada 5 s)")
         for topic in topics:
             query, cat = GDELT_TOPICS[topic]
             t = t0
             while t < t_end:
                 t1 = min(t + timedelta(days=chunk_days), t_end)
-                arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
-                tone = self._get(self._url(query, "timelinetone", t, t1))
-                vol = self._get(self._url(query, "timelinevolraw", t, t1))
+                key = f"gdelt:{topic}:{t:%Y%m%d}:{t1:%Y%m%d}:{'enrich' if enrich else 'headlines'}"
+                if progress is not None and progress.has(key):
+                    t = t1
+                    continue
+                try:
+                    arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
+                    tone = self._get(self._url(query, "timelinetone", t, t1)) if enrich else None
+                    vol = self._get(self._url(query, "timelinevolraw", t, t1)) if enrich else None
+                except DataError as e:
+                    self.failed.append((topic, f"{t:%Y-%m-%d}→{t1:%Y-%m-%d}", str(e)[-120:]))
+                    if self._log:
+                        self._log(f"  {topic} {t:%Y-%m-%d}→{t1:%Y-%m-%d}: FALHOU (rode de novo para continuar daqui)")
+                    t = t1
+                    continue
                 part = self.parse(topic, cat, arts, tone, vol)
                 for e in part.events:
                     hist.add(e)
@@ -222,6 +270,8 @@ class GDELTImporter:
                     self._log(f"  {topic} {t:%Y-%m-%d}→{t1:%Y-%m-%d}: {len(part)} manchetes")
                 if checkpoint:
                     checkpoint(hist)
+                if progress is not None:
+                    progress.mark(key, len(part))
                 t = t1
         return hist
 

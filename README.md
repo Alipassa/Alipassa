@@ -117,7 +117,8 @@ sentiment, xau_effect, us500_effect, eurusd_effect, usdjpy_effect, wti_effect, e
 python market_ai_engine_v4.py history template                       # cria dados/noticias_historicas.csv (preencha ou importe)
 python market_ai_engine_v4.py history fetch-te --start 2026-01-01    # Trading Economics point-in-time (TE_API_KEY no .env)
 python market_ai_engine_v4.py history fetch-alfred                   # FRED/ALFRED: valor inicialmente publicado + revisões (FRED_API_KEY)
-python market_ai_engine_v4.py history fetch-gdelt                    # GDELT: manchetes, tom e intensidade por tema (aberto)
+python market_ai_engine_v4.py history fetch-gdelt                    # GDELT: manchetes por tema (aberto; 1 chamada/tema/janela; --enrich = tom e volume)
+                                                                     #   continua de onde parou (dados/*.progress.json); janelas com falha são refeitas na próxima execução
 python market_ai_engine_v4.py history rules                          # efeito por ativo a partir das regras macro
 python market_ai_engine_v4.py history learn --markets XAUUSD,US500   # efeito empírico: o preço 60 min depois decide (≥ 8 eventos)
 python market_ai_engine_v4.py history stats
@@ -134,6 +135,8 @@ python market_ai_engine_v4.py sweep --start 2026-01-01 --market US500 --events d
   em `surprise_basis`; sem base declarada, nada é inventado.
 - **Efeitos por ativo** nascem das regras macro do NEWS ENGINE (`effect_source=rule`) e são substituídos pelo que o histórico
   mostrar (`history learn`, `effect_source=empirical`). Nunca inventados.
+- **Cobertura**: `history stats` e `compare-news` mostram MACRO (semanas cobertas), NEWS (dias cobertos), REVISÕES e COBERTURA do
+  período; `compare-news` recusa um banco abaixo de `--min-coverage` (80%) salvo `--allow-partial` (ensaio, não conclusão).
 - **Modos**: `none` (preço somente) · `macro` (calendário e bancos centrais = TESTE A) · `full` (+ manchetes/tom = TESTE B).
 - A reação real é medida no fechamento do candle H1 seguinte ao evento; a sequência 12:29 → 12:31 → 12:35 exige histórico M1/M5.
 - Só depois deste teste o funil é recalibrado (`sweep`, piso escolhido no treino de cada fold).

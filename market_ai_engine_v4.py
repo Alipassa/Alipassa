@@ -5362,6 +5362,90 @@ class EventHistory:
                 f"efeitos empíricos {emp} · por categoria: " + ", ".join(f"{k} {v}" for k, v in sorted(by_cat.items())))
 
 
+# --------------------------------------------------------------------------- cobertura do período
+@dataclass
+class Coverage:
+    start: date
+    end: date
+    days: int
+    macro_events: int
+    news_items: int
+    revisions: int
+    macro_weeks: int
+    weeks: int
+    news_days: int
+    covered_days: int
+
+    @property
+    def macro_pct(self) -> float:
+        return self.macro_weeks / self.weeks if self.weeks else 0.0
+
+    @property
+    def news_pct(self) -> float:
+        return self.news_days / self.days if self.days else 0.0
+
+    @property
+    def pct(self) -> float:
+        return self.covered_days / self.days if self.days else 0.0
+
+    def render(self) -> str:
+        return "\n".join([
+            f"HISTÓRICO {self.start:%d/%m/%Y} → {self.end:%d/%m/%Y} ({self.days} dias)",
+            f"MACRO     {self.macro_events:>8} eventos    · semanas com macro {self.macro_weeks}/{self.weeks} ({self.macro_pct:.0%})",
+            f"NEWS      {self.news_items:>8} manchetes  · dias com manchete {self.news_days}/{self.days} ({self.news_pct:.0%})",
+            f"REVISÕES  {self.revisions:>8}",
+            f"COBERTURA {self.pct:>8.1%}   (dias com macro na semana ou manchete no dia)",
+        ])
+
+
+MACRO_CATEGORIES = ("MACRO", "CENTRAL_BANK")
+
+
+def coverage(hist: "EventHistory", start: date, end: date) -> Coverage:
+    """Quanto do período o banco cobre. MACRO por semana ISO (há semanas sem release relevante, não dias); NEWS por dia."""
+    if end < start:
+        start, end = end, start
+    days = (end - start).days + 1
+    weeks_set = {(start + timedelta(days=i)).isocalendar()[:2] for i in range(days)}
+    macro_weeks: set = set()
+    news_days: set = set()
+    macro_n = news_n = rev_n = 0
+    for e in hist.events:
+        d = e.timestamp.date()
+        if not (start <= d <= end):
+            continue
+        if e.revised is not None:
+            rev_n += 1
+            continue
+        if e.category in MACRO_CATEGORIES:
+            macro_n += 1
+            macro_weeks.add(d.isocalendar()[:2])
+        else:
+            news_n += 1
+            news_days.add(d)
+    covered = sum(1 for i in range(days) if ((start + timedelta(days=i)).isocalendar()[:2] in macro_weeks) or ((start + timedelta(days=i)) in news_days))
+    return Coverage(start, end, days, macro_n, news_n, rev_n, len(macro_weeks), len(weeks_set), len(news_days), covered)
+
+
+class FetchProgress:
+    """Janelas já baixadas (sidecar JSON ao lado do CSV): permite continuar de onde parou após 429/queda de rede."""
+
+    def __init__(self, csv_path: str) -> None:
+        self.path = csv_path + ".progress.json"
+        self.done: dict[str, int] = {}
+        if os.path.exists(self.path):
+            with open(self.path, encoding="utf-8") as f:
+                self.done = json.load(f)
+
+    def has(self, key: str) -> bool:
+        return key in self.done
+
+    def mark(self, key: str, n: int) -> None:
+        self.done[key] = n
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.done, f, indent=0, sort_keys=True)
+
+
 # --------------------------------------------------------------------------- CSV
 def load_history(path: str) -> EventHistory:
     with open(path, encoding="utf-8", newline="") as f:
@@ -5569,18 +5653,44 @@ ALFRED_SERIES: dict[str, tuple[str, str, str]] = {
 
 
 class ALFREDImporter:
-    def __init__(self, http, api_key: str) -> None:
-        self.http, self.key = http, api_key
+    KEY_RE = re.compile(r"^[a-f0-9]{32}$")
 
-    def fetch(self, start: date, end: date, series: Optional[list[str]] = None) -> EventHistory:
+    def __init__(self, http, api_key: str, log=None) -> None:
+        self.http, self.key, self._log = http, (api_key or "").strip(), log
+        self.failed: list[tuple[str, str]] = []
+
+    def validate_key(self) -> None:
+        if not self.KEY_RE.match(self.key):
+            raise DataError(f"FRED_API_KEY inválida ('{self.key[:12]}…'): a chave do FRED tem 32 caracteres hexadecimais minúsculos. "
+                            "Gere a sua (gratuita) em https://fred.stlouisfed.org/docs/api/api_key.html e coloque FRED_API_KEY=... no .env")
+
+    def fetch(self, start: date, end: date, series: Optional[list[str]] = None, progress=None) -> EventHistory:
+        self.validate_key()
         hist = EventHistory()
         for sid in series or list(ALFRED_SERIES):
+            key = f"alfred:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
+            if progress is not None and progress.has(key):
+                continue
             obs_start = start - timedelta(days=120)
             url = (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
                    f"&realtime_start={start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
-            payload = self.http.get_json(url, ttl=24 * 3600)
-            for e in self.parse(sid, payload.get("observations", []), start).events:
+            try:
+                payload = self.http.get_json(url, ttl=24 * 3600)
+            except DataError as e:
+                msg = str(e)
+                reason = ("HTTP 400: chave rejeitada ou parâmetros inválidos (confira FRED_API_KEY)" if "400" in msg else
+                          "HTTP 429: limite de requisições do FRED" if "429" in msg else msg[-160:])
+                self.failed.append((sid, reason))
+                if self._log:
+                    self._log(f"  ALFRED {sid}: FALHOU — {reason}")
+                continue
+            part = self.parse(sid, payload.get("observations", []), start)
+            for e in part.events:
                 hist.add(e)
+            if self._log:
+                self._log(f"  ALFRED {sid} ({ALFRED_SERIES.get(sid, (sid,))[0]}): {len(part)} publicações/revisões")
+            if progress is not None:
+                progress.mark(key, len(part))
         return hist
 
     @staticmethod
@@ -5661,34 +5771,53 @@ class GDELTImporter:
                 return out
             except DataError as e:
                 self._last = time.monotonic()
-                if "429" not in str(e) or attempt == self.max_retries:
+                if attempt == self.max_retries:
                     raise
+                rate = "429" in str(e)
+                wait = self.retry_wait if rate else min(self.retry_wait, 20.0)
                 if self._log:
-                    self._log(f"GDELT 429 (limite de requisições): aguardando {self.retry_wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
-                self._sleep(self.retry_wait)
-        raise DataError("GDELT: limite de requisições persistente")
+                    self._log(f"GDELT {'429 (limite de requisições)' if rate else 'falha de rede'}: aguardando {wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
+                self._sleep(wait)
+        raise DataError("GDELT: falha persistente")
 
     def _url(self, query: str, mode: str, start: datetime, end: datetime, extra: str = "") -> str:
         return (f"{GDELT_DOC}?query={quote(query + ' sourcelang:english')}&mode={mode}&format=json"
                 f"&startdatetime={start:%Y%m%d%H%M%S}&enddatetime={end:%Y%m%d%H%M%S}{extra}")
 
     def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 30, max_records: int = 250,
-              checkpoint=None) -> EventHistory:
+              checkpoint=None, enrich: bool = False, progress=None) -> EventHistory:
+        """Modo econômico (padrão): só `artlist` (manchete, seendate, tema, fonte) — 1 chamada por tema e janela.
+        `enrich=True` acrescenta tom e volume (3 chamadas). Janelas já feitas (progress) são puladas; uma janela que
+        falhar depois das tentativas é registrada em `self.failed` e a execução continua."""
         hist = EventHistory()
+        self.failed: list[tuple[str, str, str]] = []
         t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
         t_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
         topics = topics or list(GDELT_TOPICS)
         n_chunks = max(1, -(-(t_end - t0).days // chunk_days))
+        calls = 3 if enrich else 1
         if self._log:
-            self._log(f"GDELT: {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × 3 chamadas ≈ {len(topics) * n_chunks * 3 * self.min_interval / 60:.0f} min (limite do GDELT)")
+            self._log(f"GDELT: {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × {calls} chamada(s) ≈ "
+                      f"{len(topics) * n_chunks * calls * self.min_interval / 60:.0f} min (limite do GDELT: ~1 requisição a cada 5 s)")
         for topic in topics:
             query, cat = GDELT_TOPICS[topic]
             t = t0
             while t < t_end:
                 t1 = min(t + timedelta(days=chunk_days), t_end)
-                arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
-                tone = self._get(self._url(query, "timelinetone", t, t1))
-                vol = self._get(self._url(query, "timelinevolraw", t, t1))
+                key = f"gdelt:{topic}:{t:%Y%m%d}:{t1:%Y%m%d}:{'enrich' if enrich else 'headlines'}"
+                if progress is not None and progress.has(key):
+                    t = t1
+                    continue
+                try:
+                    arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
+                    tone = self._get(self._url(query, "timelinetone", t, t1)) if enrich else None
+                    vol = self._get(self._url(query, "timelinevolraw", t, t1)) if enrich else None
+                except DataError as e:
+                    self.failed.append((topic, f"{t:%Y-%m-%d}→{t1:%Y-%m-%d}", str(e)[-120:]))
+                    if self._log:
+                        self._log(f"  {topic} {t:%Y-%m-%d}→{t1:%Y-%m-%d}: FALHOU (rode de novo para continuar daqui)")
+                    t = t1
+                    continue
                 part = self.parse(topic, cat, arts, tone, vol)
                 for e in part.events:
                     hist.add(e)
@@ -5696,6 +5825,8 @@ class GDELTImporter:
                     self._log(f"  {topic} {t:%Y-%m-%d}→{t1:%Y-%m-%d}: {len(part)} manchetes")
                 if checkpoint:
                     checkpoint(hist)
+                if progress is not None:
+                    progress.mark(key, len(part))
                 t = t1
         return hist
 
@@ -8968,12 +9099,14 @@ def cmd_history(args: argparse.Namespace) -> int:
     if args.action == "stats":
         print(hist.stats() if exists else f"{path} não existe — use `history template` ou um fetch-*")
         if exists:
+            print(coverage(hist, start, end).render())
             for m in EFFECT_MARKETS:
                 vals = [e.effect(m) for e in hist.events if e.effect(m) is not None]
                 print(f"  {m}: {len(vals)} eventos com efeito · favoráveis(↑) {sum(1 for v in vals if v > 0)} · contrários(↓) {sum(1 for v in vals if v < 0)}")
         return 0
     if args.action in ("fetch-te", "fetch-alfred", "fetch-gdelt"):
         http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=24 * 3600)
+        progress = FetchProgress(path)
         if args.action == "fetch-te":
             key = args.key or env.get("TE_API_KEY") or os.environ.get("TE_API_KEY")
             if not key:
@@ -8985,18 +9118,30 @@ def cmd_history(args: argparse.Namespace) -> int:
             if not key:
                 print("ALFRED/FRED exige chave gratuita: --key ou FRED_API_KEY no .env (https://fred.stlouisfed.org/docs/api/api_key.html)")
                 return 1
-            new = ALFREDImporter(http, key).fetch(start, end)
+            imp = ALFREDImporter(http, key, log=print)
+            try:
+                new = imp.fetch(start, end, progress=progress)
+            except DataError as e:
+                print(str(e))
+                return 1
+            if imp.failed:
+                print(f"séries com falha ({len(imp.failed)}): " + "; ".join(f"{sid}: {r}" for sid, r in imp.failed))
         else:
             topics = [t.strip() for t in args.topics.split(",")] if args.topics else None
 
             def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
                 save_history(merge(hist, partial), path)
-            new = GDELTImporter(http, log=print).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint)
-        print(f"{args.action}: {len(new)} registros obtidos ({new.stats()})")
+            imp = GDELTImporter(http, log=print)
+            new = imp.fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint, enrich=args.enrich,
+                            progress=progress)
+            if imp.failed:
+                print(f"janelas com falha ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
+                      "; ".join(f"{t} {w}" for t, w, _ in imp.failed))
+        print(f"{args.action}: {len(new)} registros novos ({new.stats()})")
         hist = merge(hist, new)
         apply_rule_effects(hist)
         n = save_history(hist, path)
-        print(f"salvo: {path} · {n} linhas · {hist.stats()}")
+        print(f"salvo: {path} · {n} linhas\n" + coverage(hist, start, end).render())
         return 0
     if not exists:
         print(f"{path} não existe — use `history template` ou um fetch-*")
@@ -9030,13 +9175,28 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
     risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
+    cov = coverage(hist, start.date(), end.date())
+    print(cov.render() + "\n")
+    gaps = []
+    if "macro" in modes or "full" in modes:
+        if cov.macro_pct < args.min_coverage:
+            gaps.append(f"MACRO cobre {cov.macro_pct:.0%} das semanas (mínimo {args.min_coverage:.0%}) — rode `history fetch-alfred` / `fetch-te`")
+    if "full" in modes and cov.news_pct < args.min_coverage:
+        gaps.append(f"NEWS cobre {cov.news_pct:.0%} dos dias (mínimo {args.min_coverage:.0%}) — rode `history fetch-gdelt` até completar")
+    if gaps:
+        for g in gaps:
+            print("⚠️ " + g)
+        if not args.allow_partial:
+            print("Banco incompleto para o período: um TESTE A/B sobre fração do histórico não vale como resultado. Complete o banco ou use --allow-partial para um ensaio.")
+            return 1
+        print("(--allow-partial: resultado é ENSAIO, não conclusão)\n")
     args.events_path, args.events = args.events, None    # os frames são carregados SEM banco; a ablação liga/desliga por modo
     frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
     if not frames:
         print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
         return 1
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
-    modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
     rep = compare_information(frames, hist, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon,
                               strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None))
     print(rep.render())
@@ -9463,6 +9623,7 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--topics", default=None, help="GDELT: geopolitica,petroleo,china,fed,risco (padrão: todos)")
     hi.add_argument("--chunk-days", type=int, default=30, help="GDELT: dias por janela (menos janelas = menos chamadas; o GDELT limita a 1 a cada ~5 s)")
     hi.add_argument("--max-records", type=int, default=250, help="GDELT: manchetes por tema por janela (máx. 250)")
+    hi.add_argument("--enrich", action="store_true", help="GDELT: além das manchetes, baixar tom e volume (3× mais chamadas)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")
@@ -9476,6 +9637,8 @@ def main(argv: list[str] | None = None) -> int:
     cn.add_argument("--end", default=None)
     cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     cn.add_argument("--modes", default=None, help="none,macro,full (padrão: os três)")
+    cn.add_argument("--min-coverage", type=float, default=0.8, help="cobertura mínima do banco no período (macro por semana, news por dia)")
+    cn.add_argument("--allow-partial", action="store_true", help="roda mesmo com banco incompleto (resultado é ensaio, não conclusão)")
     cn.add_argument("--equity", type=float, default=10000.0)
     cn.add_argument("--risk", type=float, default=None)
     cn.add_argument("--strategy", default="adaptive")

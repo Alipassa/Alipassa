@@ -269,7 +269,8 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 def cmd_history(args: argparse.Namespace) -> int:
     """BANCO HISTÓRICO DE EVENTOS/NOTÍCIAS (point-in-time): template · fetch-te · fetch-alfred · fetch-gdelt · rules · learn · stats."""
     from datetime import date
-    from .history import EventHistory, HistoricalEvent, apply_rule_effects, learn_effects, load_history, merge, render_effect_table, save_history
+    from .history import (EventHistory, FetchProgress, HistoricalEvent, apply_rule_effects, coverage, learn_effects, load_history, merge,
+                          render_effect_table, save_history)
     from .telegram import load_env_file
 
     env = load_env_file()
@@ -290,13 +291,16 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(hist.stats() if exists else f"{path} não existe — use `history template` ou um fetch-*")
         if exists:
             from .history import EFFECT_MARKETS
+            print(coverage(hist, start, end).render())
             for m in EFFECT_MARKETS:
                 vals = [e.effect(m) for e in hist.events if e.effect(m) is not None]
                 print(f"  {m}: {len(vals)} eventos com efeito · favoráveis(↑) {sum(1 for v in vals if v > 0)} · contrários(↓) {sum(1 for v in vals if v < 0)}")
         return 0
     if args.action in ("fetch-te", "fetch-alfred", "fetch-gdelt"):
         from .data import DataEngineConfig, HttpClient
+        from .data.http import DataError
         http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=24 * 3600)
+        progress = FetchProgress(path)
         if args.action == "fetch-te":
             from .data.history_sources import TradingEconomicsImporter
             key = args.key or env.get("TE_API_KEY") or os.environ.get("TE_API_KEY")
@@ -310,19 +314,31 @@ def cmd_history(args: argparse.Namespace) -> int:
             if not key:
                 print("ALFRED/FRED exige chave gratuita: --key ou FRED_API_KEY no .env (https://fred.stlouisfed.org/docs/api/api_key.html)")
                 return 1
-            new = ALFREDImporter(http, key).fetch(start, end)
+            imp = ALFREDImporter(http, key, log=print)
+            try:
+                new = imp.fetch(start, end, progress=progress)
+            except DataError as e:
+                print(str(e))
+                return 1
+            if imp.failed:
+                print(f"séries com falha ({len(imp.failed)}): " + "; ".join(f"{sid}: {r}" for sid, r in imp.failed))
         else:
             from .data.history_sources import GDELTImporter
             topics = [t.strip() for t in args.topics.split(",")] if args.topics else None
 
             def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
                 save_history(merge(hist, partial), path)
-            new = GDELTImporter(http, log=print).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint)
-        print(f"{args.action}: {len(new)} registros obtidos ({new.stats()})")
+            imp = GDELTImporter(http, log=print)
+            new = imp.fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint, enrich=args.enrich,
+                            progress=progress)
+            if imp.failed:
+                print(f"janelas com falha ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
+                      "; ".join(f"{t} {w}" for t, w, _ in imp.failed))
+        print(f"{args.action}: {len(new)} registros novos ({new.stats()})")
         hist = merge(hist, new)
         apply_rule_effects(hist)
         n = save_history(hist, path)
-        print(f"salvo: {path} · {n} linhas · {hist.stats()}")
+        print(f"salvo: {path} · {n} linhas\n" + coverage(hist, start, end).render())
         return 0
     if not exists:
         print(f"{path} não existe — use `history template` ou um fetch-*")
@@ -356,17 +372,33 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
     if not os.path.exists(args.events):
         print(f"banco histórico não encontrado: {args.events} — crie com `history template` / `history fetch-*`")
         return 1
+    from .history import coverage
     hist = load_history(args.events)
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
     risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
+    cov = coverage(hist, start.date(), end.date())
+    print(cov.render() + "\n")
+    gaps = []
+    if "macro" in modes or "full" in modes:
+        if cov.macro_pct < args.min_coverage:
+            gaps.append(f"MACRO cobre {cov.macro_pct:.0%} das semanas (mínimo {args.min_coverage:.0%}) — rode `history fetch-alfred` / `fetch-te`")
+    if "full" in modes and cov.news_pct < args.min_coverage:
+        gaps.append(f"NEWS cobre {cov.news_pct:.0%} dos dias (mínimo {args.min_coverage:.0%}) — rode `history fetch-gdelt` até completar")
+    if gaps:
+        for g in gaps:
+            print("⚠️ " + g)
+        if not args.allow_partial:
+            print("Banco incompleto para o período: um TESTE A/B sobre fração do histórico não vale como resultado. Complete o banco ou use --allow-partial para um ensaio.")
+            return 1
+        print("(--allow-partial: resultado é ENSAIO, não conclusão)\n")
     args.events_path, args.events = args.events, None    # os frames são carregados SEM banco; a ablação liga/desliga por modo
     frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
     if not frames:
         print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
         return 1
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
-    modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
     rep = compare_information(frames, hist, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon,
                               strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None))
     print(rep.render())
@@ -815,6 +847,7 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--topics", default=None, help="GDELT: geopolitica,petroleo,china,fed,risco (padrão: todos)")
     hi.add_argument("--chunk-days", type=int, default=30, help="GDELT: dias por janela (menos janelas = menos chamadas; o GDELT limita a 1 a cada ~5 s)")
     hi.add_argument("--max-records", type=int, default=250, help="GDELT: manchetes por tema por janela (máx. 250)")
+    hi.add_argument("--enrich", action="store_true", help="GDELT: além das manchetes, baixar tom e volume (3× mais chamadas)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")
@@ -828,6 +861,8 @@ def main(argv: list[str] | None = None) -> int:
     cn.add_argument("--end", default=None)
     cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     cn.add_argument("--modes", default=None, help="none,macro,full (padrão: os três)")
+    cn.add_argument("--min-coverage", type=float, default=0.8, help="cobertura mínima do banco no período (macro por semana, news por dia)")
+    cn.add_argument("--allow-partial", action="store_true", help="roda mesmo com banco incompleto (resultado é ensaio, não conclusão)")
     cn.add_argument("--equity", type=float, default=10000.0)
     cn.add_argument("--risk", type=float, default=None)
     cn.add_argument("--strategy", default="adaptive")
