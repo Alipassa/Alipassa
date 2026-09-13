@@ -1,5 +1,9 @@
 # DIRETRIZ — IA DE INTELIGÊNCIA PREDITIVA DO OURO
 
+> Regra central (ver [MISSAO.md](MISSAO.md)): maximizar o aproveitamento das oportunidades estatisticamente válidas, a expectancy e o
+> potencial de ganho com risco controlado — sem sacrificar captura de oportunidades em busca de uma taxa de acerto artificialmente alta.
+
+
 ### Sistema Global de Análise, Antecipação e Sinalização — XAU/USD
 
 **Versão 1.0 — Projeto Ouro Global**

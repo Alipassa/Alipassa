@@ -26,6 +26,10 @@ HEADER = f'''#!/usr/bin/env python3
 Gerado por tools/build_single_file.py a partir do pacote gold_ai/ (versão {VERSION}).
 Equivalente a `python -m gold_ai`. Não existem outros bundles suportados (v1/v2/v3 removidos).
 
+REGRA CENTRAL: maximizar o aproveitamento das oportunidades estatisticamente válidas, a expectancy e o potencial de ganho,
+mantendo o risco controlado — sem sacrificar captura de oportunidades em busca de uma taxa de acerto artificialmente alta.
+Alvo = acerto + captura + expectancy + ganho + controle de drawdown (docs/MISSAO.md).
+
 "Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor vantagem
 estatística disponível naquele momento, respeitando risco, correlação, qualidade dos dados e custo de
 execução." A IA não precisa operar ouro; precisa encontrar onde existe vantagem.

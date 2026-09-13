@@ -1,5 +1,10 @@
 # MARKET AI ENGINE 4.0
 
+> **Regra central do projeto** — "MAXIMIZAR O APROVEITAMENTO DAS OPORTUNIDADES ESTATISTICAMENTE VÁLIDAS, MAXIMIZAR A EXPECTANCY E O
+> POTENCIAL DE GANHO, MANTENDO O RISCO CONTROLADO — SEM SACRIFICAR CAPTURA DE OPORTUNIDADES EM BUSCA DE UMA TAXA DE ACERTO
+> ARTIFICIALMENTE ALTA." O alvo é acerto + captura + expectancy + ganho + controle de drawdown. Missão completa: [docs/MISSAO.md](docs/MISSAO.md).
+
+
 Cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade. Nasceu como GOLD AI ENGINE
 (motor probabilístico de antecipação para XAU/USD) e preserva integralmente os motores validados nas versões 2.1–3.0.
 
