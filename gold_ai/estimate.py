@@ -156,7 +156,7 @@ DEFAULT_CAVEATS = [
 
 
 def estimate_profit(frames: dict, start: datetime, end: datetime, equity: float, risk_pct: float, n_folds: int = 4, step: int = 1,
-                    warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive") -> ProfitEstimate:
+                    warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive", cfg_factory=None) -> ProfitEstimate:
     from .config import EngineConfig
     from .evaluation import Backtester, walk_forward
 
@@ -164,7 +164,7 @@ def estimate_profit(frames: dict, start: datetime, end: datetime, equity: float,
     markets: list[MarketEstimate] = []
     for symbol, frame in frames.items():
         spec = get_market(symbol)
-        cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
+        cfg = cfg_factory(symbol) if cfg_factory else EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
         bt = Backtester(frame, cfg, warmup=warmup, step=step, horizon_min=horizon_min)
         wf = walk_forward(bt, n_folds=n_folds)
         rows = [r for _, res in wf.folds for r in res.trade_rows]

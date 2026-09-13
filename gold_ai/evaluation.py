@@ -227,6 +227,8 @@ class HistoryFrame:
     vix: list[Candle] = field(default_factory=list)
     spx: list[Candle] = field(default_factory=list)
     real_yield_daily: list[tuple[datetime, float]] = field(default_factory=list)  # FRED DFII10 (%)
+    fedfunds: list[Candle] = field(default_factory=list)      # ZQ=F (30-day Fed Funds futures): 100 − preço = taxa implícita
+    breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -270,11 +272,18 @@ class HistoryFrame:
         s.us10y, s.us10y_change_bp = y, (dy * 100 if dy is not None else None)
         s.vix, s.vix_change_pct = change(self.vix, True)
         _, s.equity_change_pct = change(self.spx, True)
+        _, d_zq = change(self.fedfunds, False)
+        if d_zq is not None:
+            s.fed_cut_prob_change_pp = round(max(-100.0, min(100.0, d_zq * 100 * 4)), 1)   # Δpreço → −Δtaxa implícita (bp) → p.p. de corte
+        be_pts = [(d, v) for d, v in self.breakeven_daily if d <= t] if self.breakeven_daily else []
         if self.real_yield_daily:
             pts = [(d, v) for d, v in self.real_yield_daily if d <= t]
             if len(pts) >= 2:
                 s.real_yield_10y = pts[-1][1]
-                s.real_yield_change_bp = (pts[-1][1] - pts[-2][1]) * 100
+                if s.us10y_change_bp is not None and len(be_pts) >= 2:
+                    s.real_yield_change_bp = round(s.us10y_change_bp - (be_pts[-1][1] - be_pts[-2][1]) * 100 * (window_bars / 24), 2)
+                else:
+                    s.real_yield_change_bp = (pts[-1][1] - pts[-2][1]) * 100
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
         return s
@@ -292,9 +301,11 @@ class BacktestResult:
     decisions: list = field(default_factory=list)
     entries: list = field(default_factory=list)
     funnel: Optional[object] = None       # opportunity.Funnel
+    factor_coverage: Optional[float] = None   # fração média do peso dos fatores com dado disponível
 
     def render(self) -> str:
-        out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
+        cov = f" · cobertura de fatores {self.factor_coverage:.0%}" if self.factor_coverage is not None else ""
+        out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais{cov}\n" + self.metrics.render()
         if self.trades is not None:
             out += "\n\n" + self.trades.render()
         if self.opportunity is not None:
@@ -336,6 +347,7 @@ class Backtester:
         decisions: list[DecisionRecord] = []
         entries: list[tuple] = []
         funnel = Funnel()
+        coverage_sum, coverage_n = 0.0, 0
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
@@ -346,6 +358,8 @@ class Backtester:
             # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
             decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
             funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
+            coverage_sum += sum(f.max_score for f in a.factors if f.available) / max(1.0, sum(f.max_score for f in a.factors))
+            coverage_n += 1
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
@@ -389,8 +403,10 @@ class Backtester:
         from .opportunity import opportunity_report
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
-        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
+        res = BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
+                             r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
+        res.factor_coverage = round(coverage_sum / coverage_n, 3) if coverage_n else None
+        return res
 
 
 @dataclass
@@ -402,7 +418,9 @@ class WalkForwardResult:
     oos_funnel: Optional[object] = None       # opportunity.Funnel agregado OOS
 
     def render(self) -> str:
-        lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
+        covs = [r.factor_coverage for _, r in self.folds if r.factor_coverage is not None]
+        cov = f" · cobertura de fatores {statistics.fmean(covs):.0%} (o score reescala pelo peso disponível: cobertura baixa = scores baixos)" if covs else ""
+        lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa" + cov]
         for k, (cfg, r) in enumerate(self.folds, 1):
             lines.append(f"  fold {k}: buy≥{cfg.buy} sell≤{cfg.sell} conf≥{cfg.min_confirmations} → sinais={r.metrics.n_signals} "
                          f"precisão={'n/d' if r.metrics.precision is None else f'{r.metrics.precision:.0%}'} lead={'n/d' if r.metrics.lead_time_avg is None else f'{r.metrics.lead_time_avg:.0f} min'}")

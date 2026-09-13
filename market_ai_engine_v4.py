@@ -5681,6 +5681,8 @@ class HistoryFrame:
     vix: list[Candle] = field(default_factory=list)
     spx: list[Candle] = field(default_factory=list)
     real_yield_daily: list[tuple[datetime, float]] = field(default_factory=list)  # FRED DFII10 (%)
+    fedfunds: list[Candle] = field(default_factory=list)      # ZQ=F (30-day Fed Funds futures): 100 − preço = taxa implícita
+    breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -5723,11 +5725,18 @@ class HistoryFrame:
         s.us10y, s.us10y_change_bp = y, (dy * 100 if dy is not None else None)
         s.vix, s.vix_change_pct = change(self.vix, True)
         _, s.equity_change_pct = change(self.spx, True)
+        _, d_zq = change(self.fedfunds, False)
+        if d_zq is not None:
+            s.fed_cut_prob_change_pp = round(max(-100.0, min(100.0, d_zq * 100 * 4)), 1)   # Δpreço → −Δtaxa implícita (bp) → p.p. de corte
+        be_pts = [(d, v) for d, v in self.breakeven_daily if d <= t] if self.breakeven_daily else []
         if self.real_yield_daily:
             pts = [(d, v) for d, v in self.real_yield_daily if d <= t]
             if len(pts) >= 2:
                 s.real_yield_10y = pts[-1][1]
-                s.real_yield_change_bp = (pts[-1][1] - pts[-2][1]) * 100
+                if s.us10y_change_bp is not None and len(be_pts) >= 2:
+                    s.real_yield_change_bp = round(s.us10y_change_bp - (be_pts[-1][1] - be_pts[-2][1]) * 100 * (window_bars / 24), 2)
+                else:
+                    s.real_yield_change_bp = (pts[-1][1] - pts[-2][1]) * 100
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
         return s
@@ -5745,9 +5754,11 @@ class BacktestResult:
     decisions: list = field(default_factory=list)
     entries: list = field(default_factory=list)
     funnel: Optional[object] = None       # opportunity.Funnel
+    factor_coverage: Optional[float] = None   # fração média do peso dos fatores com dado disponível
 
     def render(self) -> str:
-        out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
+        cov = f" · cobertura de fatores {self.factor_coverage:.0%}" if self.factor_coverage is not None else ""
+        out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais{cov}\n" + self.metrics.render()
         if self.trades is not None:
             out += "\n\n" + self.trades.render()
         if self.opportunity is not None:
@@ -5786,6 +5797,7 @@ class Backtester:
         decisions: list[DecisionRecord] = []
         entries: list[tuple] = []
         funnel = Funnel()
+        coverage_sum, coverage_n = 0.0, 0
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
@@ -5796,6 +5808,8 @@ class Backtester:
             # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
             decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
             funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
+            coverage_sum += sum(f.max_score for f in a.factors if f.available) / max(1.0, sum(f.max_score for f in a.factors))
+            coverage_n += 1
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
@@ -5838,8 +5852,10 @@ class Backtester:
         threshold = self.threshold_atr * statistics.fmean(atrs)
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
-        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
+        res = BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
+                             r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
+        res.factor_coverage = round(coverage_sum / coverage_n, 3) if coverage_n else None
+        return res
 
 
 @dataclass
@@ -5851,7 +5867,9 @@ class WalkForwardResult:
     oos_funnel: Optional[object] = None       # opportunity.Funnel agregado OOS
 
     def render(self) -> str:
-        lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
+        covs = [r.factor_coverage for _, r in self.folds if r.factor_coverage is not None]
+        cov = f" · cobertura de fatores {statistics.fmean(covs):.0%} (o score reescala pelo peso disponível: cobertura baixa = scores baixos)" if covs else ""
+        lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa" + cov]
         for k, (cfg, r) in enumerate(self.folds, 1):
             lines.append(f"  fold {k}: buy≥{cfg.buy} sell≤{cfg.sell} conf≥{cfg.min_confirmations} → sinais={r.metrics.n_signals} "
                          f"precisão={'n/d' if r.metrics.precision is None else f'{r.metrics.precision:.0%}'} lead={'n/d' if r.metrics.lead_time_avg is None else f'{r.metrics.lead_time_avg:.0f} min'}")
@@ -6812,13 +6830,13 @@ DEFAULT_CAVEATS = [
 
 
 def estimate_profit(frames: dict, start: datetime, end: datetime, equity: float, risk_pct: float, n_folds: int = 4, step: int = 1,
-                    warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive") -> ProfitEstimate:
+                    warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive", cfg_factory=None) -> ProfitEstimate:
 
     period = f"{start:%Y-%m-%d} → {end:%Y-%m-%d}"
     markets: list[MarketEstimate] = []
     for symbol, frame in frames.items():
         spec = get_market(symbol)
-        cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
+        cfg = cfg_factory(symbol) if cfg_factory else EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
         bt = Backtester(frame, cfg, warmup=warmup, step=step, horizon_min=horizon_min)
         wf = walk_forward(bt, n_folds=n_folds)
         rows = [r for _, res in wf.folds for r in res.trade_rows]
@@ -7546,7 +7564,19 @@ def _load_frame(args: argparse.Namespace):
         get = lambda sym: y.candles_between(sym, "H1", s, e)  # noqa: E731
     else:
         get = lambda sym: y.candles(sym, "H1")  # noqa: E731
-    return HistoryFrame(xau=get(args.symbol), dxy=get("DX-Y.NYB"), us10y=get("^TNX"), vix=get("^VIX"), spx=get("^GSPC"))
+    frame = HistoryFrame(xau=get(args.symbol), dxy=get("DX-Y.NYB"), us10y=get("^TNX"), vix=get("^VIX"), spx=get("^GSPC"))
+    try:
+        frame.fedfunds = get("ZQ=F")
+    except Exception as e:  # noqa: BLE001
+        print(f"(ZQ=F indisponível: {e})")
+    if not getattr(args, "no_fred", False):
+        try:
+            fred = FredCollector(HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=6 * 3600))
+            frame.real_yield_daily = [(datetime(d.year, d.month, d.day, tzinfo=timezone.utc), v) for d, v in fred.series("DFII10")]
+            frame.breakeven_daily = [(datetime(d.year, d.month, d.day, tzinfo=timezone.utc), v) for d, v in fred.series("T10YIE")]
+        except Exception as e:  # noqa: BLE001
+            print(f"(FRED indisponível: {e})")
+    return frame
 
 
 def cmd_live_markets(args: argparse.Namespace) -> int:
@@ -7654,7 +7684,9 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     if not frames:
         print("sem histórico suficiente (mínimo ~260 candles H1 por mercado). Verifique a rede/Yahoo ou use --csv-dir.")
         return 1
-    rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy)
+    factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
+    rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
+                          cfg_factory=factory)
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
@@ -7755,6 +7787,22 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_experiment(cfg: EngineConfig, args: argparse.Namespace) -> EngineConfig:
+    """Limiares como parâmetros de EXPERIMENTO (para testar fora da amostra, nunca para 'fazer entrar')."""
+    changed = []
+    if getattr(args, "edge_score", None) is not None:
+        cfg.min_edge_score = args.edge_score; changed.append(f"vantagem |score| ≥ {args.edge_score:g}")
+    if getattr(args, "signal_score", None) is not None:
+        cfg.buy, cfg.sell = args.signal_score, -args.signal_score; changed.append(f"sinal |score| ≥ {args.signal_score:g}")
+    if getattr(args, "min_confirmations", None) is not None:
+        cfg.min_confirmations = args.min_confirmations; changed.append(f"confirmações ≥ {args.min_confirmations}")
+    if getattr(args, "edge_confidence", None) is not None:
+        cfg.min_edge_confidence = args.edge_confidence; changed.append(f"confiança ≥ {args.edge_confidence:g}")
+    if changed:
+        print("experimento: " + " · ".join(changed) + "  (compare a expectancy OOS com o padrão antes de adotar)")
+    return cfg
+
+
 def _cfg_for(args: argparse.Namespace) -> EngineConfig:
     """EngineConfig com os sinais de fator do mercado (--market); sem --market usa o cérebro do ouro."""
 
@@ -7764,9 +7812,9 @@ def _cfg_for(args: argparse.Namespace) -> EngineConfig:
         if getattr(args, "symbol", None) in (None, "GC=F") and not getattr(args, "csv", None):
             args.symbol = spec.yahoo
         print(f"cérebro: {spec.symbol} (sinais por fator do mercado) · candles {args.symbol}")
-        return EngineConfig(factor_signs=dict(spec.factor_signs), symbol=spec.symbol)
+        return _apply_experiment(EngineConfig(factor_signs=dict(spec.factor_signs), symbol=spec.symbol), args)
     print("cérebro: XAUUSD (padrão) — use --market EURUSD|US500|USDJPY|WTI para aplicar os sinais do mercado")
-    return EngineConfig()
+    return _apply_experiment(EngineConfig(), args)
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:
@@ -8003,6 +8051,11 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--folds", type=int, default=4)
     es.add_argument("--step", type=int, default=1)
     es.add_argument("--horizon", type=int, default=240)
+    es.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    es.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    es.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    es.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    es.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
     es.add_argument("--out", default=None)
     es.set_defaults(func=cmd_estimate)
@@ -8036,6 +8089,11 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--end", default=None)
     bt.add_argument("--threshold-atr", type=float, default=1.0)
     bt.add_argument("--horizon", type=int, default=240, help="minutos")
+    bt.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    bt.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    bt.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    bt.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    bt.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     bt.add_argument("--walk-forward", action="store_true")
     bt.add_argument("--folds", type=int, default=4)
     bt.add_argument("--include-watch", action="store_true")
@@ -8061,6 +8119,11 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
     va.add_argument("--threshold-atr", type=float, default=1.0)
     va.add_argument("--horizon", type=int, default=240)
+    va.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    va.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    va.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    va.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    va.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     va.add_argument("--out", default=None, help="salva o relatório em arquivo")
     va.add_argument("--markets", default=None, help="4.0: validação multi-mercado, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     va.add_argument("--csv-dir", default=None, help="pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv opcionais)")
@@ -8079,6 +8142,11 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--folds", type=int, default=4)
     si.add_argument("--threshold-atr", type=float, default=1.0)
     si.add_argument("--horizon", type=int, default=240)
+    si.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    si.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    si.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    si.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    si.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     si.add_argument("--walk-forward", action="store_true")
     si.set_defaults(func=cmd_simulate)
 

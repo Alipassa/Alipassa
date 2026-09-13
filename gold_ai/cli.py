@@ -101,7 +101,20 @@ def _load_frame(args: argparse.Namespace):
         get = lambda sym: y.candles_between(sym, "H1", s, e)  # noqa: E731
     else:
         get = lambda sym: y.candles(sym, "H1")  # noqa: E731
-    return HistoryFrame(xau=get(args.symbol), dxy=get("DX-Y.NYB"), us10y=get("^TNX"), vix=get("^VIX"), spx=get("^GSPC"))
+    frame = HistoryFrame(xau=get(args.symbol), dxy=get("DX-Y.NYB"), us10y=get("^TNX"), vix=get("^VIX"), spx=get("^GSPC"))
+    try:
+        frame.fedfunds = get("ZQ=F")
+    except Exception as e:  # noqa: BLE001
+        print(f"(ZQ=F indisponível: {e})")
+    if not getattr(args, "no_fred", False):
+        try:
+            from .data.fred import FredCollector
+            fred = FredCollector(HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=6 * 3600))
+            frame.real_yield_daily = [(datetime(d.year, d.month, d.day, tzinfo=timezone.utc), v) for d, v in fred.series("DFII10")]
+            frame.breakeven_daily = [(datetime(d.year, d.month, d.day, tzinfo=timezone.utc), v) for d, v in fred.series("T10YIE")]
+        except Exception as e:  # noqa: BLE001
+            print(f"(FRED indisponível: {e})")
+    return frame
 
 
 def cmd_live_markets(args: argparse.Namespace) -> int:
@@ -229,7 +242,10 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     if not frames:
         print("sem histórico suficiente (mínimo ~260 candles H1 por mercado). Verifique a rede/Yahoo ou use --csv-dir.")
         return 1
-    rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy)
+    from .markets import get_market
+    factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
+    rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
+                          cfg_factory=factory)
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
@@ -340,6 +356,22 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_experiment(cfg: EngineConfig, args: argparse.Namespace) -> EngineConfig:
+    """Limiares como parâmetros de EXPERIMENTO (para testar fora da amostra, nunca para 'fazer entrar')."""
+    changed = []
+    if getattr(args, "edge_score", None) is not None:
+        cfg.min_edge_score = args.edge_score; changed.append(f"vantagem |score| ≥ {args.edge_score:g}")
+    if getattr(args, "signal_score", None) is not None:
+        cfg.buy, cfg.sell = args.signal_score, -args.signal_score; changed.append(f"sinal |score| ≥ {args.signal_score:g}")
+    if getattr(args, "min_confirmations", None) is not None:
+        cfg.min_confirmations = args.min_confirmations; changed.append(f"confirmações ≥ {args.min_confirmations}")
+    if getattr(args, "edge_confidence", None) is not None:
+        cfg.min_edge_confidence = args.edge_confidence; changed.append(f"confiança ≥ {args.edge_confidence:g}")
+    if changed:
+        print("experimento: " + " · ".join(changed) + "  (compare a expectancy OOS com o padrão antes de adotar)")
+    return cfg
+
+
 def _cfg_for(args: argparse.Namespace) -> EngineConfig:
     """EngineConfig com os sinais de fator do mercado (--market); sem --market usa o cérebro do ouro."""
     from .markets import get_market
@@ -350,9 +382,9 @@ def _cfg_for(args: argparse.Namespace) -> EngineConfig:
         if getattr(args, "symbol", None) in (None, "GC=F") and not getattr(args, "csv", None):
             args.symbol = spec.yahoo
         print(f"cérebro: {spec.symbol} (sinais por fator do mercado) · candles {args.symbol}")
-        return EngineConfig(factor_signs=dict(spec.factor_signs), symbol=spec.symbol)
+        return _apply_experiment(EngineConfig(factor_signs=dict(spec.factor_signs), symbol=spec.symbol), args)
     print("cérebro: XAUUSD (padrão) — use --market EURUSD|US500|USDJPY|WTI para aplicar os sinais do mercado")
-    return EngineConfig()
+    return _apply_experiment(EngineConfig(), args)
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:
@@ -597,6 +629,11 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--folds", type=int, default=4)
     es.add_argument("--step", type=int, default=1)
     es.add_argument("--horizon", type=int, default=240)
+    es.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    es.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    es.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    es.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    es.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
     es.add_argument("--out", default=None)
     es.set_defaults(func=cmd_estimate)
@@ -630,6 +667,11 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--end", default=None)
     bt.add_argument("--threshold-atr", type=float, default=1.0)
     bt.add_argument("--horizon", type=int, default=240, help="minutos")
+    bt.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    bt.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    bt.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    bt.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    bt.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     bt.add_argument("--walk-forward", action="store_true")
     bt.add_argument("--folds", type=int, default=4)
     bt.add_argument("--include-watch", action="store_true")
@@ -655,6 +697,11 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
     va.add_argument("--threshold-atr", type=float, default=1.0)
     va.add_argument("--horizon", type=int, default=240)
+    va.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    va.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    va.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    va.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    va.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     va.add_argument("--out", default=None, help="salva o relatório em arquivo")
     va.add_argument("--markets", default=None, help="4.0: validação multi-mercado, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     va.add_argument("--csv-dir", default=None, help="pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv opcionais)")
@@ -673,6 +720,11 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--folds", type=int, default=4)
     si.add_argument("--threshold-atr", type=float, default=1.0)
     si.add_argument("--horizon", type=int, default=240)
+    si.add_argument("--edge-score", type=float, default=None, help="experimento: |score| mínimo de vantagem (padrão 25)")
+    si.add_argument("--signal-score", type=float, default=None, help="experimento: |score| mínimo de sinal BUY/SELL (padrão 50)")
+    si.add_argument("--min-confirmations", type=int, default=None, help="experimento: famílias independentes (padrão 3)")
+    si.add_argument("--edge-confidence", type=float, default=None, help="experimento: confiança mínima de vantagem (padrão 50)")
+    si.add_argument("--no-fred", action="store_true", help="não buscar DFII10/T10YIE no FRED para o histórico")
     si.add_argument("--walk-forward", action="store_true")
     si.set_defaults(func=cmd_simulate)
 
