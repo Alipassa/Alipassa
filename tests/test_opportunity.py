@@ -70,6 +70,7 @@ class OpportunityTests(unittest.TestCase):
         curve = threshold_curve(rows)
         by = {r["threshold"]: r for r in curve}
         self.assertEqual(by[40]["n"], 57)
+        self.assertEqual(by[20]["n"], 57)
         self.assertEqual(by[80]["n"], 5)
         self.assertGreater(by[70]["expectancy"], by[60]["expectancy"])
         rep = opportunity_report([], [(NOW, 1.0), (NOW + timedelta(hours=1), 1.0)], [], 1.0, trade_rows=rows)

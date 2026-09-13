@@ -338,7 +338,7 @@ class Backtester:
             entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
             rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
-            if abs(a.score) >= 40 and d_dir != Direction.LATERAL:
+            if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
             decisions.append(rec)
             if entered:

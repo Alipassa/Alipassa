@@ -5548,7 +5548,7 @@ class Backtester:
             entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
             rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
-            if abs(a.score) >= 40 and d_dir != Direction.LATERAL:
+            if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
             decisions.append(rec)
             if entered:
@@ -5799,7 +5799,7 @@ class OpportunityReport:
         return "\n".join(lines)
 
 
-def threshold_curve(rows: Sequence[dict], thresholds: Sequence[int] = (40, 50, 60, 70, 80)) -> list[dict]:
+def threshold_curve(rows: Sequence[dict], thresholds: Sequence[int] = (20, 30, 40, 50, 60, 70, 80)) -> list[dict]:
     """rows: {"score": |score| na entrada, "r": resultado em R}."""
     out = []
     for t in thresholds:
@@ -6513,6 +6513,37 @@ def main(argv: list[str] | None = None) -> int:
     mt.add_argument("--threshold", type=float, default=9.0, help="USD (ex.: 1 ATR)")
     mt.add_argument("--horizon", type=int, default=240)
     mt.set_defaults(func=cmd_metrics)
+
+    va = sub.add_parser("validate", help="2.1 VALIDATION ENGINE: auditoria + walk-forward + calibração + score por fator + oportunidades")
+    va.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
+    va.add_argument("--dxy-csv", default=None)
+    va.add_argument("--us10y-csv", default=None)
+    va.add_argument("--symbol", default="GC=F")
+    va.add_argument("--folds", type=int, default=4)
+    va.add_argument("--step", type=int, default=1)
+    va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
+    va.add_argument("--threshold-atr", type=float, default=1.0)
+    va.add_argument("--horizon", type=int, default=240)
+    va.add_argument("--out", default=None, help="salva o relatório em arquivo")
+    va.set_defaults(func=cmd_validate)
+
+    si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy, oportunidades")
+    si.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
+    si.add_argument("--dxy-csv", default=None)
+    si.add_argument("--us10y-csv", default=None)
+    si.add_argument("--symbol", default="GC=F")
+    si.add_argument("--step", type=int, default=1)
+    si.add_argument("--folds", type=int, default=4)
+    si.add_argument("--threshold-atr", type=float, default=1.0)
+    si.add_argument("--horizon", type=int, default=240)
+    si.add_argument("--walk-forward", action="store_true")
+    si.set_defaults(func=cmd_simulate)
+
+    ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
+    ca.add_argument("--db", default="gold_ai.db")
+    ca.add_argument("--out", default="calibrator.json")
+    ca.add_argument("--min-n", type=int, default=30)
+    ca.set_defaults(func=cmd_calibrate)
 
     args = p.parse_args(argv)
     return int(args.func(args))

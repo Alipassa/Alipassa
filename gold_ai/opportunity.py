@@ -122,7 +122,7 @@ class OpportunityReport:
         return "\n".join(lines)
 
 
-def threshold_curve(rows: Sequence[dict], thresholds: Sequence[int] = (40, 50, 60, 70, 80)) -> list[dict]:
+def threshold_curve(rows: Sequence[dict], thresholds: Sequence[int] = (20, 30, 40, 50, 60, 70, 80)) -> list[dict]:
     """rows: {"score": |score| na entrada, "r": resultado em R}."""
     out = []
     for t in thresholds:
