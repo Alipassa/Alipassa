@@ -89,7 +89,7 @@ def render_dashboard(a: Assessment, expected_lead_min: Optional[float] = None) -
         ("LEAD TIME", lead), ("EVIDÊNCIA", f"NÍVEL {int(a.evidence_level)}"),
         None,
         ("DXY", lab("dolar")), ("REAL YIELD", lab("juros_reais")), ("FED", lab("fed")), ("FLOW", lab("fluxo")),
-        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento")), ("GEO", lab("geopolitica")),
+        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento") if f.get("sentimento") and f["sentimento"].available else "UNKNOWN"), ("GEO", lab("geopolitica")),
         None,
         ("STATUS", f"{status_emoji} {status}"),
         None,

@@ -98,4 +98,8 @@ def event_chain(a: Assessment, s: MarketSnapshot) -> str:
         lines.append(f"9. Veredito: {a.evidence_level.label} → {d} {p:.0%} · confiança {a.confidence:.0f}/100")
     else:
         lines.append(f"9. Veredito: {a.edge_status}")
+    if s.news_chain:
+        lines.append(s.news_chain)
+    elif s.news_status == "UNKNOWN":
+        lines.append("NEWS: UNKNOWN — sem notícias/eventos identificados (peso reduzido, não negativo)")
     return "\n".join(lines)

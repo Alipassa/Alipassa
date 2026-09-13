@@ -85,6 +85,26 @@ Leia sempre as ressalvas impressas no fim: é estimativa histórica, não garant
 COT alinhado nem FRED intraday, então a cobertura de fatores é menor que no `live`; amostra < 30 operações é ⚪ inconclusivo.
 `validate`, `backtest` e `simulate` também aceitam `--start/--end`.
 
+## 📰 NEWS ENGINE — entrada central do cérebro
+
+```text
+NEWS → EVENT IDENTIFIER → IMPORTÂNCIA → EXPECTATIVA → SURPRESA → DIREÇÃO ESPERADA (por mercado, via canais)
+     → REAÇÃO REAL (mercado + US10Y + DXY) → CONFIRMAÇÃO / DIVERGÊNCIA / SEM REAÇÃO → PRESSÃO LATENTE → SCORE
+```
+
+- **Identificação**: releases com consenso × real (CPI, PCE, NFP, desemprego, GDP, ISM…) e eventos qualitativos das manchetes
+  (Fed hawkish/dovish, escalada/distensão geopolítica, stress sistêmico, OPEP, compras de bancos centrais, estímulo chinês).
+- **Surpresa normalizada** por desvio típico de cada release; **importância** 0..1.
+- **Transmissão por canais** (juros, dólar, risco, petróleo, refúgio) → direção esperada em cada mercado. O mesmo CPI abaixo do
+  consenso é FAVORÁVEL para XAUUSD, EURUSD e US500 e CONTRÁRIO para USDJPY.
+- **Reação real × esperada**: canais confirmando e o mercado ainda parado ou divergindo = **pressão latente**, a oportunidade
+  antecipatória; mercado já reagido = efeito parcialmente consumido.
+- **NEWS = UNKNOWN** quando não há notícia identificada: o fator fica indisponível (peso reduzido), nunca negativo. Notícia
+  favorável ↑ score, contrária ↓ score. Vale para todos os mercados.
+- **Saúde por feed** na cobertura: fonte, última atualização, nº notícias, válidas, descartadas, erro.
+- **COT** é semanal: usa o último dado válido conhecido com a idade em dias; o peso decai após 10 dias e some após 35, sem
+  derrubar o score inteiro quando a CFTC está fora do ar.
+
 ## Entrypoint único
 
 Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:

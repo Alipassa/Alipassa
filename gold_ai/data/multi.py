@@ -36,7 +36,7 @@ MACRO_FIELDS = ("dxy", "dxy_change_pct", "us2y", "us10y", "us10y_change_bp", "re
 
 
 def derive_market_snapshot(base: MarketSnapshot, spec: MarketSpec, candles: dict, now: datetime, window_minutes: int = 60,
-                           cot: Optional[dict] = None) -> MarketSnapshot:
+                           cot: Optional[dict] = None, identified=None) -> MarketSnapshot:
     """Snapshot do mercado: macro compartilhada + candles/preço/ATR/fluxo próprios."""
     s = MarketSnapshot(time=now)
     for f in MACRO_FIELDS:
@@ -62,6 +62,14 @@ def derive_market_snapshot(base: MarketSnapshot, spec: MarketSpec, candles: dict
     elif cot:
         s.cot_managed_money_net, s.cot_managed_money_net_change = cot.get("net"), cot.get("change")
         s.cot_managed_money_percentile, s.cot_commercial_net_change = cot.get("percentile"), cot.get("commercial_change")
+        s.cot_age_days, s.cot_report_date = cot.get("age_days"), cot.get("report_date")
+    if spec.symbol == "XAUUSD":
+        s.cot_age_days, s.cot_report_date = base.cot_age_days, base.cot_report_date
+    # NEWS ENGINE por mercado: identificação → importância → surpresa → direção esperada → reação → pressão latente
+    if identified is not None:
+        from ..news_engine import NewsEngine
+        na = NewsEngine().assess(spec.symbol, s, identified, now)
+        s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
     return s
 
 
@@ -109,27 +117,31 @@ class MultiMarketData:
                 self.mt5.cfg.symbol = orig
         return self.yahoo.all_timeframes(spec.yahoo)
 
-    def market_cot(self, spec: MarketSpec) -> Optional[dict]:
+    def market_cot(self, spec: MarketSpec, now: datetime) -> Optional[dict]:
         if not spec.cftc_code or spec.symbol == "XAUUSD" or not self.engine.cfg.enable_cot:
             return None
-        try:
-            r = self.engine.cftc.gold(code=spec.cftc_code)
-            return {"net": r.managed_money_net, "change": r.managed_money_net_change, "percentile": r.managed_money_percentile, "commercial_change": r.commercial_net_change}
-        except Exception as e:  # noqa: BLE001
-            self.status[f"cot:{spec.symbol}"] = f"erro: {e}"
+        data = self.engine.cot_with_cache(spec.cftc_code, now)
+        if data is None:
+            self.status[f"cot:{spec.symbol}"] = "erro: indisponível e sem cache"
             return None
+        if data.get("from_cache"):
+            self.status[f"cot:{spec.symbol}"] = f"último válido {data['report_date']} ({data['age_days']:.0f} dias)"
+        return data
 
     def collect(self, now: Optional[datetime] = None) -> MarketSnapshotSet:
         now = now or datetime.now(timezone.utc)
         base = self.engine.collect(now)          # macro + XAU
         self.status = dict(self.engine.status)
         out = MarketSnapshotSet(now, base)
+        from ..news_engine import EventIdentifier
+        identified = EventIdentifier().identify(base.news, base.events, now)
+        self.identified = identified
         for spec in self.specs:
             try:
                 candles = base.candles if spec.symbol == "XAUUSD" and base.candles else self.market_candles(spec)
                 if not candles:
                     raise RuntimeError("sem candles")
-                s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec))
+                s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec, now), identified)
                 out.by_symbol[spec.symbol] = s
                 out.data_quality[spec.symbol] = data_quality(s, spec)
                 self.status[spec.symbol] = "ok"
@@ -139,6 +151,12 @@ class MultiMarketData:
         return out
 
     def coverage(self) -> str:
+        from ..news_engine import render_feed_health
         ok = [k for k, v in self.status.items() if v == "ok"]
         bad = [f"  ✗ {k}: {v}" for k, v in self.status.items() if v != "ok"]
-        return "\n".join([f"MULTI-MARKET DATA — ok: {', '.join(ok) or 'nenhum'}"] + bad)
+        lines = [f"MULTI-MARKET DATA — ok: {', '.join(ok) or 'nenhum'}"] + bad
+        if self.engine.cfg.enable_news:
+            lines.append(render_feed_health(self.engine.news.health))
+            n = len(getattr(self, "identified", []))
+            lines.append(f"NEWS ENGINE: {n} evento(s) identificado(s) na janela" + ("" if n else " → NEWS = UNKNOWN em todos os mercados (peso reduzido, não negativo)"))
+        return "\n".join(lines)

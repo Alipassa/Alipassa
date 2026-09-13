@@ -433,3 +433,8 @@ Regras:
    expectancy, probabilidade calibrada (declarada × observada), capture rate e status por confiança
    estatística — gerada a partir do que o sistema viveu, guardada todos os dias. Não precisamos
    acreditar que um mercado é melhor: os dados mostram.
+
+9. **NEWS ENGINE é entrada central**: notícia → evento → importância → expectativa → surpresa → direção
+   esperada por mercado → reação real → divergência → pressão latente → score. Ausência de informação não
+   é informação negativa: NEWS ausente = UNKNOWN, peso reduzido. COT = último dado válido com idade, peso
+   decaindo. Só depois de o NEWS ENGINE funcionar de verdade se recalibra o funil.

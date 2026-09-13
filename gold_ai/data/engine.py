@@ -41,6 +41,7 @@ class DataEngineConfig:
     enable_fred: bool = True
     enable_cot: bool = True
     enable_news: bool = True
+    market_symbol: str = "XAUUSD"     # mercado para o NEWS ENGINE no modo de mercado único
 
 
 class DataEngine:
@@ -149,9 +150,14 @@ class DataEngine:
         def cot() -> None:
             if not self.cfg.enable_cot:
                 return
-            r = self.cftc.gold()
-            s.cot_managed_money_net, s.cot_managed_money_net_change = r.managed_money_net, r.managed_money_net_change
-            s.cot_managed_money_percentile, s.cot_commercial_net_change = r.managed_money_percentile, r.commercial_net_change
+            data = self.cot_with_cache("088691", now)
+            if data is None:
+                raise RuntimeError("COT indisponível e sem cache")
+            s.cot_managed_money_net, s.cot_managed_money_net_change = data["net"], data["change"]
+            s.cot_managed_money_percentile, s.cot_commercial_net_change = data["percentile"], data["commercial_change"]
+            s.cot_age_days, s.cot_report_date = data["age_days"], data["report_date"]
+            if data.get("from_cache"):
+                raise RuntimeError(f"usando último COT válido ({data['report_date']}, {data['age_days']:.0f} dias)")
         self._try("cot", cot)
 
         def news() -> None:
@@ -171,14 +177,60 @@ class DataEngine:
                 s.events += load_calendar(self.cfg.calendar_path)
         self._try("calendar", calendar)
 
+        def news_engine() -> None:
+            if not self.cfg.enable_news:
+                return
+            from ..news_engine import EventIdentifier, NewsEngine
+            identified = EventIdentifier().identify(s.news, s.events, now)
+            na = NewsEngine().assess(self.cfg.market_symbol, s, identified, now)
+            s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
+            if not identified:
+                raise RuntimeError("nenhum evento identificado → NEWS UNKNOWN (peso reduzido, não negativo)")
+        self._try("news_engine", news_engine)
+
         return s
 
+    # ------------------------------------------------------------------ COT: último dado válido conhecido + idade
+    def _cot_cache_path(self) -> Optional[str]:
+        return os.path.join(self.cfg.cache_dir, "cot_last_valid.json") if self.cfg.cache_dir else None
+
+    def cot_with_cache(self, code: str, now: datetime) -> Optional[dict]:
+        import json
+        path = self._cot_cache_path()
+        cache: dict = {}
+        if path and os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    cache = json.load(f)
+            except Exception:  # noqa: BLE001
+                cache = {}
+        try:
+            r = self.cftc.gold(code=code)
+            data = {"net": r.managed_money_net, "change": r.managed_money_net_change, "percentile": r.managed_money_percentile,
+                    "commercial_change": r.commercial_net_change, "report_date": r.report_date.isoformat()}
+            cache[code] = data
+            if path:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(cache, f)
+            data = dict(data); data["from_cache"] = False
+        except Exception:  # noqa: BLE001
+            if code not in cache:
+                return None
+            data = dict(cache[code]); data["from_cache"] = True
+        rd = datetime.fromisoformat(data["report_date"]).replace(tzinfo=timezone.utc)
+        data["age_days"] = round((now - rd).total_seconds() / 86400, 1)
+        return data
+
     def coverage(self) -> str:
+        from ..news_engine import render_feed_health
         ok = [k for k, v in self.status.items() if v == "ok"]
         bad = {k: v for k, v in self.status.items() if v != "ok"}
         lines = [f"DATA ENGINE — fontes ok: {', '.join(ok) or 'nenhuma'}"]
         for k, v in bad.items():
             lines.append(f"  ✗ {k}: {v}")
+        if self.cfg.enable_news:
+            lines.append(render_feed_health(self.news.health))
         return "\n".join(lines)
 
 

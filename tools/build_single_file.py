@@ -18,7 +18,7 @@ VERSION = "4.0.0"
 
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "trading", "monitor",
-         "markets", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "live_engine", "data/multi", "market_engine", "cli"]
+         "markets", "news_engine", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "live_engine", "data/multi", "market_engine", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
 """MARKET AI ENGINE 4.0 — cérebro único · múltiplos mercados · seleção dinâmica da melhor oportunidade.

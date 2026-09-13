@@ -345,6 +345,13 @@ class MarketSnapshot:
     # Sentimento (§12)
     sentiment: Optional[float] = None       # -1..+1
     sentiment_change: Optional[float] = None
+    # NEWS ENGINE (4.0): pressão específica do mercado; None = UNKNOWN (peso reduzido, nunca negativo)
+    news_pressure: Optional[float] = None   # -1..+1
+    news_status: str = "UNKNOWN"            # UNKNOWN | FAVORÁVEL | CONTRÁRIO | NEUTRO
+    news_chain: str = ""
+    # COT: último dado válido conhecido + idade (semanal; o peso decai com a idade)
+    cot_age_days: Optional[float] = None
+    cot_report_date: Optional[str] = None
 
     # Correlatos (§3)
     silver_change_pct: Optional[float] = None
@@ -944,11 +951,29 @@ def score_fluxo(s: MarketSnapshot, w: float) -> FactorScore:
 
 
 # --------------------------------------------------------------------------- COT §8
+def cot_age_weight(age_days: Optional[float]) -> float:
+    """COT é semanal: até 10 dias peso cheio; decai linearmente até 0.3 em 21 dias; > 35 dias indisponível (0)."""
+    if age_days is None:
+        return 1.0
+    if age_days <= 10:
+        return 1.0
+    if age_days >= 35:
+        return 0.0
+    if age_days <= 21:
+        return 1.0 - 0.7 * (age_days - 10) / 11
+    return 0.3
+
+
 def score_cot(s: MarketSnapshot, w: float) -> FactorScore:
     if s.cot_managed_money_net_change is None and s.cot_managed_money_percentile is None:
         return _factor("cot", w, 0.0, "sem dados", available=False)
+    aw = cot_age_weight(s.cot_age_days)
+    if aw == 0.0:
+        return _factor("cot", w, 0.0, f"COT antigo demais ({s.cot_age_days:.0f} dias) — indisponível", available=False)
     ratio = 0.0
     notes: list[str] = []
+    if s.cot_age_days is not None:
+        notes.append(f"relatório {s.cot_report_date or ''} há {s.cot_age_days:.0f} dias (peso {aw:.0%})".strip())
     if s.cot_managed_money_net_change is not None:
         ratio += 0.6 * _sat(s.cot_managed_money_net_change, 15000.0)
         notes.append(f"managed money {s.cot_managed_money_net_change:+.0f} contratos/sem")
@@ -963,7 +988,7 @@ def score_cot(s: MarketSnapshot, w: float) -> FactorScore:
             notes.append("posicionamento vendido extremo (potencial short squeeze)")
     if s.cot_commercial_net_change is not None:
         ratio += 0.2 * _sat(s.cot_commercial_net_change, 15000.0)
-    return _factor("cot", w, ratio, f"COT: {', '.join(notes) or 'neutro'}")
+    return _factor("cot", w, ratio * aw, f"COT: {', '.join(notes) or 'neutro'}")
 
 
 # --------------------------------------------------------------------------- Opções §9
@@ -1010,6 +1035,18 @@ def sentiment_label(value: Optional[float]) -> Sentiment:
 
 
 def score_sentimento(s: MarketSnapshot, w: float) -> FactorScore:
+    """NEWS ENGINE: ausência = UNKNOWN (fator indisponível), nunca negativo. Com pressão de notícias
+    específica do mercado, ela domina; o sentimento agregado entra como complemento."""
+    if s.news_pressure is not None:
+        parts = [(_clip(s.news_pressure, -1, 1), 0.7)]
+        notes = [f"NEWS {s.news_status} (pressão {s.news_pressure:+.2f})"]
+        if s.sentiment is not None:
+            parts.append((_clip(s.sentiment, -1, 1), 0.3))
+            notes.append(sentiment_label(s.sentiment).value.lower())
+        ratio = sum(v * wt for v, wt in parts) / sum(wt for _, wt in parts)
+        return _factor("sentimento", w, ratio, "notícias: " + ", ".join(notes))
+    if s.news_status == "UNKNOWN" and s.sentiment is None and not s.news:
+        return _factor("sentimento", w, 0.0, "NEWS UNKNOWN — fonte indisponível (peso reduzido, não negativo)", available=False)
     if s.sentiment is None and not s.news:
         return _factor("sentimento", w, 0.0, "sem dados", available=False)
     parts: list[tuple[float, float]] = []  # (valor, peso)
@@ -1495,6 +1532,10 @@ def event_chain(a: Assessment, s: MarketSnapshot) -> str:
         lines.append(f"9. Veredito: {a.evidence_level.label} → {d} {p:.0%} · confiança {a.confidence:.0f}/100")
     else:
         lines.append(f"9. Veredito: {a.edge_status}")
+    if s.news_chain:
+        lines.append(s.news_chain)
+    elif s.news_status == "UNKNOWN":
+        lines.append("NEWS: UNKNOWN — sem notícias/eventos identificados (peso reduzido, não negativo)")
     return "\n".join(lines)
 
 
@@ -2780,7 +2821,7 @@ def render_dashboard(a: Assessment, expected_lead_min: Optional[float] = None) -
         ("LEAD TIME", lead), ("EVIDÊNCIA", f"NÍVEL {int(a.evidence_level)}"),
         None,
         ("DXY", lab("dolar")), ("REAL YIELD", lab("juros_reais")), ("FED", lab("fed")), ("FLOW", lab("fluxo")),
-        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento")), ("GEO", lab("geopolitica")),
+        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento") if f.get("sentimento") and f["sentimento"].available else "UNKNOWN"), ("GEO", lab("geopolitica")),
         None,
         ("STATUS", f"{status_emoji} {status}"),
         None,
@@ -3383,23 +3424,37 @@ class NewsCollector:
         self.interpreter = interpreter or RuleInterpreter()
         self.max_age = timedelta(hours=max_age_hours)
         self.errors: dict[str, str] = {}
+        self.health: list = []   # news_engine.FeedHealth por feed (fonte, atualização, notícias, válidas, descartadas, erro)
 
     def collect(self, now: Optional[datetime] = None) -> list[NewsItem]:
+
         now = now or datetime.now(timezone.utc)
         out: list[NewsItem] = []
         seen: set[str] = set()
+        self.health = []
+        self.errors = {}
         for url in self.feeds:
+            source = url.split("/")[2]
             try:
-                items = parse_rss(self.http.get_text(url, ttl=300), source=url.split("/")[2])
+                items = parse_rss(self.http.get_text(url, ttl=300), source=source)
             except Exception as e:  # noqa: BLE001 - isolar falha por feed
                 self.errors[url] = str(e)
+                self.health.append(FeedHealth(source, False, str(e)))
                 continue
+            valid = discarded = 0
+            last = None
             for it in items:
+                last = it.time if last is None or it.time > last else last
                 key = it.headline.lower()[:80]
                 if key in seen or now - it.time > self.max_age:
+                    discarded += 1
                     continue
                 seen.add(key)
                 out.append(self.interpreter.interpret(it))
+                valid += 1
+            self.health.append(FeedHealth(source, True, "", len(items), valid, discarded, last))
+            if not items:
+                self.health[-1].ok, self.health[-1].error = False, "feed vazio ou não parseável"
         out.sort(key=lambda n: n.time, reverse=True)
         return out
 
@@ -3485,6 +3540,7 @@ class DataEngineConfig:
     enable_fred: bool = True
     enable_cot: bool = True
     enable_news: bool = True
+    market_symbol: str = "XAUUSD"     # mercado para o NEWS ENGINE no modo de mercado único
 
 
 class DataEngine:
@@ -3593,9 +3649,14 @@ class DataEngine:
         def cot() -> None:
             if not self.cfg.enable_cot:
                 return
-            r = self.cftc.gold()
-            s.cot_managed_money_net, s.cot_managed_money_net_change = r.managed_money_net, r.managed_money_net_change
-            s.cot_managed_money_percentile, s.cot_commercial_net_change = r.managed_money_percentile, r.commercial_net_change
+            data = self.cot_with_cache("088691", now)
+            if data is None:
+                raise RuntimeError("COT indisponível e sem cache")
+            s.cot_managed_money_net, s.cot_managed_money_net_change = data["net"], data["change"]
+            s.cot_managed_money_percentile, s.cot_commercial_net_change = data["percentile"], data["commercial_change"]
+            s.cot_age_days, s.cot_report_date = data["age_days"], data["report_date"]
+            if data.get("from_cache"):
+                raise RuntimeError(f"usando último COT válido ({data['report_date']}, {data['age_days']:.0f} dias)")
         self._try("cot", cot)
 
         def news() -> None:
@@ -3615,7 +3676,48 @@ class DataEngine:
                 s.events += load_calendar(self.cfg.calendar_path)
         self._try("calendar", calendar)
 
+        def news_engine() -> None:
+            if not self.cfg.enable_news:
+                return
+            identified = EventIdentifier().identify(s.news, s.events, now)
+            na = NewsEngine().assess(self.cfg.market_symbol, s, identified, now)
+            s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
+            if not identified:
+                raise RuntimeError("nenhum evento identificado → NEWS UNKNOWN (peso reduzido, não negativo)")
+        self._try("news_engine", news_engine)
+
         return s
+
+    # ------------------------------------------------------------------ COT: último dado válido conhecido + idade
+    def _cot_cache_path(self) -> Optional[str]:
+        return os.path.join(self.cfg.cache_dir, "cot_last_valid.json") if self.cfg.cache_dir else None
+
+    def cot_with_cache(self, code: str, now: datetime) -> Optional[dict]:
+        path = self._cot_cache_path()
+        cache: dict = {}
+        if path and os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    cache = json.load(f)
+            except Exception:  # noqa: BLE001
+                cache = {}
+        try:
+            r = self.cftc.gold(code=code)
+            data = {"net": r.managed_money_net, "change": r.managed_money_net_change, "percentile": r.managed_money_percentile,
+                    "commercial_change": r.commercial_net_change, "report_date": r.report_date.isoformat()}
+            cache[code] = data
+            if path:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(cache, f)
+            data = dict(data); data["from_cache"] = False
+        except Exception:  # noqa: BLE001
+            if code not in cache:
+                return None
+            data = dict(cache[code]); data["from_cache"] = True
+        rd = datetime.fromisoformat(data["report_date"]).replace(tzinfo=timezone.utc)
+        data["age_days"] = round((now - rd).total_seconds() / 86400, 1)
+        return data
 
     def coverage(self) -> str:
         ok = [k for k, v in self.status.items() if v == "ok"]
@@ -3623,6 +3725,8 @@ class DataEngine:
         lines = [f"DATA ENGINE — fontes ok: {', '.join(ok) or 'nenhuma'}"]
         for k, v in bad.items():
             lines.append(f"  ✗ {k}: {v}")
+        if self.cfg.enable_news:
+            lines.append(render_feed_health(self.news.health))
         return "\n".join(lines)
 
 
@@ -4767,27 +4871,27 @@ GOLD_SIGNS = {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitic
 MARKETS: dict[str, MarketSpec] = {
     "XAUUSD": MarketSpec("XAUUSD", "GC=F", "XAUUSD", 100.0, 100.0, GOLD_SIGNS, {"USD_SHORT": 0.6, "SAFE_HAVEN": 0.8}, "088691", 0.30),
     "EURUSD": MarketSpec("EURUSD", "EURUSD=X", "EURUSD", 100000.0, 100000.0,
-                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 1, "tecnico": 1},
                          {"USD_SHORT": 1.0, "RISK_ON": 0.3}, "099741", 0.00008),
     "US500": MarketSpec("US500", "ES=F", "US500", 1.0, 1.0,
-                        {"dolar": 0, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                        {"dolar": 0, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 1, "tecnico": 1},
                         {"RISK_ON": 1.0}, "13874A", 0.4, session_hours_utc=(13, 21)),
     "USDJPY": MarketSpec("USDJPY", "JPY=X", "USDJPY", 100000.0, 680.0,   # ≈ 100000 / 147 USD por 1.0 de preço
-                         {"dolar": -1, "juros_reais": -1, "fed": -1, "inflacao": -1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"dolar": -1, "juros_reais": -1, "fed": -1, "inflacao": -1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 1, "tecnico": 1},
                          {"USD_SHORT": -1.0, "RISK_ON": 0.5}, "097741", 0.012),
     "WTI": MarketSpec("WTI", "CL=F", "XTIUSD", 1000.0, 1000.0,
-                      {"dolar": 1, "juros_reais": 0, "fed": 1, "inflacao": 0, "geopolitica": 1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                      {"dolar": 1, "juros_reais": 0, "fed": 1, "inflacao": 0, "geopolitica": 1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 1, "tecnico": 1},
                       {"OIL": 1.0, "USD_SHORT": 0.3, "RISK_ON": 0.3}, "067651", 0.03),
     # FASE 2
     "NAS100": MarketSpec("NAS100", "NQ=F", "NAS100", 1.0, 1.0,
-                         {"dolar": 0, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"dolar": 0, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 1, "tecnico": 1},
                          {"RISK_ON": 1.0}, None, 1.5, session_hours_utc=(13, 21), phase=2),
     "GBPUSD": MarketSpec("GBPUSD", "GBPUSD=X", "GBPUSD", 100000.0, 100000.0,
-                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 1, "geopolitica": -1, "fluxo": 1, "cot": 1, "opcoes": 0, "sentimento": 1, "tecnico": 1},
                          {"USD_SHORT": 1.0, "RISK_ON": 0.4}, "096742", 0.00012, phase=2),
     # FASE 3 (não provar volatilidade como falso edge antes de generalizar)
     "BTCUSD": MarketSpec("BTCUSD", "BTC-USD", "BTCUSD", 1.0, 1.0,
-                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 0, "geopolitica": 0, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 0, "tecnico": 1},
+                         {"dolar": 1, "juros_reais": 1, "fed": 1, "inflacao": 0, "geopolitica": 0, "fluxo": 1, "cot": 0, "opcoes": 0, "sentimento": 1, "tecnico": 1},
                          {"RISK_ON": 1.0, "USD_SHORT": 0.3}, None, 30.0, phase=3),
 }
 
@@ -4815,6 +4919,245 @@ def get_market(symbol: str) -> MarketSpec:
         return MARKETS[symbol.upper()]
     except KeyError as e:
         raise KeyError(f"mercado desconhecido: {symbol} (disponíveis: {', '.join(MARKETS)})") from e
+
+
+# ============================================================================
+# NEWS_ENGINE
+# ============================================================================
+
+"""NEWS ENGINE — entrada central do cérebro (MARKET AI 4.0).
+
+NEWS → EVENT IDENTIFIER → IMPORTÂNCIA → EXPECTATIVA → SURPRESA → DIREÇÃO ESPERADA (por mercado, via canais
+de transmissão) → REAÇÃO REAL (mercado + canais) → DIVERGÊNCIA → PRESSÃO LATENTE → MARKET AI SCORE.
+
+Conceito: NEWS ausente = UNKNOWN (peso reduzido, nunca negativo). NEWS favorável ↑ score, contrária ↓ score.
+"""
+
+
+
+
+# Canais de transmissão de cada tipo de evento quando o RESULTADO SUPERA a expectativa (+1 = canal sobe).
+# Canais: yields (juros nominais/reais), dollar (DXY), risk (apetite a risco), oil (petróleo), safe_haven (refúgio).
+TRANSMISSION: dict[str, dict[str, float]] = {
+    "cpi":         {"yields": +1.0, "dollar": +0.8, "risk": -0.6},
+    "core_cpi":    {"yields": +1.0, "dollar": +0.8, "risk": -0.6},
+    "pce":         {"yields": +0.9, "dollar": +0.7, "risk": -0.5},
+    "core_pce":    {"yields": +0.9, "dollar": +0.7, "risk": -0.5},
+    "nfp":         {"yields": +0.8, "dollar": +0.7, "risk": +0.3},
+    "earnings":    {"yields": +0.6, "dollar": +0.5, "risk": -0.2},
+    "unemployment": {"yields": -0.7, "dollar": -0.6, "risk": -0.4},   # desemprego acima → economia fraca
+    "jobless_claims": {"yields": -0.5, "dollar": -0.4, "risk": -0.3},
+    "gdp":         {"yields": +0.5, "dollar": +0.4, "risk": +0.5},
+    "ism":         {"yields": +0.5, "dollar": +0.4, "risk": +0.5},
+    "pmi":         {"yields": +0.4, "dollar": +0.3, "risk": +0.5},
+    "retail_sales": {"yields": +0.5, "dollar": +0.4, "risk": +0.4},
+    "jolts":       {"yields": +0.4, "dollar": +0.3, "risk": +0.2},
+    "consumer_confidence": {"yields": +0.2, "dollar": +0.2, "risk": +0.4},
+    "michigan":    {"yields": +0.2, "dollar": +0.2, "risk": +0.3},
+    "housing":     {"yields": +0.2, "dollar": +0.1, "risk": +0.2},
+    "fomc_hawkish": {"yields": +1.0, "dollar": +0.9, "risk": -0.7},
+    "fomc_dovish": {"yields": -1.0, "dollar": -0.9, "risk": +0.7},
+    "geopolitical_escalation": {"yields": -0.3, "dollar": +0.5, "risk": -0.9, "oil": +0.7, "safe_haven": +1.0},
+    "geopolitical_deescalation": {"yields": +0.2, "dollar": -0.3, "risk": +0.7, "oil": -0.5, "safe_haven": -0.8},
+    "systemic_stress": {"yields": -0.8, "dollar": +0.4, "risk": -1.0, "safe_haven": +0.8},
+    "oil_supply_cut": {"oil": +1.0, "yields": +0.2, "risk": -0.2},
+    "oil_supply_increase": {"oil": -1.0, "risk": +0.1},
+    "cb_gold_buying": {"safe_haven": +0.6},
+    "china_stimulus": {"risk": +0.6, "oil": +0.4, "dollar": -0.2},
+}
+
+# Como cada canal afeta cada mercado (+1 = mercado sobe quando o canal sobe).
+CHANNEL_TO_MARKET: dict[str, dict[str, float]] = {
+    "XAUUSD": {"yields": -1.0, "dollar": -0.8, "risk": -0.2, "safe_haven": +1.0, "oil": +0.1},
+    "EURUSD": {"yields": -0.6, "dollar": -1.0, "risk": +0.3},
+    "GBPUSD": {"yields": -0.6, "dollar": -1.0, "risk": +0.4},
+    "US500":  {"yields": -0.7, "dollar": -0.2, "risk": +1.0, "safe_haven": -0.3},
+    "NAS100": {"yields": -0.9, "dollar": -0.2, "risk": +1.0, "safe_haven": -0.3},
+    "USDJPY": {"yields": +1.0, "dollar": +1.0, "risk": +0.5, "safe_haven": -0.6},
+    "WTI":    {"oil": +1.0, "dollar": -0.4, "risk": +0.4},
+    "BTCUSD": {"yields": -0.6, "dollar": -0.4, "risk": +1.0},
+}
+
+IMPORTANCE = {"MUITO ALTO": 1.0, "ALTO": 0.8, "MÉDIO": 0.5, "BAIXO": 0.25}
+
+
+@dataclass
+class IdentifiedEvent:
+    kind: str
+    name: str
+    time: datetime
+    importance: float                 # 0..1
+    expectation: Optional[float]      # consenso
+    actual: Optional[float]
+    surprise_sigma: Optional[float]   # surpresa normalizada (unidades de "desvio típico")
+    direction_sign: float             # +1 resultado acima / evento "positivo" no canal; −1 abaixo; 0 neutro
+    source: str = ""
+    priced_in: float = 0.0
+    headline: str = ""
+
+    def age_min(self, now: datetime) -> float:
+        return max(0.0, (now - self.time).total_seconds() / 60)
+
+
+TYPICAL_SURPRISE = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "nfp": 60.0, "unemployment": 0.1, "earnings": 0.1, "gdp": 0.5,
+                    "ism": 1.5, "pmi": 1.0, "retail_sales": 0.4, "jolts": 300.0, "jobless_claims": 15.0, "consumer_confidence": 3.0, "michigan": 2.0, "housing": 5.0}
+
+QUALITATIVE = [
+    (r"\b(hawkish|higher for longer|rate hike|hikes? rates?|tightening)\b", "fomc_hawkish", 0.8),
+    (r"\b(dovish|rate cut|cuts? rates?|easing|pause)\b", "fomc_dovish", 0.8),
+    (r"\b(war|missile|strike|attack|invasion|escalat\w*|sanction|nuclear|troops)\b", "geopolitical_escalation", 0.7),
+    (r"\b(ceasefire|peace (deal|talks)|de-?escalat\w*|truce)\b", "geopolitical_deescalation", 0.6),
+    (r"\b(bank (run|collapse|failure|rescue)|default|contagion|liquidity crisis|credit (stress|crunch)|bailout)\b", "systemic_stress", 0.8),
+    (r"\b(opec\+? (cut|cuts)|supply (cut|disruption)|pipeline (attack|outage)|production cut)\b", "oil_supply_cut", 0.6),
+    (r"\b(opec\+? (raise|increase|hike)|output increase|production increase|supply glut)\b", "oil_supply_increase", 0.6),
+    (r"\b(pboc|central bank(s)? (buy|purchase|add)|reserves? (rise|increase))\w*", "cb_gold_buying", 0.5),
+    (r"\b(china (stimulus|easing|cuts? rrr))\b", "china_stimulus", 0.5),
+]
+
+
+class EventIdentifier:
+    """Transforma notícias/eventos em eventos identificados com importância, expectativa e surpresa."""
+
+    def identify(self, news: Sequence[NewsItem], events: Sequence[EconomicEvent], now: datetime, max_age_hours: float = 12.0) -> list[IdentifiedEvent]:
+        out: list[IdentifiedEvent] = []
+        seen: set[str] = set()
+        for e in events:
+            if e.actual is None or now - e.time > timedelta(hours=max_age_hours) or e.time > now:
+                continue
+            sp = e.surprise()
+            typical = TYPICAL_SURPRISE.get(e.kind, max(abs(e.consensus or 1.0) * 0.1, 0.1))
+            sigma = (sp / typical) if sp is not None and typical else None
+            key = f"{e.kind}:{e.time:%Y%m%d%H}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(IdentifiedEvent(e.kind, e.name, e.time, IMPORTANCE.get(e.impact, 0.6), e.consensus, e.actual, sigma,
+                                       0.0 if sigma is None else (1.0 if sigma > 0 else -1.0 if sigma < 0 else 0.0), "calendário/release"))
+        for n in news:
+            if now - n.time > timedelta(hours=max_age_hours) or n.time > now:
+                continue
+            text = n.headline.lower()
+            for pattern, kind, imp in QUALITATIVE:
+                if re.search(pattern, text):
+                    key = f"{kind}:{n.headline[:40].lower()}"
+                    if key in seen:
+                        break
+                    seen.add(key)
+                    out.append(IdentifiedEvent(kind, n.headline[:80], n.time, imp, None, None, None, 1.0, n.source, n.priced_in, n.headline))
+                    break
+        return sorted(out, key=lambda e: e.time, reverse=True)
+
+
+def expected_direction(ev: IdentifiedEvent, market: str) -> tuple[float, dict[str, float]]:
+    """Direção esperada (−1..+1) do mercado dado o evento, via canais de transmissão; devolve também os canais."""
+    chans = TRANSMISSION.get(ev.kind, {})
+    sign = ev.direction_sign if ev.direction_sign else 0.0
+    if not chans or sign == 0.0:
+        return 0.0, {}
+    # magnitude: surpresa normalizada saturada (releases) ou 1 (qualitativos)
+    mag = min(1.0, abs(ev.surprise_sigma) / 2.0) if ev.surprise_sigma is not None else 1.0
+    channel_moves = {c: sign * v * mag for c, v in chans.items()}
+    weights = CHANNEL_TO_MARKET.get(market, {})
+    total = sum(channel_moves.get(c, 0.0) * w for c, w in weights.items())
+    norm = sum(abs(w) for c, w in weights.items() if c in channel_moves) or 1.0
+    return max(-1.0, min(1.0, total / norm)), channel_moves
+
+
+@dataclass
+class NewsAssessment:
+    market: str
+    status: str                        # UNKNOWN | FAVORÁVEL | CONTRÁRIO | NEUTRO
+    pressure: Optional[float]          # −1..+1 (None = UNKNOWN)
+    expected: float = 0.0              # direção esperada agregada
+    reaction: str = ""                 # CONFIRMAÇÃO | DIVERGÊNCIA | SEM REAÇÃO | n/d
+    channels: dict[str, str] = field(default_factory=dict)
+    drivers: list[str] = field(default_factory=list)
+    chain: str = ""
+
+
+class NewsEngine:
+    def __init__(self, half_life_min: float = 180.0) -> None:
+        self.identifier = EventIdentifier()
+        self.half_life_min = half_life_min
+
+    def assess(self, market: str, s: MarketSnapshot, events: Sequence[IdentifiedEvent], now: datetime) -> NewsAssessment:
+        if not events:
+            return NewsAssessment(market, "UNKNOWN", None, 0.0, "n/d", {}, [], "NEWS: UNKNOWN — sem notícias/eventos identificados na janela (peso reduzido, não negativo)")
+        total, wsum = 0.0, 0.0
+        drivers: list[str] = []
+        for ev in events:
+            exp, chans = expected_direction(ev, market)
+            if exp == 0.0:
+                continue
+            fresh = 0.5 ** (ev.age_min(now) / self.half_life_min)
+            w = ev.importance * fresh * (1.0 - ev.priced_in)
+            total += exp * w
+            wsum += w
+            arrow = "↑" if exp > 0 else "↓"
+            sp = f" surpresa {ev.surprise_sigma:+.1f}σ" if ev.surprise_sigma is not None else ""
+            drivers.append(f"{ev.name}{sp} → {market} {arrow} ({exp:+.2f}, imp {ev.importance:.1f}, {ev.age_min(now):.0f} min)")
+        if wsum == 0.0:
+            return NewsAssessment(market, "NEUTRO", 0.0, 0.0, "n/d", {}, drivers, f"NEWS: NEUTRO — eventos sem canal de transmissão para {market}")
+        expected = max(-1.0, min(1.0, total / wsum))
+        # reação real: mercado e canais
+        def react(x: Optional[float], thr: float) -> Optional[float]:
+            return None if x is None else (1.0 if x > thr else -1.0 if x < -thr else 0.0)
+        mkt = react(s.price_change_pct, 0.12)
+        chans = {"US10Y": react(s.us10y_change_bp, 1.5), "DXY": react(s.dxy_change_pct, 0.08)}
+        exp_sign = 1.0 if expected > 0 else -1.0
+        # canais esperados: sinal do canal 'yields'/'dollar' agregado
+        exp_ch = {"US10Y": 0.0, "DXY": 0.0}
+        for ev in events:
+            _, cm = expected_direction(ev, market)
+            exp_ch["US10Y"] += cm.get("yields", 0.0)
+            exp_ch["DXY"] += cm.get("dollar", 0.0)
+        ch_status = {}
+        for k, v in chans.items():
+            e = exp_ch[k]
+            ch_status[k] = "n/d" if v is None else ("sem reação" if v == 0 else ("confirma" if (e == 0 or (v > 0) == (e > 0)) else "diverge"))
+        if mkt is None:
+            reaction = "n/d"
+        elif mkt == 0:
+            reaction = "SEM REAÇÃO"
+        elif (mkt > 0) == (exp_sign > 0):
+            reaction = "CONFIRMAÇÃO"
+        else:
+            reaction = "DIVERGÊNCIA"
+        # pressão latente: canais confirmam e o mercado ainda não reagiu (ou diverge) → pressão na direção esperada
+        channels_confirm = any(v == "confirma" for v in ch_status.values())
+        if reaction in ("SEM REAÇÃO", "DIVERGÊNCIA", "n/d"):
+            pressure = expected * (1.0 if channels_confirm else 0.7)
+            note = "PRESSÃO LATENTE: canais " + ("confirmam" if channels_confirm else "ainda não confirmam") + f" e {market} {'não reagiu' if reaction != 'DIVERGÊNCIA' else 'diverge'}"
+        else:
+            pressure = expected * 0.5   # já reagiu: parte do efeito consumida
+            note = f"{market} já reagiu na direção esperada (efeito parcialmente consumido)"
+        status = "FAVORÁVEL" if pressure > 0.15 else "CONTRÁRIO" if pressure < -0.15 else "NEUTRO"
+        chain = "\n".join([f"NEWS → {market}: {status} (pressão {pressure:+.2f}, esperado {expected:+.2f})"] + [f"  • {d}" for d in drivers[:5]] +
+                          [f"  reação real: {market} {reaction} · " + " · ".join(f"{k} {v}" for k, v in ch_status.items()), f"  {note}"])
+        return NewsAssessment(market, status, round(pressure, 3), round(expected, 3), reaction, ch_status, drivers, chain)
+
+
+@dataclass
+class FeedHealth:
+    source: str
+    ok: bool
+    error: str = ""
+    n_items: int = 0
+    n_valid: int = 0
+    n_discarded: int = 0
+    last_update: Optional[datetime] = None
+
+    def row(self) -> str:
+        upd = self.last_update.strftime("%d/%m %H:%M") if self.last_update else "n/d"
+        st = "✅" if self.ok else "✗"
+        return f"  {st} {self.source:<32} atualização {upd:<12} notícias {self.n_items:>4} válidas {self.n_valid:>4} descartadas {self.n_discarded:>4}" + (f"  {self.error[:60]}" if self.error else "")
+
+
+def render_feed_health(rows: Sequence[FeedHealth]) -> str:
+    if not rows:
+        return "📰 NEWS: nenhum feed configurado"
+    ok = sum(1 for r in rows if r.ok)
+    return "\n".join([f"📰 NEWS FEEDS: {ok}/{len(rows)} ok"] + [r.row() for r in rows])
 
 
 # ============================================================================
@@ -7347,7 +7690,7 @@ MACRO_FIELDS = ("dxy", "dxy_change_pct", "us2y", "us10y", "us10y_change_bp", "re
 
 
 def derive_market_snapshot(base: MarketSnapshot, spec: MarketSpec, candles: dict, now: datetime, window_minutes: int = 60,
-                           cot: Optional[dict] = None) -> MarketSnapshot:
+                           cot: Optional[dict] = None, identified=None) -> MarketSnapshot:
     """Snapshot do mercado: macro compartilhada + candles/preço/ATR/fluxo próprios."""
     s = MarketSnapshot(time=now)
     for f in MACRO_FIELDS:
@@ -7373,6 +7716,13 @@ def derive_market_snapshot(base: MarketSnapshot, spec: MarketSpec, candles: dict
     elif cot:
         s.cot_managed_money_net, s.cot_managed_money_net_change = cot.get("net"), cot.get("change")
         s.cot_managed_money_percentile, s.cot_commercial_net_change = cot.get("percentile"), cot.get("commercial_change")
+        s.cot_age_days, s.cot_report_date = cot.get("age_days"), cot.get("report_date")
+    if spec.symbol == "XAUUSD":
+        s.cot_age_days, s.cot_report_date = base.cot_age_days, base.cot_report_date
+    # NEWS ENGINE por mercado: identificação → importância → surpresa → direção esperada → reação → pressão latente
+    if identified is not None:
+        na = NewsEngine().assess(spec.symbol, s, identified, now)
+        s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
     return s
 
 
@@ -7419,27 +7769,30 @@ class MultiMarketData:
                 self.mt5.cfg.symbol = orig
         return self.yahoo.all_timeframes(spec.yahoo)
 
-    def market_cot(self, spec: MarketSpec) -> Optional[dict]:
+    def market_cot(self, spec: MarketSpec, now: datetime) -> Optional[dict]:
         if not spec.cftc_code or spec.symbol == "XAUUSD" or not self.engine.cfg.enable_cot:
             return None
-        try:
-            r = self.engine.cftc.gold(code=spec.cftc_code)
-            return {"net": r.managed_money_net, "change": r.managed_money_net_change, "percentile": r.managed_money_percentile, "commercial_change": r.commercial_net_change}
-        except Exception as e:  # noqa: BLE001
-            self.status[f"cot:{spec.symbol}"] = f"erro: {e}"
+        data = self.engine.cot_with_cache(spec.cftc_code, now)
+        if data is None:
+            self.status[f"cot:{spec.symbol}"] = "erro: indisponível e sem cache"
             return None
+        if data.get("from_cache"):
+            self.status[f"cot:{spec.symbol}"] = f"último válido {data['report_date']} ({data['age_days']:.0f} dias)"
+        return data
 
     def collect(self, now: Optional[datetime] = None) -> MarketSnapshotSet:
         now = now or datetime.now(timezone.utc)
         base = self.engine.collect(now)          # macro + XAU
         self.status = dict(self.engine.status)
         out = MarketSnapshotSet(now, base)
+        identified = EventIdentifier().identify(base.news, base.events, now)
+        self.identified = identified
         for spec in self.specs:
             try:
                 candles = base.candles if spec.symbol == "XAUUSD" and base.candles else self.market_candles(spec)
                 if not candles:
                     raise RuntimeError("sem candles")
-                s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec))
+                s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec, now), identified)
                 out.by_symbol[spec.symbol] = s
                 out.data_quality[spec.symbol] = data_quality(s, spec)
                 self.status[spec.symbol] = "ok"
@@ -7451,7 +7804,12 @@ class MultiMarketData:
     def coverage(self) -> str:
         ok = [k for k, v in self.status.items() if v == "ok"]
         bad = [f"  ✗ {k}: {v}" for k, v in self.status.items() if v != "ok"]
-        return "\n".join([f"MULTI-MARKET DATA — ok: {', '.join(ok) or 'nenhum'}"] + bad)
+        lines = [f"MULTI-MARKET DATA — ok: {', '.join(ok) or 'nenhum'}"] + bad
+        if self.engine.cfg.enable_news:
+            lines.append(render_feed_health(self.engine.news.health))
+            n = len(getattr(self, "identified", []))
+            lines.append(f"NEWS ENGINE: {n} evento(s) identificado(s) na janela" + ("" if n else " → NEWS = UNKNOWN em todos os mercados (peso reduzido, não negativo)"))
+        return "\n".join(lines)
 
 
 # ============================================================================

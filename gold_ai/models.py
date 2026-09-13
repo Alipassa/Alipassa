@@ -154,6 +154,13 @@ class MarketSnapshot:
     # Sentimento (§12)
     sentiment: Optional[float] = None       # -1..+1
     sentiment_change: Optional[float] = None
+    # NEWS ENGINE (4.0): pressão específica do mercado; None = UNKNOWN (peso reduzido, nunca negativo)
+    news_pressure: Optional[float] = None   # -1..+1
+    news_status: str = "UNKNOWN"            # UNKNOWN | FAVORÁVEL | CONTRÁRIO | NEUTRO
+    news_chain: str = ""
+    # COT: último dado válido conhecido + idade (semanal; o peso decai com a idade)
+    cot_age_days: Optional[float] = None
+    cot_report_date: Optional[str] = None
 
     # Correlatos (§3)
     silver_change_pct: Optional[float] = None

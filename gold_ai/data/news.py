@@ -136,23 +136,38 @@ class NewsCollector:
         self.interpreter = interpreter or RuleInterpreter()
         self.max_age = timedelta(hours=max_age_hours)
         self.errors: dict[str, str] = {}
+        self.health: list = []   # news_engine.FeedHealth por feed (fonte, atualização, notícias, válidas, descartadas, erro)
 
     def collect(self, now: Optional[datetime] = None) -> list[NewsItem]:
+        from ..news_engine import FeedHealth
+
         now = now or datetime.now(timezone.utc)
         out: list[NewsItem] = []
         seen: set[str] = set()
+        self.health = []
+        self.errors = {}
         for url in self.feeds:
+            source = url.split("/")[2]
             try:
-                items = parse_rss(self.http.get_text(url, ttl=300), source=url.split("/")[2])
+                items = parse_rss(self.http.get_text(url, ttl=300), source=source)
             except Exception as e:  # noqa: BLE001 - isolar falha por feed
                 self.errors[url] = str(e)
+                self.health.append(FeedHealth(source, False, str(e)))
                 continue
+            valid = discarded = 0
+            last = None
             for it in items:
+                last = it.time if last is None or it.time > last else last
                 key = it.headline.lower()[:80]
                 if key in seen or now - it.time > self.max_age:
+                    discarded += 1
                     continue
                 seen.add(key)
                 out.append(self.interpreter.interpret(it))
+                valid += 1
+            self.health.append(FeedHealth(source, True, "", len(items), valid, discarded, last))
+            if not items:
+                self.health[-1].ok, self.health[-1].error = False, "feed vazio ou não parseável"
         out.sort(key=lambda n: n.time, reverse=True)
         return out
 
