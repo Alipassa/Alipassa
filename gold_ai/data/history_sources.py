@@ -111,10 +111,10 @@ class ALFREDImporter:
         self.validate_key()
         hist = EventHistory()
         for sid in series or list(ALFRED_SERIES):
-            key = f"alfred:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
+            key = f"alfred:v2:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
             if progress is not None and progress.has(key):
                 continue
-            obs_start = start - timedelta(days=120)
+            obs_start = start - timedelta(days=400)     # trimestral (PIB) precisa do trimestre anterior; mensal ganha folga
             url = (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
                    f"&realtime_start={start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
             try:
@@ -139,13 +139,17 @@ class ALFREDImporter:
     @staticmethod
     def parse(sid: str, observations: list[dict], start: date) -> EventHistory:
         name, kind, transform = ALFRED_SERIES.get(sid, (sid, "generic", "level"))
-        # vintage = realtime_start; para cada vintage, série completa (date → value)
-        vintages: dict[str, dict[str, float]] = {}
+        # O FRED devolve UMA linha por (data, valor) cobrindo o intervalo realtime_start..realtime_end em que aquele valor
+        # vigorou. Reconstruímos a série COMPLETA de cada vintage: valor de d na vintage V = linha com rs ≤ V ≤ re.
+        rows = []
         for o in observations:
             v = _num(o.get("value"))
             if v is None:
                 continue
-            vintages.setdefault(o["realtime_start"], {})[o["date"]] = v
+            rows.append((o["date"], o["realtime_start"], o.get("realtime_end") or "9999-12-31", v))
+        vintages: dict[str, dict[str, float]] = {}
+        for vint in sorted({rs for _, rs, _, _ in rows}):
+            vintages[vint] = {d: v for d, rs, re_, v in rows if rs <= vint <= re_}
         first_seen: dict[str, tuple[str, float]] = {}      # data da observação → (vintage inicial, valor transformado)
         out: list[HistoricalEvent] = []
         for vint in sorted(vintages):

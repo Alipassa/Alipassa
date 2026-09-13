@@ -5697,10 +5697,10 @@ class ALFREDImporter:
         self.validate_key()
         hist = EventHistory()
         for sid in series or list(ALFRED_SERIES):
-            key = f"alfred:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
+            key = f"alfred:v2:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
             if progress is not None and progress.has(key):
                 continue
-            obs_start = start - timedelta(days=120)
+            obs_start = start - timedelta(days=400)     # trimestral (PIB) precisa do trimestre anterior; mensal ganha folga
             url = (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
                    f"&realtime_start={start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
             try:
@@ -5725,13 +5725,17 @@ class ALFREDImporter:
     @staticmethod
     def parse(sid: str, observations: list[dict], start: date) -> EventHistory:
         name, kind, transform = ALFRED_SERIES.get(sid, (sid, "generic", "level"))
-        # vintage = realtime_start; para cada vintage, série completa (date → value)
-        vintages: dict[str, dict[str, float]] = {}
+        # O FRED devolve UMA linha por (data, valor) cobrindo o intervalo realtime_start..realtime_end em que aquele valor
+        # vigorou. Reconstruímos a série COMPLETA de cada vintage: valor de d na vintage V = linha com rs ≤ V ≤ re.
+        rows = []
         for o in observations:
             v = _num(o.get("value"))
             if v is None:
                 continue
-            vintages.setdefault(o["realtime_start"], {})[o["date"]] = v
+            rows.append((o["date"], o["realtime_start"], o.get("realtime_end") or "9999-12-31", v))
+        vintages: dict[str, dict[str, float]] = {}
+        for vint in sorted({rs for _, rs, _, _ in rows}):
+            vintages[vint] = {d: v for d, rs, re_, v in rows if rs <= vint <= re_}
         first_seen: dict[str, tuple[str, float]] = {}      # data da observação → (vintage inicial, valor transformado)
         out: list[HistoricalEvent] = []
         for vint in sorted(vintages):
@@ -9194,6 +9198,12 @@ def cmd_history(args: argparse.Namespace) -> int:
                 print(f"janelas com falha ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
                       "; ".join(f"{t} {w}" for t, w, _ in imp.failed))
         print(f"{args.action}: {len(new)} registros novos ({new.stats()})")
+        if args.action in ("fetch-te", "fetch-alfred") and len(new):
+            src = "tradingeconomics" if args.action == "fetch-te" else "alfred"
+            old = [e for e in hist.events if e.source == src]
+            if old:
+                print(f"substituindo {len(old)} registros anteriores da fonte {src} (reimportação é a versão definitiva)")
+            hist = EventHistory([e for e in hist.events if e.source != src])
         hist = merge(hist, new)
         apply_rule_effects(hist)
         n = save_history(hist, path)
@@ -9202,6 +9212,17 @@ def cmd_history(args: argparse.Namespace) -> int:
     if not exists:
         print(f"{path} não existe — use `history template` ou um fetch-*")
         return 1
+    if args.action == "list":
+        rows = [e for e in hist.events if (not args.kind or e.kind == args.kind) and (not args.category or e.category == args.category)]
+        rows = [e for e in rows if start <= e.timestamp.date() <= end]
+        print(f"{'evento (UTC)':<17}{'publicado':<17}{'tipo':<14}{'evento':<34}{'anterior':>9}{'consenso':>9}{'real':>8}{'surpresa':>9}  efeito XAU/US500/USDJPY")
+        for e in rows[-args.limit:]:
+            fmt = lambda v: "" if v is None else f"{v:g}"  # noqa: E731
+            eff = "/".join("" if e.effect(m) is None else f"{e.effect(m):+.2f}" for m in ("XAUUSD", "US500", "USDJPY"))
+            print(f"{e.timestamp:%Y-%m-%d %H:%M}  {e.published_at:%Y-%m-%d %H:%M}  {e.kind:<14}{(e.headline or e.event)[:33]:<34}{fmt(e.previous):>9}{fmt(e.forecast):>9}"
+                  f"{fmt(e.actual):>8}{fmt(e.surprise):>9}  {eff}")
+        print(f"{len(rows)} registros" + (f" (últimos {args.limit})" if len(rows) > args.limit else ""))
+        return 0
     if args.action == "rules":
         n = apply_rule_effects(hist)
         save_history(hist, path)
@@ -9669,8 +9690,11 @@ def main(argv: list[str] | None = None) -> int:
     sw.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     sw.set_defaults(func=cmd_sweep)
 
-    hi = sub.add_parser("history", help="BANCO HISTÓRICO de eventos/notícias point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats")
-    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats"])
+    hi = sub.add_parser("history", help="BANCO HISTÓRICO de eventos/notícias point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats | list")
+    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list"])
+    hi.add_argument("--kind", default=None, help="list: cpi, core_cpi, nfp, unemployment, jobless_claims, gdp, ppi, retail_sales, earnings, core_pce…")
+    hi.add_argument("--category", default=None, help="list: MACRO, CENTRAL_BANK, GEOPOLITICAL, ENERGY, CHINA, NEWS")
+    hi.add_argument("--limit", type=int, default=40)
     hi.add_argument("--file", default=os.path.join("dados", "noticias_historicas.csv"))
     hi.add_argument("--start", default="2026-01-01")
     hi.add_argument("--end", default=None)

@@ -148,6 +148,22 @@ class ImporterTests(unittest.TestCase):
         later = [e for e in pit.available_at(datetime(2026, 2, 12, tzinfo=UTC), 24 * 40) if e.event_id.endswith("2025-12-01")]
         self.assertAlmostEqual(later[0].actual, 0.3)
 
+    def test_alfred_rows_span_vintages_when_value_unchanged(self):
+        # formato real do FRED: o valor de novembro não mudou entre as vintages, então vem numa linha só (rs 14/01 → re 9999)
+        obs = [
+            {"realtime_start": "2026-01-14", "realtime_end": "9999-12-31", "date": "2025-11-01", "value": "320.0"},
+            {"realtime_start": "2026-01-14", "realtime_end": "9999-12-31", "date": "2025-12-01", "value": "321.28"},
+            {"realtime_start": "2026-02-11", "realtime_end": "9999-12-31", "date": "2026-01-01", "value": "322.24"},
+            {"realtime_start": "2026-03-11", "realtime_end": "9999-12-31", "date": "2026-02-01", "value": "323.53"},
+        ]
+        h = ALFREDImporter(FakeHttp({"CPIAUCSL": {"observations": obs}}), KEY).fetch(date(2026, 1, 1), date(2026, 4, 1), ["CPIAUCSL"])
+        ids = sorted(e.event_id for e in h.events)
+        self.assertEqual(ids, ["ALFRED_CPIAUCSL_2025-12-01", "ALFRED_CPIAUCSL_2026-01-01", "ALFRED_CPIAUCSL_2026-02-01"])   # uma publicação por mês
+        jan = next(e for e in h.events if e.event_id.endswith("2026-01-01"))
+        self.assertAlmostEqual(jan.actual, 0.3)                    # 322.24/321.28 − 1, com o mês anterior herdado da vintage anterior
+        self.assertEqual(jan.published_at.date(), date(2026, 2, 11))
+        self.assertAlmostEqual(jan.previous, 0.4)
+
     def test_gdelt_headlines_tone_volume(self):
         arts = {"articles": [{"title": "Missile strike escalates Middle East conflict", "seendate": "20260114T140000Z", "domain": "x.com"},
                              {"title": "Missile strike escalates Middle East conflict", "seendate": "20260114T141500Z", "domain": "y.com"},   # duplicada
