@@ -89,7 +89,16 @@ class MT5Client:
         if self.cfg.login:
             kwargs.update(login=self.cfg.login, password=self.cfg.password, server=self.cfg.server)
         if not self.mt5.initialize(**kwargs):
-            raise MT5Error(f"initialize falhou: {self.mt5.last_error()}")
+            err = self.mt5.last_error()
+            code = err[0] if isinstance(err, (tuple, list)) and err else None
+            hints = {
+                -6: "Authorization failed: o terminal abriu mas não há conta autorizada. Abra o terminal da corretora, faça login na conta (demo ou real) e "
+                    "deixe-o aberto; ou defina MT5_LOGIN, MT5_PASSWORD e MT5_SERVER no .env (ex.: MT5_SERVER=Pepperstone-Demo).",
+                -10003: "IPC initialize failed: caminho do terminal64.exe incorreto em MT5_PATH ou terminal de outro usuário do Windows.",
+                -10004: "IPC timeout: o terminal demorou a responder; abra-o manualmente e tente de novo.",
+                -2: "Invalid params: confira MT5_PATH (use barras invertidas) e MT5_LOGIN numérico.",
+            }
+            raise MT5Error(f"initialize falhou: {err}. {hints.get(code, 'Confira MT5_PATH, se o terminal está aberto e logado, e se o pacote MetaTrader5 é da mesma arquitetura (64 bits) do Python.')}")
         if not self.mt5.symbol_select(self.cfg.symbol, True):
             raise MT5Error(f"símbolo {self.cfg.symbol} indisponível: {self.mt5.last_error()}")
         self.connected = True

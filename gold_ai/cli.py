@@ -132,8 +132,15 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         if args.mt5_path:
             mcfg.path = args.mt5_path
         mt5_client = MT5Client(mcfg)
-        mt5_client.connect()
-        if mode != TradingMode.PAPER:
+        try:
+            mt5_client.connect()
+        except Exception as e:  # noqa: BLE001
+            print(f"MT5 indisponível: {e}")
+            if mode != TradingMode.PAPER:
+                return 1
+            print("modo PAPER: continuando com dados web (Yahoo) — o MT5 só é obrigatório para executar ordens")
+            mt5_client = None
+        if mt5_client is not None and mode != TradingMode.PAPER:
             from .markets import get_market
             symbol_map = MultiMarketData.symbol_map_from_env(env)
             for sym in symbols:
@@ -333,11 +340,27 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cfg_for(args: argparse.Namespace) -> EngineConfig:
+    """EngineConfig com os sinais de fator do mercado (--market); sem --market usa o cérebro do ouro."""
+    from .markets import get_market
+
+    market = getattr(args, "market", None)
+    if market:
+        spec = get_market(market)
+        if getattr(args, "symbol", None) in (None, "GC=F") and not getattr(args, "csv", None):
+            args.symbol = spec.yahoo
+        print(f"cérebro: {spec.symbol} (sinais por fator do mercado) · candles {args.symbol}")
+        return EngineConfig(factor_signs=dict(spec.factor_signs), symbol=spec.symbol)
+    print("cérebro: XAUUSD (padrão) — use --market EURUSD|US500|USDJPY|WTI para aplicar os sinais do mercado")
+    return EngineConfig()
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     from .evaluation import Backtester, walk_forward
 
+    cfg = _cfg_for(args)
     frame = _load_frame(args)
-    bt = Backtester(frame, EngineConfig(), threshold_atr=args.threshold_atr, horizon_min=args.horizon, include_watch=args.include_watch)
+    bt = Backtester(frame, cfg, threshold_atr=args.threshold_atr, horizon_min=args.horizon, include_watch=args.include_watch)
     if args.walk_forward:
         print(walk_forward(bt, n_folds=args.folds).render())
     else:
@@ -401,8 +424,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 print(f"\n{'=' * 30} {m.symbol} {'=' * 30}\n" + m.report.render())
         return 0
 
+    cfg = _cfg_for(args)
     frame = _load_frame(args)
-    rep = validate(frame, EngineConfig(), n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
+    rep = validate(frame, cfg, n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
                    horizon_min=args.horizon, mode=args.mode)
     print(rep.render())
     if args.out:
@@ -416,8 +440,9 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     """2.2 TRADE SIMULATOR sobre histórico: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy em R."""
     from .evaluation import Backtester, walk_forward
 
+    cfg = _cfg_for(args)
     frame = _load_frame(args)
-    bt = Backtester(frame, EngineConfig(), step=args.step, threshold_atr=args.threshold_atr, horizon_min=args.horizon)
+    bt = Backtester(frame, cfg, step=args.step, threshold_atr=args.threshold_atr, horizon_min=args.horizon)
     if args.walk_forward:
         wf = walk_forward(bt, n_folds=args.folds)
         print(wf.render())
@@ -595,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--dxy-csv", default=None)
     bt.add_argument("--us10y-csv", default=None)
     bt.add_argument("--symbol", default="GC=F")
+    bt.add_argument("--market", default=None, help="aplica os sinais por fator do mercado (EURUSD, US500, XAUUSD, USDJPY, WTI) e escolhe o símbolo Yahoo")
     bt.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
     bt.add_argument("--end", default=None)
     bt.add_argument("--threshold-atr", type=float, default=1.0)
@@ -616,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--dxy-csv", default=None)
     va.add_argument("--us10y-csv", default=None)
     va.add_argument("--symbol", default="GC=F")
+    va.add_argument("--market", default=None, help="aplica os sinais por fator do mercado (EURUSD, US500, XAUUSD, USDJPY, WTI) e escolhe o símbolo Yahoo")
     va.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
     va.add_argument("--end", default=None)
     va.add_argument("--folds", type=int, default=4)
@@ -634,6 +661,7 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--dxy-csv", default=None)
     si.add_argument("--us10y-csv", default=None)
     si.add_argument("--symbol", default="GC=F")
+    si.add_argument("--market", default=None, help="aplica os sinais por fator do mercado (EURUSD, US500, XAUUSD, USDJPY, WTI) e escolhe o símbolo Yahoo")
     si.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
     si.add_argument("--end", default=None)
     si.add_argument("--step", type=int, default=1)

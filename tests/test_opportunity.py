@@ -114,6 +114,10 @@ class OpportunityBacktestTests(unittest.TestCase):
         self.assertIn("Curva limiar", r.render())
         rep = validate(f, n_folds=2, step=6, warmup=230, audit_every=200)
         self.assertIn("OOS por fold", rep.render())
+        from gold_ai.evaluation import walk_forward
+        wf = walk_forward(Backtester(f, warmup=230, step=6), n_folds=2, grid=[{"buy": 40, "sell": -40, "min_confirmations": 2}])
+        self.assertIsNotNone(wf.oos_opportunity)
+        self.assertIn("OPPORTUNITY ENGINE", wf.render())   # agregado fora da amostra aparece no walk-forward
 
 
 if __name__ == "__main__":

@@ -3690,7 +3690,16 @@ class MT5Client:
         if self.cfg.login:
             kwargs.update(login=self.cfg.login, password=self.cfg.password, server=self.cfg.server)
         if not self.mt5.initialize(**kwargs):
-            raise MT5Error(f"initialize falhou: {self.mt5.last_error()}")
+            err = self.mt5.last_error()
+            code = err[0] if isinstance(err, (tuple, list)) and err else None
+            hints = {
+                -6: "Authorization failed: o terminal abriu mas não há conta autorizada. Abra o terminal da corretora, faça login na conta (demo ou real) e "
+                    "deixe-o aberto; ou defina MT5_LOGIN, MT5_PASSWORD e MT5_SERVER no .env (ex.: MT5_SERVER=Pepperstone-Demo).",
+                -10003: "IPC initialize failed: caminho do terminal64.exe incorreto em MT5_PATH ou terminal de outro usuário do Windows.",
+                -10004: "IPC timeout: o terminal demorou a responder; abra-o manualmente e tente de novo.",
+                -2: "Invalid params: confira MT5_PATH (use barras invertidas) e MT5_LOGIN numérico.",
+            }
+            raise MT5Error(f"initialize falhou: {err}. {hints.get(code, 'Confira MT5_PATH, se o terminal está aberto e logado, e se o pacote MetaTrader5 é da mesma arquitetura (64 bits) do Python.')}")
         if not self.mt5.symbol_select(self.cfg.symbol, True):
             raise MT5Error(f"símbolo {self.cfg.symbol} indisponível: {self.mt5.last_error()}")
         self.connected = True
@@ -5704,6 +5713,8 @@ class BacktestResult:
     trades: Optional[object] = None   # trading.RStats (2.2)
     trade_rows: list[dict] = field(default_factory=list)
     opportunity: Optional[object] = None  # opportunity.OpportunityReport (3.0)
+    decisions: list = field(default_factory=list)
+    entries: list = field(default_factory=list)
 
     def render(self) -> str:
         out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
@@ -5792,7 +5803,7 @@ class Backtester:
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
         return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp)
+                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries)
 
 
 @dataclass
@@ -5800,6 +5811,7 @@ class WalkForwardResult:
     folds: list[tuple[EngineConfig, BacktestResult]]
     oos: Metrics
     oos_trades: Optional[object] = None  # trading.RStats fora da amostra
+    oos_opportunity: Optional[object] = None  # opportunity.OpportunityReport agregado OOS
 
     def render(self) -> str:
         lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
@@ -5811,6 +5823,9 @@ class WalkForwardResult:
         if self.oos_trades is not None:
             lines.append("")
             lines.append(self.oos_trades.render())
+        if self.oos_opportunity is not None:
+            lines.append("")
+            lines.append(self.oos_opportunity.render())
         return "\n".join(lines)
 
 
@@ -5854,7 +5869,12 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     atrs = [s.atr for s in all_sigs if s.atr] or [1.0]
     oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
     rows = [r for _, res in folds for r in res.trade_rows]
-    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None)
+    # oportunidades OOS agregadas: decisões, entradas e curva de limiar de todos os folds de teste
+    decisions = [d for _, res in folds if res.opportunity for d in res.decisions]
+    entries = [e for _, res in folds if res.opportunity for e in res.entries]
+    curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
+    opp = opportunity_report(decisions, path, entries, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min, curve_rows) if decisions else None
+    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None, opp)
 
 
 # --------------------------------------------------------------------------- 2.1 validação consolidada
@@ -7379,8 +7399,15 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         if args.mt5_path:
             mcfg.path = args.mt5_path
         mt5_client = MT5Client(mcfg)
-        mt5_client.connect()
-        if mode != TradingMode.PAPER:
+        try:
+            mt5_client.connect()
+        except Exception as e:  # noqa: BLE001
+            print(f"MT5 indisponível: {e}")
+            if mode != TradingMode.PAPER:
+                return 1
+            print("modo PAPER: continuando com dados web (Yahoo) — o MT5 só é obrigatório para executar ordens")
+            mt5_client = None
+        if mt5_client is not None and mode != TradingMode.PAPER:
             symbol_map = MultiMarketData.symbol_map_from_env(env)
             for sym in symbols:
                 c = MT5Client(MT5Config(path=mcfg.path, symbol=symbol_map.get(sym, get_market(sym).mt5), login=mcfg.login, password=mcfg.password, server=mcfg.server))
@@ -7559,10 +7586,25 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cfg_for(args: argparse.Namespace) -> EngineConfig:
+    """EngineConfig com os sinais de fator do mercado (--market); sem --market usa o cérebro do ouro."""
+
+    market = getattr(args, "market", None)
+    if market:
+        spec = get_market(market)
+        if getattr(args, "symbol", None) in (None, "GC=F") and not getattr(args, "csv", None):
+            args.symbol = spec.yahoo
+        print(f"cérebro: {spec.symbol} (sinais por fator do mercado) · candles {args.symbol}")
+        return EngineConfig(factor_signs=dict(spec.factor_signs), symbol=spec.symbol)
+    print("cérebro: XAUUSD (padrão) — use --market EURUSD|US500|USDJPY|WTI para aplicar os sinais do mercado")
+    return EngineConfig()
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
 
+    cfg = _cfg_for(args)
     frame = _load_frame(args)
-    bt = Backtester(frame, EngineConfig(), threshold_atr=args.threshold_atr, horizon_min=args.horizon, include_watch=args.include_watch)
+    bt = Backtester(frame, cfg, threshold_atr=args.threshold_atr, horizon_min=args.horizon, include_watch=args.include_watch)
     if args.walk_forward:
         print(walk_forward(bt, n_folds=args.folds).render())
     else:
@@ -7621,8 +7663,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 print(f"\n{'=' * 30} {m.symbol} {'=' * 30}\n" + m.report.render())
         return 0
 
+    cfg = _cfg_for(args)
     frame = _load_frame(args)
-    rep = validate(frame, EngineConfig(), n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
+    rep = validate(frame, cfg, n_folds=args.folds, step=args.step, threshold_atr=args.threshold_atr,
                    horizon_min=args.horizon, mode=args.mode)
     print(rep.render())
     if args.out:
@@ -7635,8 +7678,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_simulate(args: argparse.Namespace) -> int:
     """2.2 TRADE SIMULATOR sobre histórico: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy em R."""
 
+    cfg = _cfg_for(args)
     frame = _load_frame(args)
-    bt = Backtester(frame, EngineConfig(), step=args.step, threshold_atr=args.threshold_atr, horizon_min=args.horizon)
+    bt = Backtester(frame, cfg, step=args.step, threshold_atr=args.threshold_atr, horizon_min=args.horizon)
     if args.walk_forward:
         wf = walk_forward(bt, n_folds=args.folds)
         print(wf.render())
@@ -7813,6 +7857,7 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--dxy-csv", default=None)
     bt.add_argument("--us10y-csv", default=None)
     bt.add_argument("--symbol", default="GC=F")
+    bt.add_argument("--market", default=None, help="aplica os sinais por fator do mercado (EURUSD, US500, XAUUSD, USDJPY, WTI) e escolhe o símbolo Yahoo")
     bt.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
     bt.add_argument("--end", default=None)
     bt.add_argument("--threshold-atr", type=float, default=1.0)
@@ -7834,6 +7879,7 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--dxy-csv", default=None)
     va.add_argument("--us10y-csv", default=None)
     va.add_argument("--symbol", default="GC=F")
+    va.add_argument("--market", default=None, help="aplica os sinais por fator do mercado (EURUSD, US500, XAUUSD, USDJPY, WTI) e escolhe o símbolo Yahoo")
     va.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
     va.add_argument("--end", default=None)
     va.add_argument("--folds", type=int, default=4)
@@ -7852,6 +7898,7 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--dxy-csv", default=None)
     si.add_argument("--us10y-csv", default=None)
     si.add_argument("--symbol", default="GC=F")
+    si.add_argument("--market", default=None, help="aplica os sinais por fator do mercado (EURUSD, US500, XAUUSD, USDJPY, WTI) e escolhe o símbolo Yahoo")
     si.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
     si.add_argument("--end", default=None)
     si.add_argument("--step", type=int, default=1)

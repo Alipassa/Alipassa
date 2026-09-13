@@ -289,6 +289,8 @@ class BacktestResult:
     trades: Optional[object] = None   # trading.RStats (2.2)
     trade_rows: list[dict] = field(default_factory=list)
     opportunity: Optional[object] = None  # opportunity.OpportunityReport (3.0)
+    decisions: list = field(default_factory=list)
+    entries: list = field(default_factory=list)
 
     def render(self) -> str:
         out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
@@ -381,7 +383,7 @@ class Backtester:
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
         return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp)
+                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries)
 
 
 @dataclass
@@ -389,6 +391,7 @@ class WalkForwardResult:
     folds: list[tuple[EngineConfig, BacktestResult]]
     oos: Metrics
     oos_trades: Optional[object] = None  # trading.RStats fora da amostra
+    oos_opportunity: Optional[object] = None  # opportunity.OpportunityReport agregado OOS
 
     def render(self) -> str:
         lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
@@ -400,6 +403,9 @@ class WalkForwardResult:
         if self.oos_trades is not None:
             lines.append("")
             lines.append(self.oos_trades.render())
+        if self.oos_opportunity is not None:
+            lines.append("")
+            lines.append(self.oos_opportunity.render())
         return "\n".join(lines)
 
 
@@ -444,7 +450,13 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
     from .trading import r_stats
     rows = [r for _, res in folds for r in res.trade_rows]
-    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None)
+    # oportunidades OOS agregadas: decisões, entradas e curva de limiar de todos os folds de teste
+    from .opportunity import opportunity_report
+    decisions = [d for _, res in folds if res.opportunity for d in res.decisions]
+    entries = [e for _, res in folds if res.opportunity for e in res.entries]
+    curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
+    opp = opportunity_report(decisions, path, entries, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min, curve_rows) if decisions else None
+    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None, opp)
 
 
 # --------------------------------------------------------------------------- 2.1 validação consolidada
