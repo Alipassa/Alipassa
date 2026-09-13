@@ -160,6 +160,8 @@ class EventHistory:
         return len(self.events)
 
     def add(self, ev: HistoricalEvent) -> None:
+        if any(e.event_id == ev.event_id and e.published_at == ev.published_at for e in self.events):
+            return
         self.events.append(ev)
         self.events.sort(key=lambda e: e.published_at)
 
@@ -207,6 +209,8 @@ def load_history(path: str) -> EventHistory:
 
 
 def save_history(hist: EventHistory, path: str) -> int:
+    import os
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     cols = HistoricalEvent.columns()
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)

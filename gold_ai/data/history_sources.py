@@ -12,6 +12,7 @@ pelo que o histórico mostrar (history.learn_effects).
 from __future__ import annotations
 
 import re
+import time
 import zlib
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -167,27 +168,60 @@ GDELT_TOPICS: dict[str, tuple[str, str]] = {
 
 
 class GDELTImporter:
-    def __init__(self, http) -> None:
-        self.http = http
+    """GDELT limita a ~1 requisição a cada 5 s (HTTP 429 acima disso): as chamadas são espaçadas por `min_interval`,
+    um 429 espera e tenta de novo, e `checkpoint` recebe o parcial após cada janela (nada se perde se cair no meio)."""
+
+    def __init__(self, http, min_interval: float = 5.5, retry_wait: float = 60.0, max_retries: int = 4, sleep=time.sleep, log=None) -> None:
+        self.http, self.min_interval, self.retry_wait, self.max_retries = http, min_interval, retry_wait, max_retries
+        self._sleep, self._log, self._last = sleep, log, 0.0
+
+    def _get(self, url: str):
+        from .http import DataError
+        for attempt in range(self.max_retries + 1):
+            wait = self.min_interval - (time.monotonic() - self._last)
+            if wait > 0:
+                self._sleep(wait)
+            try:
+                out = self.http.get_json(url, ttl=24 * 3600)
+                self._last = time.monotonic()
+                return out
+            except DataError as e:
+                self._last = time.monotonic()
+                if "429" not in str(e) or attempt == self.max_retries:
+                    raise
+                if self._log:
+                    self._log(f"GDELT 429 (limite de requisições): aguardando {self.retry_wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
+                self._sleep(self.retry_wait)
+        raise DataError("GDELT: limite de requisições persistente")
 
     def _url(self, query: str, mode: str, start: datetime, end: datetime, extra: str = "") -> str:
         return (f"{GDELT_DOC}?query={quote(query + ' sourcelang:english')}&mode={mode}&format=json"
                 f"&startdatetime={start:%Y%m%d%H%M%S}&enddatetime={end:%Y%m%d%H%M%S}{extra}")
 
-    def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 7, max_records: int = 100) -> EventHistory:
+    def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 30, max_records: int = 250,
+              checkpoint=None) -> EventHistory:
         hist = EventHistory()
         t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
         t_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
-        for topic in topics or list(GDELT_TOPICS):
+        topics = topics or list(GDELT_TOPICS)
+        n_chunks = max(1, -(-(t_end - t0).days // chunk_days))
+        if self._log:
+            self._log(f"GDELT: {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × 3 chamadas ≈ {len(topics) * n_chunks * 3 * self.min_interval / 60:.0f} min (limite do GDELT)")
+        for topic in topics:
             query, cat = GDELT_TOPICS[topic]
             t = t0
             while t < t_end:
                 t1 = min(t + timedelta(days=chunk_days), t_end)
-                arts = self.http.get_json(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"), ttl=24 * 3600)
-                tone = self.http.get_json(self._url(query, "timelinetone", t, t1), ttl=24 * 3600)
-                vol = self.http.get_json(self._url(query, "timelinevolraw", t, t1), ttl=24 * 3600)
-                for e in self.parse(topic, cat, arts, tone, vol).events:
+                arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
+                tone = self._get(self._url(query, "timelinetone", t, t1))
+                vol = self._get(self._url(query, "timelinevolraw", t, t1))
+                part = self.parse(topic, cat, arts, tone, vol)
+                for e in part.events:
                     hist.add(e)
+                if self._log:
+                    self._log(f"  {topic} {t:%Y-%m-%d}→{t1:%Y-%m-%d}: {len(part)} manchetes")
+                if checkpoint:
+                    checkpoint(hist)
                 t = t1
         return hist
 

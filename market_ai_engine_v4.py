@@ -5321,6 +5321,8 @@ class EventHistory:
         return len(self.events)
 
     def add(self, ev: HistoricalEvent) -> None:
+        if any(e.event_id == ev.event_id and e.published_at == ev.published_at for e in self.events):
+            return
         self.events.append(ev)
         self.events.sort(key=lambda e: e.published_at)
 
@@ -5368,6 +5370,7 @@ def load_history(path: str) -> EventHistory:
 
 
 def save_history(hist: EventHistory, path: str) -> int:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     cols = HistoricalEvent.columns()
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -5640,27 +5643,59 @@ GDELT_TOPICS: dict[str, tuple[str, str]] = {
 
 
 class GDELTImporter:
-    def __init__(self, http) -> None:
-        self.http = http
+    """GDELT limita a ~1 requisição a cada 5 s (HTTP 429 acima disso): as chamadas são espaçadas por `min_interval`,
+    um 429 espera e tenta de novo, e `checkpoint` recebe o parcial após cada janela (nada se perde se cair no meio)."""
+
+    def __init__(self, http, min_interval: float = 5.5, retry_wait: float = 60.0, max_retries: int = 4, sleep=time.sleep, log=None) -> None:
+        self.http, self.min_interval, self.retry_wait, self.max_retries = http, min_interval, retry_wait, max_retries
+        self._sleep, self._log, self._last = sleep, log, 0.0
+
+    def _get(self, url: str):
+        for attempt in range(self.max_retries + 1):
+            wait = self.min_interval - (time.monotonic() - self._last)
+            if wait > 0:
+                self._sleep(wait)
+            try:
+                out = self.http.get_json(url, ttl=24 * 3600)
+                self._last = time.monotonic()
+                return out
+            except DataError as e:
+                self._last = time.monotonic()
+                if "429" not in str(e) or attempt == self.max_retries:
+                    raise
+                if self._log:
+                    self._log(f"GDELT 429 (limite de requisições): aguardando {self.retry_wait:.0f}s e tentando de novo ({attempt + 1}/{self.max_retries})")
+                self._sleep(self.retry_wait)
+        raise DataError("GDELT: limite de requisições persistente")
 
     def _url(self, query: str, mode: str, start: datetime, end: datetime, extra: str = "") -> str:
         return (f"{GDELT_DOC}?query={quote(query + ' sourcelang:english')}&mode={mode}&format=json"
                 f"&startdatetime={start:%Y%m%d%H%M%S}&enddatetime={end:%Y%m%d%H%M%S}{extra}")
 
-    def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 7, max_records: int = 100) -> EventHistory:
+    def fetch(self, start: date, end: date, topics: Optional[list[str]] = None, chunk_days: int = 30, max_records: int = 250,
+              checkpoint=None) -> EventHistory:
         hist = EventHistory()
         t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
         t_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
-        for topic in topics or list(GDELT_TOPICS):
+        topics = topics or list(GDELT_TOPICS)
+        n_chunks = max(1, -(-(t_end - t0).days // chunk_days))
+        if self._log:
+            self._log(f"GDELT: {len(topics)} temas × {n_chunks} janelas de {chunk_days} dias × 3 chamadas ≈ {len(topics) * n_chunks * 3 * self.min_interval / 60:.0f} min (limite do GDELT)")
+        for topic in topics:
             query, cat = GDELT_TOPICS[topic]
             t = t0
             while t < t_end:
                 t1 = min(t + timedelta(days=chunk_days), t_end)
-                arts = self.http.get_json(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"), ttl=24 * 3600)
-                tone = self.http.get_json(self._url(query, "timelinetone", t, t1), ttl=24 * 3600)
-                vol = self.http.get_json(self._url(query, "timelinevolraw", t, t1), ttl=24 * 3600)
-                for e in self.parse(topic, cat, arts, tone, vol).events:
+                arts = self._get(self._url(query, "artlist", t, t1, f"&maxrecords={max_records}&sort=datedesc"))
+                tone = self._get(self._url(query, "timelinetone", t, t1))
+                vol = self._get(self._url(query, "timelinevolraw", t, t1))
+                part = self.parse(topic, cat, arts, tone, vol)
+                for e in part.events:
                     hist.add(e)
+                if self._log:
+                    self._log(f"  {topic} {t:%Y-%m-%d}→{t1:%Y-%m-%d}: {len(part)} manchetes")
+                if checkpoint:
+                    checkpoint(hist)
                 t = t1
         return hist
 
@@ -8953,7 +8988,10 @@ def cmd_history(args: argparse.Namespace) -> int:
             new = ALFREDImporter(http, key).fetch(start, end)
         else:
             topics = [t.strip() for t in args.topics.split(",")] if args.topics else None
-            new = GDELTImporter(http).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records)
+
+            def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
+                save_history(merge(hist, partial), path)
+            new = GDELTImporter(http, log=print).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint)
         print(f"{args.action}: {len(new)} registros obtidos ({new.stats()})")
         hist = merge(hist, new)
         apply_rule_effects(hist)
@@ -9423,8 +9461,8 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--key", default=None, help="chave da API (ou TE_API_KEY / FRED_API_KEY no .env)")
     hi.add_argument("--country", default="united states")
     hi.add_argument("--topics", default=None, help="GDELT: geopolitica,petroleo,china,fed,risco (padrão: todos)")
-    hi.add_argument("--chunk-days", type=int, default=7)
-    hi.add_argument("--max-records", type=int, default=100, help="GDELT: manchetes por tema por janela")
+    hi.add_argument("--chunk-days", type=int, default=30, help="GDELT: dias por janela (menos janelas = menos chamadas; o GDELT limita a 1 a cada ~5 s)")
+    hi.add_argument("--max-records", type=int, default=250, help="GDELT: manchetes por tema por janela (máx. 250)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")

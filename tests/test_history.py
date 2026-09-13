@@ -153,7 +153,9 @@ class ImporterTests(unittest.TestCase):
         tone = {"timeline": [{"series": "Average Tone", "data": [{"date": "20260114T120000Z", "value": -5.1}, {"date": "20260115T000000Z", "value": 2.0}]}]}
         vol = {"timeline": [{"series": "Article Count", "data": [{"date": "20260114T120000Z", "value": 1.8}]}]}
         http = FakeHttp({"mode=artlist": arts, "mode=timelinetone": tone, "mode=timelinevolraw": vol})
-        h = GDELTImporter(http).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        slept: list[float] = []
+        h = GDELTImporter(http, sleep=slept.append).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        self.assertGreaterEqual(len(slept), 2)                 # ritmo: pausa entre chamadas (limite do GDELT)
         self.assertEqual(len(h), 2)
         strike = next(e for e in h.events if "Missile" in e.headline)
         self.assertEqual(strike.kind, "geopolitical_escalation")
@@ -164,8 +166,33 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(cease.kind, "geopolitical_deescalation")
         self.assertEqual(cease.sentiment, "POSITIVE")
         # ids determinísticos entre execuções
-        h2 = GDELTImporter(http).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
+        h2 = GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 14), date(2026, 1, 15), ["geopolitica"], chunk_days=30)
         self.assertEqual([e.event_id for e in h.events], [e.event_id for e in h2.events])
+
+    def test_gdelt_retries_on_429_and_checkpoints(self):
+        from gold_ai.data.http import DataError
+
+        class Flaky(FakeHttp):
+            def __init__(self, routes):
+                super().__init__(routes)
+                self.fail_left = 1
+
+            def get_json(self, url, ttl=None):
+                if "artlist" in url and self.fail_left:
+                    self.fail_left -= 1
+                    raise DataError("falha ao buscar x: HTTP Error 429: Too Many Requests")
+                return super().get_json(url, ttl)
+        arts = {"articles": [{"title": "OPEC cuts output", "seendate": "20260114T140000Z", "domain": "x.com"}]}
+        http = Flaky({"mode=artlist": arts, "mode=timelinetone": {}, "mode=timelinevolraw": {}})
+        slept, parts = [], []
+        imp = GDELTImporter(http, retry_wait=60.0, sleep=slept.append, log=lambda m: None)
+        h = imp.fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, checkpoint=lambda p: parts.append(len(p)))
+        self.assertIn(60.0, slept)                              # esperou o limite e tentou de novo
+        self.assertEqual(len(h), 1)
+        self.assertEqual(len(parts), 2)                         # um checkpoint por janela
+        http.fail_left = 99
+        with self.assertRaises(DataError):
+            GDELTImporter(http, max_retries=1, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 1, 10), ["petroleo"])
 
 
 class BacktestIntegrationTests(unittest.TestCase):

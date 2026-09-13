@@ -314,7 +314,10 @@ def cmd_history(args: argparse.Namespace) -> int:
         else:
             from .data.history_sources import GDELTImporter
             topics = [t.strip() for t in args.topics.split(",")] if args.topics else None
-            new = GDELTImporter(http).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records)
+
+            def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
+                save_history(merge(hist, partial), path)
+            new = GDELTImporter(http, log=print).fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint)
         print(f"{args.action}: {len(new)} registros obtidos ({new.stats()})")
         hist = merge(hist, new)
         apply_rule_effects(hist)
@@ -810,8 +813,8 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--key", default=None, help="chave da API (ou TE_API_KEY / FRED_API_KEY no .env)")
     hi.add_argument("--country", default="united states")
     hi.add_argument("--topics", default=None, help="GDELT: geopolitica,petroleo,china,fed,risco (padrão: todos)")
-    hi.add_argument("--chunk-days", type=int, default=7)
-    hi.add_argument("--max-records", type=int, default=100, help="GDELT: manchetes por tema por janela")
+    hi.add_argument("--chunk-days", type=int, default=30, help="GDELT: dias por janela (menos janelas = menos chamadas; o GDELT limita a 1 a cada ~5 s)")
+    hi.add_argument("--max-records", type=int, default=250, help="GDELT: manchetes por tema por janela (máx. 250)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")
