@@ -79,6 +79,30 @@ class YahooCollector:
         url = f"{YAHOO_BASE}{symbol.replace('=', '%3D').replace('^', '%5E')}?interval={interval}&range={rng}&includePrePost=false"
         return parse_chart(self.http.get_json(url, ttl))
 
+    def candles_between(self, symbol: str, tf: str, start: datetime, end: datetime, ttl: int = 3600) -> list[Candle]:
+        """Histórico entre datas (period1/period2). Yahoo limita 1h a ~730 dias e 1m a 7 dias; para períodos longos
+        de H1 a API devolve em blocos — pedimos em janelas de 60 dias e concatenamos."""
+        if tf == "H4":
+            return resample(self.candles_between(symbol, "H1", start, end, ttl), 240)
+        interval = TF_MAP.get(tf, ("1h", ""))[0]
+        sym = symbol.replace("=", "%3D").replace("^", "%5E")
+        out: list[Candle] = []
+        step = timedelta(days=60 if interval in ("1h", "60m", "30m", "15m") else 365 * 5)
+        cur = start
+        while cur < end:
+            nxt = min(end, cur + step)
+            url = f"{YAHOO_BASE}{sym}?interval={interval}&period1={int(cur.timestamp())}&period2={int(nxt.timestamp())}&includePrePost=false"
+            try:
+                out += parse_chart(self.http.get_json(url, ttl))
+            except DataError:
+                pass
+            cur = nxt
+        seen, dedup = set(), []
+        for c in sorted(out, key=lambda c: c.time):
+            if c.time not in seen:
+                seen.add(c.time); dedup.append(c)
+        return dedup
+
     def all_timeframes(self, symbol: str, tfs: tuple[str, ...] = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1")) -> dict[str, list[Candle]]:
         out: dict[str, list[Candle]] = {}
         for tf in tfs:

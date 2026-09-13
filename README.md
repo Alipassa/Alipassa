@@ -69,6 +69,22 @@ Uma vez por dia (e sob demanda com `edge` ou `/EDGE` no Telegram) o sistema prod
 
 Não precisamos acreditar que EURUSD é melhor. Os dados mostram.
 
+## 💰 Estimativa de lucro num período (ex.: janeiro de 2026 → hoje)
+
+```bash
+python market_ai_engine_v4.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000 --risk 0.5
+python market_ai_engine_v4.py estimate --start 2026-01-01 --markets XAUUSD --csv-dir dados/     # com CSVs próprios (<SYMBOL>_h1.csv, DXY_h1.csv, US10Y_h1.csv)
+```
+
+O comando baixa o histórico H1 do período (Yahoo, em janelas de 60 dias) para cada mercado, mais DXY, Treasury 10Y, VIX e S&P,
+roda o **walk-forward fora da amostra**, desconta o **spread típico em R** de cada operação, constrói a **curva de capital
+sequencial** com risco fixo composto e faz **bootstrap de 1000 reamostragens** para dar percentis 5/50/95 do retorno,
+probabilidade de terminar no lucro e drawdown máximo. Depois soma os mercados em sequência com capital único (CARTEIRA).
+
+Leia sempre as ressalvas impressas no fim: é estimativa histórica, não garantia; o histórico gratuito não tem notícias,
+COT alinhado nem FRED intraday, então a cobertura de fatores é menor que no `live`; amostra < 30 operações é ⚪ inconclusivo.
+`validate`, `backtest` e `simulate` também aceitam `--start/--end`.
+
 ## Entrypoint único
 
 Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:

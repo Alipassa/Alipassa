@@ -30,6 +30,7 @@ Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 Uso (4.0, multi-mercado):
     python market_ai_engine_v4.py markets                                              # ranking agora, não opera
     python market_ai_engine_v4.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
+    python market_ai_engine_v4.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000   # estimativa de lucro OOS
     python market_ai_engine_v4.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
     python market_ai_engine_v4.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
 Uso (3.0, um mercado):
@@ -3056,6 +3057,30 @@ class YahooCollector:
         url = f"{YAHOO_BASE}{symbol.replace('=', '%3D').replace('^', '%5E')}?interval={interval}&range={rng}&includePrePost=false"
         return parse_chart(self.http.get_json(url, ttl))
 
+    def candles_between(self, symbol: str, tf: str, start: datetime, end: datetime, ttl: int = 3600) -> list[Candle]:
+        """Histórico entre datas (period1/period2). Yahoo limita 1h a ~730 dias e 1m a 7 dias; para períodos longos
+        de H1 a API devolve em blocos — pedimos em janelas de 60 dias e concatenamos."""
+        if tf == "H4":
+            return resample(self.candles_between(symbol, "H1", start, end, ttl), 240)
+        interval = TF_MAP.get(tf, ("1h", ""))[0]
+        sym = symbol.replace("=", "%3D").replace("^", "%5E")
+        out: list[Candle] = []
+        step = timedelta(days=60 if interval in ("1h", "60m", "30m", "15m") else 365 * 5)
+        cur = start
+        while cur < end:
+            nxt = min(end, cur + step)
+            url = f"{YAHOO_BASE}{sym}?interval={interval}&period1={int(cur.timestamp())}&period2={int(nxt.timestamp())}&includePrePost=false"
+            try:
+                out += parse_chart(self.http.get_json(url, ttl))
+            except DataError:
+                pass
+            cur = nxt
+        seen, dedup = set(), []
+        for c in sorted(out, key=lambda c: c.time):
+            if c.time not in seen:
+                seen.add(c.time); dedup.append(c)
+        return dedup
+
     def all_timeframes(self, symbol: str, tfs: tuple[str, ...] = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1")) -> dict[str, list[Candle]]:
         out: dict[str, list[Candle]] = {}
         for tf in tfs:
@@ -5753,7 +5778,8 @@ class Backtester:
             if self.simulate_trades and sig.type != SignalType.WATCH:
                 plan = mpe.plan(a, snap, sig.direction, sig.type.value)
                 sim = simulate_all(plan, xau[i + 1: i + 1 + horizon_bars + 2], self.horizon_min)
-                row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"]}
+                row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
+                       "score": a.score, "direction": sig.direction.value, "entry": a.price}
                 trade_rows.append(row)
                 if self.adaptive_exit:
                     managed.append((ManagedTrade(len(trade_rows), plan, Thesis.from_assessment(a, sig.direction)), row, i))
@@ -6442,6 +6468,177 @@ def edge_trend(history: Sequence[dict], symbol: str) -> str:
     if not pts:
         return f"{symbol}: sem histórico de edge"
     return f"{symbol}: " + " → ".join(f"{d[5:]} {s:+.2f}R (n={n})" for d, s, n in pts[-8:])
+
+
+# ============================================================================
+# ESTIMATE
+# ============================================================================
+
+"""MARKET AI ENGINE 4.0 — ESTIMATIVA DE LUCRO sobre um período histórico.
+
+Pergunta: "se o sistema tivesse operado de <início> até <fim>, com este capital e este risco por operação,
+quanto teria ganho ou perdido — e com que incerteza?"
+
+Método honesto:
+  1. walk-forward FORA DA AMOSTRA (parâmetros escolhidos só no treino) → lista cronológica de operações em R;
+  2. custo de execução: spread típico do mercado descontado em R de cada operação;
+  3. curva de capital sequencial com risco fixo (RISK_PER_TRADE % do capital corrente — composto);
+  4. bootstrap (reamostragem das operações) → percentis 5/50/95 do retorno e do drawdown máximo;
+  5. ressalvas explícitas: o histórico H1 gratuito não tem notícias, COT intraday nem FRED intraday,
+     logo a cobertura de fatores é menor que no `live`; estimativa ≠ garantia.
+"""
+
+
+
+
+
+@dataclass
+class TradeR:
+    time: datetime
+    symbol: str
+    r: float            # resultado líquido em R (já com custo)
+    cost_r: float
+    strategy: str
+
+
+@dataclass
+class EquityPath:
+    start: float
+    end: float
+    max_drawdown_pct: float
+    curve: list[tuple[datetime, float]] = field(default_factory=list)
+
+    @property
+    def return_pct(self) -> float:
+        return (self.end / self.start - 1.0) * 100.0 if self.start else 0.0
+
+
+def simulate_equity(trades: Sequence[TradeR], equity: float, risk_pct: float, compound: bool = True) -> EquityPath:
+    eq, peak, mdd = equity, equity, 0.0
+    curve = []
+    base = equity
+    for t in sorted(trades, key=lambda x: x.time):
+        risk = (eq if compound else base) * risk_pct / 100.0
+        eq = round(eq + t.r * risk, 2)
+        peak = max(peak, eq)
+        mdd = max(mdd, (peak - eq) / peak * 100.0 if peak else 0.0)
+        curve.append((t.time, eq))
+    return EquityPath(equity, eq, round(mdd, 2), curve)
+
+
+def bootstrap(trades: Sequence[TradeR], equity: float, risk_pct: float, n: int = 1000, seed: int = 7) -> dict:
+    if not trades:
+        return {}
+    rnd = random.Random(seed)
+    rets, dds = [], []
+    for _ in range(n):
+        sample = [rnd.choice(trades) for _ in trades]
+        # preserva a ordem temporal original para o cálculo do drawdown
+        sample = [TradeR(t.time, s.symbol, s.r, s.cost_r, s.strategy) for t, s in zip(sorted(trades, key=lambda x: x.time), sample)]
+        p = simulate_equity(sample, equity, risk_pct)
+        rets.append(p.return_pct); dds.append(p.max_drawdown_pct)
+    rets.sort(); dds.sort()
+    q = lambda xs, p: xs[min(len(xs) - 1, int(p * len(xs)))]  # noqa: E731
+    return {"ret_p5": q(rets, 0.05), "ret_p50": q(rets, 0.50), "ret_p95": q(rets, 0.95), "dd_p50": q(dds, 0.50), "dd_p95": q(dds, 0.95),
+            "prob_profit": sum(1 for r in rets if r > 0) / len(rets)}
+
+
+@dataclass
+class MarketEstimate:
+    symbol: str
+    period: str
+    n_trades: int
+    expectancy_gross_r: float
+    expectancy_net_r: float
+    avg_cost_r: float
+    win_rate: float
+    strategy: str
+    path: EquityPath
+    boot: dict
+    confidence: object
+    trades: list[TradeR]
+
+    def render(self, equity: float) -> str:
+        c = self.confidence
+        lines = [f"{self.symbol} · {self.period} · estratégia {self.strategy}",
+                 f"  operações OOS: {self.n_trades} · win {self.win_rate:.0%} · E bruta {self.expectancy_gross_r:+.2f}R · custo médio {self.avg_cost_r:.2f}R · E líquida {self.expectancy_net_r:+.2f}R (ajustada {c.shrunk:+.2f}R, conf. {c.level})",
+                 f"  capital {equity:,.0f} → {self.path.end:,.2f} USD ({self.path.return_pct:+.1f}%) · drawdown máx {self.path.max_drawdown_pct:.1f}%"]
+        if self.boot:
+            b = self.boot
+            lines.append(f"  bootstrap: retorno p5 {b['ret_p5']:+.1f}% · p50 {b['ret_p50']:+.1f}% · p95 {b['ret_p95']:+.1f}% · P(lucro) {b['prob_profit']:.0%} · DD p95 {b['dd_p95']:.1f}%")
+        return "\n".join(lines)
+
+
+def estimate_market(symbol: str, trade_rows: Sequence[dict], equity: float, risk_pct: float, period: str, strategy: str = "adaptive") -> MarketEstimate:
+    spec = get_market(symbol)
+    trades: list[TradeR] = []
+    for row in trade_rows:
+        r = row["results"].get(strategy, row["results"].get("3R"))
+        if r is None:
+            continue
+        rv = row.get("r_value") or 0.0
+        cost = round(spec.typical_spread / rv, 3) if rv > 0 else 0.0
+        trades.append(TradeR(row["time"], symbol, round(r - cost, 3), cost, strategy))
+    rs = [t.r for t in trades]
+    gross = [t.r + t.cost_r for t in trades]
+    path = simulate_equity(trades, equity, risk_pct)
+    return MarketEstimate(symbol, period, len(trades), statistics.fmean(gross) if gross else 0.0, statistics.fmean(rs) if rs else 0.0,
+                          statistics.fmean(t.cost_r for t in trades) if trades else 0.0, (sum(1 for x in rs if x > 0) / len(rs)) if rs else 0.0,
+                          strategy, path, bootstrap(trades, equity, risk_pct), statistical_confidence(rs), trades)
+
+
+@dataclass
+class ProfitEstimate:
+    start: str
+    end: str
+    equity: float
+    risk_pct: float
+    markets: list[MarketEstimate]
+    portfolio: Optional[EquityPath] = None
+    portfolio_boot: dict = field(default_factory=dict)
+    caveats: list[str] = field(default_factory=list)
+
+    def render(self) -> str:
+        lines = [f"💰 ESTIMATIVA DE LUCRO — {self.start} → {self.end} · capital {self.equity:,.0f} USD · risco {self.risk_pct}%/operação (composto)",
+                 "Método: walk-forward fora da amostra · custo de spread em R · curva de capital sequencial · bootstrap 1000×", ""]
+        for m in sorted(self.markets, key=lambda m: -m.confidence.shrunk):
+            lines += [m.render(self.equity), ""]
+        if self.portfolio is not None:
+            b = self.portfolio_boot
+            lines.append(f"CARTEIRA (todos os mercados em sequência, capital único): {self.equity:,.0f} → {self.portfolio.end:,.2f} USD "
+                         f"({self.portfolio.return_pct:+.1f}%) · drawdown máx {self.portfolio.max_drawdown_pct:.1f}%")
+            if b:
+                lines.append(f"  bootstrap: p5 {b['ret_p5']:+.1f}% · p50 {b['ret_p50']:+.1f}% · p95 {b['ret_p95']:+.1f}% · P(lucro) {b['prob_profit']:.0%} · DD p95 {b['dd_p95']:.1f}%")
+        lines += ["", "⚠️ RESSALVAS"] + [f"  • {c}" for c in self.caveats]
+        return "\n".join(lines)
+
+
+DEFAULT_CAVEATS = [
+    "Estimativa histórica fora da amostra, não garantia: o mercado de jan→hoje não se repete.",
+    "Histórico H1 gratuito (Yahoo) não inclui notícias, COT semanal alinhado nem FRED intraday: a cobertura de fatores é menor que no `live`, "
+    "logo o motor opera com menos evidência do que operaria em tempo real.",
+    "Execução simulada a fechamento de candle H1 com regra conservadora de stop; slippage real, gaps e horários sem liquidez não estão modelados além do spread típico.",
+    "A carteira soma as operações de todos os mercados em sequência com capital único; a exposição correlacionada do live pode ter bloqueado parte delas.",
+    "Amostra < 30 operações por mercado = ⚪ inconclusivo; leia a confiança estatística antes do retorno.",
+]
+
+
+def estimate_profit(frames: dict, start: datetime, end: datetime, equity: float, risk_pct: float, n_folds: int = 4, step: int = 1,
+                    warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive") -> ProfitEstimate:
+
+    period = f"{start:%Y-%m-%d} → {end:%Y-%m-%d}"
+    markets: list[MarketEstimate] = []
+    for symbol, frame in frames.items():
+        spec = get_market(symbol)
+        cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
+        bt = Backtester(frame, cfg, warmup=warmup, step=step, horizon_min=horizon_min)
+        wf = walk_forward(bt, n_folds=n_folds)
+        rows = [r for _, res in wf.folds for r in res.trade_rows]
+        markets.append(estimate_market(symbol, rows, equity, risk_pct, period, strategy))
+    all_trades = [t for m in markets for t in m.trades]
+    portfolio = simulate_equity(all_trades, equity, risk_pct) if all_trades else None
+    return ProfitEstimate(f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}", equity, risk_pct, markets, portfolio,
+                          bootstrap(all_trades, equity, risk_pct) if all_trades else {}, list(DEFAULT_CAVEATS))
 
 
 # ============================================================================
@@ -7153,8 +7350,14 @@ def _load_frame(args: argparse.Namespace):
         return HistoryFrame(xau=read_csv(args.csv), dxy=read_csv(args.dxy_csv) if args.dxy_csv else [],
                             us10y=read_csv(args.us10y_csv) if args.us10y_csv else [])
     y = YahooCollector(HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=900))
-    return HistoryFrame(xau=y.candles(args.symbol, "H1"), dxy=y.candles("DX-Y.NYB", "H1"), us10y=y.candles("^TNX", "H1"),
-                        vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
+    start, end = getattr(args, "start", None), getattr(args, "end", None)
+    if start:
+        s = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+        e = datetime.fromisoformat(end).replace(tzinfo=timezone.utc) if end else datetime.now(timezone.utc)
+        get = lambda sym: y.candles_between(sym, "H1", s, e)  # noqa: E731
+    else:
+        get = lambda sym: y.candles(sym, "H1")  # noqa: E731
+    return HistoryFrame(xau=get(args.symbol), dxy=get("DX-Y.NYB"), us10y=get("^TNX"), vix=get("^VIX"), spx=get("^GSPC"))
 
 
 def cmd_live_markets(args: argparse.Namespace) -> int:
@@ -7226,6 +7429,41 @@ def cmd_markets(args: argparse.Namespace) -> int:
     print(pc.render())
     print(engine.status_text())
     mem.close()
+    return 0
+
+
+def _frames_for_markets(args: argparse.Namespace, markets: str) -> dict:
+
+    frames = {}
+    for sym in (s.strip().upper() for s in markets.split(",") if s.strip()):
+        ns = argparse.Namespace(**vars(args))
+        ns.symbol = get_market(sym).yahoo
+        csv_dir = getattr(args, "csv_dir", None)
+        ns.csv = os.path.join(csv_dir, f"{sym}_h1.csv") if csv_dir else None
+        ns.dxy_csv = os.path.join(csv_dir, "DXY_h1.csv") if csv_dir and os.path.exists(os.path.join(csv_dir, "DXY_h1.csv")) else None
+        ns.us10y_csv = os.path.join(csv_dir, "US10Y_h1.csv") if csv_dir and os.path.exists(os.path.join(csv_dir, "US10Y_h1.csv")) else None
+        frames[sym] = _load_frame(ns)
+        print(f"{sym}: {len(frames[sym].xau)} candles H1 carregados")
+    return frames
+
+
+def cmd_estimate(args: argparse.Namespace) -> int:
+    """ESTIMATIVA DE LUCRO: histórico <start>→<end> (Yahoo ou CSV) → walk-forward OOS → capital, retorno, drawdown, bootstrap."""
+
+    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
+    end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    frames = _frames_for_markets(args, args.markets)
+    frames = {k: v for k, v in frames.items() if len(v.xau) > 260}
+    if not frames:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado). Verifique a rede/Yahoo ou use --csv-dir.")
+        return 1
+    rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy)
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+        print(f"\nrelatório salvo em {args.out}")
     return 0
 
 
@@ -7537,6 +7775,20 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.set_defaults(func=cmd_live)
 
+    es = sub.add_parser("estimate", help="estimativa de lucro num período histórico (walk-forward OOS, custo, bootstrap)")
+    es.add_argument("--start", default="2026-01-01", help="data inicial (YYYY-MM-DD)")
+    es.add_argument("--end", default=None, help="data final (padrão: agora)")
+    es.add_argument("--markets", default="XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
+    es.add_argument("--equity", type=float, default=10000.0)
+    es.add_argument("--risk", type=float, default=None, help="%% por operação (padrão: RISK_PER_TRADE do .env ou 0.5)")
+    es.add_argument("--strategy", default="adaptive", help="adaptive | 3R | 2R+trailing | trailing | 1R | 2R | 4R")
+    es.add_argument("--folds", type=int, default=4)
+    es.add_argument("--step", type=int, default=1)
+    es.add_argument("--horizon", type=int, default=240)
+    es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
+    es.add_argument("--out", default=None)
+    es.set_defaults(func=cmd_estimate)
+
     ed = sub.add_parser("edge", help="4.0: LIVE EDGE — tabela diária por mercado a partir do que foi vivido (o teste definitivo)")
     ed.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
     ed.add_argument("--db", default="gold_ai.db")
@@ -7561,6 +7813,8 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--dxy-csv", default=None)
     bt.add_argument("--us10y-csv", default=None)
     bt.add_argument("--symbol", default="GC=F")
+    bt.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
+    bt.add_argument("--end", default=None)
     bt.add_argument("--threshold-atr", type=float, default=1.0)
     bt.add_argument("--horizon", type=int, default=240, help="minutos")
     bt.add_argument("--walk-forward", action="store_true")
@@ -7580,6 +7834,8 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--dxy-csv", default=None)
     va.add_argument("--us10y-csv", default=None)
     va.add_argument("--symbol", default="GC=F")
+    va.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
+    va.add_argument("--end", default=None)
     va.add_argument("--folds", type=int, default=4)
     va.add_argument("--step", type=int, default=1)
     va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
@@ -7596,6 +7852,8 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--dxy-csv", default=None)
     si.add_argument("--us10y-csv", default=None)
     si.add_argument("--symbol", default="GC=F")
+    si.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
+    si.add_argument("--end", default=None)
     si.add_argument("--step", type=int, default=1)
     si.add_argument("--folds", type=int, default=4)
     si.add_argument("--threshold-atr", type=float, default=1.0)

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from datetime import timedelta
 
 from .config import EngineConfig
@@ -93,8 +94,14 @@ def _load_frame(args: argparse.Namespace):
     from .data import DataEngineConfig, HttpClient
     from .data.yahoo import YahooCollector
     y = YahooCollector(HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=900))
-    return HistoryFrame(xau=y.candles(args.symbol, "H1"), dxy=y.candles("DX-Y.NYB", "H1"), us10y=y.candles("^TNX", "H1"),
-                        vix=y.candles("^VIX", "H1"), spx=y.candles("^GSPC", "H1"))
+    start, end = getattr(args, "start", None), getattr(args, "end", None)
+    if start:
+        s = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+        e = datetime.fromisoformat(end).replace(tzinfo=timezone.utc) if end else datetime.now(timezone.utc)
+        get = lambda sym: y.candles_between(sym, "H1", s, e)  # noqa: E731
+    else:
+        get = lambda sym: y.candles(sym, "H1")  # noqa: E731
+    return HistoryFrame(xau=get(args.symbol), dxy=get("DX-Y.NYB"), us10y=get("^TNX"), vix=get("^VIX"), spx=get("^GSPC"))
 
 
 def cmd_live_markets(args: argparse.Namespace) -> int:
@@ -182,6 +189,45 @@ def cmd_markets(args: argparse.Namespace) -> int:
     print(pc.render())
     print(engine.status_text())
     mem.close()
+    return 0
+
+
+def _frames_for_markets(args: argparse.Namespace, markets: str) -> dict:
+    from .markets import get_market
+
+    frames = {}
+    for sym in (s.strip().upper() for s in markets.split(",") if s.strip()):
+        ns = argparse.Namespace(**vars(args))
+        ns.symbol = get_market(sym).yahoo
+        csv_dir = getattr(args, "csv_dir", None)
+        ns.csv = os.path.join(csv_dir, f"{sym}_h1.csv") if csv_dir else None
+        ns.dxy_csv = os.path.join(csv_dir, "DXY_h1.csv") if csv_dir and os.path.exists(os.path.join(csv_dir, "DXY_h1.csv")) else None
+        ns.us10y_csv = os.path.join(csv_dir, "US10Y_h1.csv") if csv_dir and os.path.exists(os.path.join(csv_dir, "US10Y_h1.csv")) else None
+        frames[sym] = _load_frame(ns)
+        print(f"{sym}: {len(frames[sym].xau)} candles H1 carregados")
+    return frames
+
+
+def cmd_estimate(args: argparse.Namespace) -> int:
+    """ESTIMATIVA DE LUCRO: histórico <start>→<end> (Yahoo ou CSV) → walk-forward OOS → capital, retorno, drawdown, bootstrap."""
+    from datetime import datetime, timezone
+    from .estimate import estimate_profit
+    from .telegram import load_env_file
+
+    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
+    end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    frames = _frames_for_markets(args, args.markets)
+    frames = {k: v for k, v in frames.items() if len(v.xau) > 260}
+    if not frames:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado). Verifique a rede/Yahoo ou use --csv-dir.")
+        return 1
+    rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy)
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+        print(f"\nrelatório salvo em {args.out}")
     return 0
 
 
@@ -511,6 +557,20 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.set_defaults(func=cmd_live)
 
+    es = sub.add_parser("estimate", help="estimativa de lucro num período histórico (walk-forward OOS, custo, bootstrap)")
+    es.add_argument("--start", default="2026-01-01", help="data inicial (YYYY-MM-DD)")
+    es.add_argument("--end", default=None, help="data final (padrão: agora)")
+    es.add_argument("--markets", default="XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
+    es.add_argument("--equity", type=float, default=10000.0)
+    es.add_argument("--risk", type=float, default=None, help="%% por operação (padrão: RISK_PER_TRADE do .env ou 0.5)")
+    es.add_argument("--strategy", default="adaptive", help="adaptive | 3R | 2R+trailing | trailing | 1R | 2R | 4R")
+    es.add_argument("--folds", type=int, default=4)
+    es.add_argument("--step", type=int, default=1)
+    es.add_argument("--horizon", type=int, default=240)
+    es.add_argument("--csv-dir", default=None, help="alternativa ao Yahoo: pasta com <SYMBOL>_h1.csv (+ DXY_h1.csv, US10Y_h1.csv)")
+    es.add_argument("--out", default=None)
+    es.set_defaults(func=cmd_estimate)
+
     ed = sub.add_parser("edge", help="4.0: LIVE EDGE — tabela diária por mercado a partir do que foi vivido (o teste definitivo)")
     ed.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
     ed.add_argument("--db", default="gold_ai.db")
@@ -535,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--dxy-csv", default=None)
     bt.add_argument("--us10y-csv", default=None)
     bt.add_argument("--symbol", default="GC=F")
+    bt.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
+    bt.add_argument("--end", default=None)
     bt.add_argument("--threshold-atr", type=float, default=1.0)
     bt.add_argument("--horizon", type=int, default=240, help="minutos")
     bt.add_argument("--walk-forward", action="store_true")
@@ -554,6 +616,8 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--dxy-csv", default=None)
     va.add_argument("--us10y-csv", default=None)
     va.add_argument("--symbol", default="GC=F")
+    va.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
+    va.add_argument("--end", default=None)
     va.add_argument("--folds", type=int, default=4)
     va.add_argument("--step", type=int, default=1)
     va.add_argument("--mode", choices=["rolling", "anchored"], default="rolling")
@@ -570,6 +634,8 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--dxy-csv", default=None)
     si.add_argument("--us10y-csv", default=None)
     si.add_argument("--symbol", default="GC=F")
+    si.add_argument("--start", default=None, help="histórico Yahoo a partir desta data (YYYY-MM-DD)")
+    si.add_argument("--end", default=None)
     si.add_argument("--step", type=int, default=1)
     si.add_argument("--folds", type=int, default=4)
     si.add_argument("--threshold-atr", type=float, default=1.0)

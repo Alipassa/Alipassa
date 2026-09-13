@@ -366,7 +366,8 @@ class Backtester:
             if self.simulate_trades and sig.type != SignalType.WATCH:
                 plan = mpe.plan(a, snap, sig.direction, sig.type.value)
                 sim = simulate_all(plan, xau[i + 1: i + 1 + horizon_bars + 2], self.horizon_min)
-                row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"]}
+                row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
+                       "score": a.score, "direction": sig.direction.value, "entry": a.price}
                 trade_rows.append(row)
                 if self.adaptive_exit:
                     managed.append((ManagedTrade(len(trade_rows), plan, Thesis.from_assessment(a, sig.direction)), row, i))
