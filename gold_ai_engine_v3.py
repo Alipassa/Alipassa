@@ -1710,6 +1710,17 @@ CREATE TABLE IF NOT EXISTS trades (
     probabilidade REAL,
     confianca REAL
 );
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hora TEXT NOT NULL,
+    preco REAL, score REAL, direcao TEXT, acao TEXT, motivo TEXT, atr REAL,
+    nivel_evidencia INTEGER, confianca REAL,
+    r_hipotetico REAL, resolvido INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS prices (
+    hora TEXT PRIMARY KEY,
+    close REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS account (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hora TEXT NOT NULL,
@@ -2040,6 +2051,67 @@ class PredictionMemory:
             recs.append({"type": r["sinal_tipo"] or "?", "results": results,
                          "profile": ExcursionProfile(r["max_r"] or 0.0, r["mae_r"] or 0.0, bool(r["estopada"]), False, 0)})
         return r_stats(recs)
+
+    # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
+    def record_decision(self, rec) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca) VALUES (?,?,?,?,?,?,?,?,?)",
+            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def store_prices(self, candles: Iterable) -> int:
+        rows = [(c.time.astimezone(timezone.utc).isoformat(), c.close) for c in candles]
+        if not rows:
+            return 0
+        self.conn.executemany("INSERT OR IGNORE INTO prices (hora, close) VALUES (?,?)", rows)
+        self.conn.commit()
+        return len(rows)
+
+    def prices(self, since: Optional[datetime] = None) -> list[tuple[datetime, float]]:
+        q = "SELECT hora, close FROM prices" + (" WHERE hora >= ?" if since else "") + " ORDER BY hora"
+        rows = self.conn.execute(q, (since.isoformat(),) if since else ()).fetchall()
+        return [(datetime.fromisoformat(r["hora"]), r["close"]) for r in rows]
+
+    def resolve_hypotheticals(self, now: datetime, horizon_min: int = 240) -> int:
+        """Preenche o resultado hipotético (3R, stop 1.2 ATR) das decisões bloqueadas com os preços gravados."""
+
+        rows = self.conn.execute("SELECT * FROM decisions WHERE resolvido=0 AND acao NOT IN ('ENTRADA','SEM_SINAL') AND direcao IN ('ALTA','BAIXA')").fetchall()
+        if not rows:
+            return 0
+        prices = self.prices()
+        candles = [Candle(t, p, p, p, p, 0.0) for t, p in prices]
+        n = 0
+        for r in rows:
+            t0 = datetime.fromisoformat(r["hora"])
+            rec = DecisionRecord(t0, r["preco"], r["score"], r["direcao"], r["acao"], r["motivo"] or "", r["atr"] or 0.0)
+            expired = now >= t0 + timedelta(minutes=horizon_min)
+            res = hypothetical_trade(rec, candles, horizon_min)
+            if res is not None or expired:
+                self.conn.execute("UPDATE decisions SET r_hipotetico=?, resolvido=1 WHERE id=?", (res, r["id"]))
+                n += 1
+        self.conn.commit()
+        return n
+
+    def decisions(self, since: Optional[datetime] = None) -> list:
+
+        q = "SELECT * FROM decisions" + (" WHERE hora >= ?" if since else "") + " ORDER BY id"
+        rows = self.conn.execute(q, (since.isoformat(),) if since else ()).fetchall()
+        return [DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
+                               r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0) for r in rows]
+
+    def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None):
+
+        decisions = self.decisions(since)
+        prices = self.prices(since)
+        entries = [(datetime.fromisoformat(r["aberta_em"]), r["direcao"]) for r in self.conn.execute("SELECT aberta_em, direcao FROM trades").fetchall()]
+        atrs = [r["atr"] for r in self.conn.execute("SELECT atr FROM trades WHERE atr IS NOT NULL").fetchall()] or [d.atr for d in decisions if d.atr]
+        threshold = (sum(atrs) / len(atrs)) if atrs else 9.0
+        trade_rows = [{"score": r["score_entrada"] or 0.0, "r": r["resultado_r"]} for r in
+                      self.conn.execute("SELECT score_entrada, resultado_r FROM trades WHERE resultado_r IS NOT NULL").fetchall()]
+        # decisões bloqueadas com resultado hipotético também alimentam a curva de limiar
+        trade_rows += [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
+        return opportunity_report(decisions, prices, entries, threshold, horizon_min, trade_rows)
 
     def resolved_records(self) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM predictions WHERE resultado IN ('ACERTO','ERRO') AND previsao IN ('ALTA','BAIXA')").fetchall()
@@ -4890,296 +4962,6 @@ class TelegramCommands:
 
 
 # ============================================================================
-# LIVE_ENGINE
-# ============================================================================
-
-"""GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE (ciclo completo).
-
-DADOS → SNAPSHOT → PREDICTOR → PRE-MOVE → DECISION ENGINE → TRADE PLAN → RISK ENGINE → POSITION SIZE
-→ MT5 EXECUTOR → BROKER → CONFIRMAÇÃO → 🔄 TRADE MONITOR → MANTER/PROTEGER/ENCERRAR → RESULTADO
-→ SQLITE → PERFORMANCE → NOVO CAPITAL → NOVO POSITION SIZE → PRÓXIMO.
-
-Três cérebros: PREDICTION ENGINE (GoldAIEngine) · TRADE ENGINE (MaxProfitEngine/StopEngine/sizing) ·
-TRADE MONITOR (monitor.TradeMonitor). O núcleo preditivo (2.1–2.3) não é alterado.
-Nasce em PAPER. LIVE exige autorização explícita.
-"""
-
-
-
-
-
-@dataclass
-class CycleResult:
-    assessment: Optional[Assessment]
-    signal: Optional[Signal]
-    decision: str = ""
-    plan: Optional[TradePlan] = None
-    readings: list[tuple[ManagedTrade, MonitorReading]] = field(default_factory=list)
-    messages: list[str] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
-
-
-class LiveExecutionEngine:
-    EXECUTABLE = {SignalType.BUY, SignalType.STRONG_BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE}
-
-    def __init__(self, mem: PredictionMemory, limits: GuardLimits, mode: TradingMode = TradingMode.PAPER, equity: float = 10000.0,
-                 executor=None, sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None,
-                 commands: Optional[TelegramCommands] = None, horizon_min: int = 240, engine: Optional[GoldAIEngine] = None,
-                 log: Callable[[str], None] = print, authorized: bool = False) -> None:
-        self.mem, self.limits, self.mode = mem, limits, mode
-        self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
-        self.sender = sender or TelegramSender(dry_run=True)
-        self.ks = kill_switch or KillSwitch()
-        self.commands = commands
-        self.horizon = horizon_min
-        self.engine = engine or GoldAIEngine()
-        self.log = log
-        self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
-        start_equity = mem.last_equity() or equity
-        self.perf = PerformanceEngine(limits, start_equity)
-        if mem.last_equity() is None:
-            mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
-        self.monitor = TradeMonitor(history=mem.r_stats())
-        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(), horizon_min, limits.min_rr_to_structure)
-        self.managed: list[ManagedTrade] = mem.managed_trades()
-        self.tickets: dict[int, int] = {}             # trade_id → ticket no broker
-        for tr in self.managed:
-            row = mem.conn.execute("SELECT ticket FROM trades WHERE id=?", (tr.trade_id,)).fetchone()
-            if row and row["ticket"]:
-                self.tickets[tr.trade_id] = int(row["ticket"])
-        self.pending_close_confirm: list[int] = []
-
-    # ------------------------------------------------------------------ util
-    def _send(self, text: str, res: CycleResult) -> None:
-        res.messages.append(text)
-        self.sender.send(text)
-
-    def status_text(self) -> str:
-        return format_status(self.perf, self.ks, self.managed, self.mode.value)
-
-    # ------------------------------------------------------------------ comandos
-    def handle_commands(self, res: CycleResult, now: datetime) -> None:
-        if self.commands is None:
-            return
-        for action in self.commands.apply(self.commands.poll(), self.ks):
-            if action == "STATUS":
-                self._send(self.status_text(), res)
-            elif action in ("STOP", "PAUSE", "RESUME"):
-                self._send(f"🔧 comando /{action} aplicado — " + self.ks.new_entries_allowed()[1], res)
-            elif action == "CLOSE_REQUESTED":
-                self._send(f"⚠️ /CLOSE solicitado para {len(self.managed)} posição(ões). Responda /CLOSE CONFIRM para encerrar.", res)
-            elif action == "CLOSE_CONFIRMED":
-                for tr in list(self.managed):
-                    self._close_trade(tr, tr.r_at(tr.plan.entry), "MANUAL", now, res, price_hint=None)
-                self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
-
-    # ------------------------------------------------------------------ ciclo
-    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None) -> CycleResult:
-        res = CycleResult(None, None)
-        now = snap.time
-        self.handle_commands(res, now)
-        if not snap.candles:
-            res.notes.append("sem candles XAU — ciclo abortado")
-            return res
-        fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
-        # capital: em LIVE/SEMI_LIVE vem do broker
-        if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
-            eq = self.executor.account_equity()
-            if eq:
-                before = self.perf.equity
-                self.perf.sync_equity(eq, now)
-                if abs(eq - before) > 0.005:
-                    self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
-        # resolve previsões e operações simuladas pendentes; atualiza histórico
-        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):
-            res.notes.append(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
-        for tid, sim in self.mem.auto_resolve_trades(fine, now):
-            pr = sim["profile"]
-            res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
-        self.mpe.history = self.monitor.history = self.mem.r_stats()
-        self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
-
-        a, sig = self.engine.run_cycle(snap, new_event_key=new_event_key)
-        res.assessment, res.signal = a, sig
-        # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
-        for tr in list(self.managed):
-            self._monitor_trade(tr, a, snap, fine, res)
-        # DECISION ENGINE
-        if sig is not None:
-            self._send(sig.text, res)
-            pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon)
-            res.decision = self._decide_entry(sig, a, snap, pid, res)
-        else:
-            res.decision = "SEM SINAL — " + a.edge_status
-        return res
-
-    # ------------------------------------------------------------------ entrada
-    def _decide_entry(self, sig: Signal, a: Assessment, snap: MarketSnapshot, pid: int, res: CycleResult) -> str:
-        if sig.type not in self.EXECUTABLE or sig.direction == Direction.LATERAL:
-            return f"NO_TRADE — sinal {sig.type.value} não é operacional"
-        allowed, why = self.ks.new_entries_allowed()
-        if not allowed:
-            return f"BLOQUEADA — {why}"
-        blocks = self.perf.blocks(a.time)
-        if blocks:
-            self._send("\n".join(blocks), res)
-            return "BLOQUEADA — " + "; ".join(blocks)
-        spread = None
-        if self.executor is not None:
-            try:
-                bid, ask = self.executor.client.tick()
-                spread = round(ask - bid, 2)
-            except Exception:  # noqa: BLE001
-                spread = None
-        reasons = no_trade_check(a, self.limits, spread)
-        if reasons:
-            return "🟡 NÃO OPERAR — " + "; ".join(reasons)
-        # uma posição por ativo (memória + broker)
-        if self.managed or (self.executor is not None and self.executor.positions()):
-            return "BLOQUEADA — já existe posição ativa em XAUUSD (MAX_POSITIONS)"
-        plan = self.mpe.plan(a, snap, sig.direction, sig.type.value)
-        res.plan = plan
-        if not plan.viable:
-            return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
-        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value)   # capital + risco + stop + contrato
-        if not plan.lots:
-            return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
-        self.log(plan.render())
-        if self.mode == TradingMode.AUTHORIZE and not self.authorized:
-            self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render(), res)
-            return "AGUARDANDO AUTORIZAÇÃO"
-        execution = None
-        if self.mode != TradingMode.PAPER:
-            if self.executor is None:
-                return "BLOQUEADA — sem executor MT5 configurado"
-            execution = self.executor.open(plan, comment=f"GoldAI {sig.type.value}"[:31])
-            self.log(execution.render())
-            if execution.error:
-                self._send("❌ " + execution.render(), res)
-                return "FALHA DE EXECUÇÃO — " + execution.error
-            if execution.mismatches:
-                self._send("⚠️ " + execution.render(), res)
-                if any(m.startswith("SL real") for m in execution.mismatches):
-                    self.executor.close(execution.ticket)
-                    return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
-            self.authorized = False
-        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon)
-        thesis = Thesis.from_assessment(a, plan.direction)
-        tr = ManagedTrade(tid, plan, thesis)
-        if execution is not None:
-            self.tickets[tid] = execution.ticket
-            tr.plan.entry = execution.fill_price or plan.entry
-        self.mem.save_thesis(tid, thesis, tr.state_dict())
-        self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
-        self.managed.append(tr)
-        self._send(format_entry(plan, a, self.mode.value, execution), res)
-        return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
-
-    # ------------------------------------------------------------------ monitor
-    def _monitor_trade(self, tr: ManagedTrade, a: Assessment, snap: MarketSnapshot, fine, res: CycleResult) -> None:
-        now = snap.time
-        ticket = self.tickets.get(tr.trade_id)
-        # 1) o broker fechou (stop/TP)?
-        if ticket and self.executor is not None:
-            closed = self.executor.closed_result(ticket)
-            if closed is not None:
-                r_exit = tr.r_at(closed["price"]) if closed.get("price") else tr.stop_r
-                tr.close(r_exit, "BROKER", closed.get("time") or now)
-                self._finalize(tr, now, res, pnl_usd=closed.get("profit"))
-                return
-        # 2) caminho do preço desde a última leitura (stop/trailing) + reavaliação da tese
-        before = (tr.remaining, tr.stop_r)
-        reading = self.monitor.check_path(tr, fine)
-        from_path = reading is not None
-        if reading is None and tr.status == "OPEN":
-            reading = self.monitor.evaluate(tr, a, snap)
-        if reading is None:
-            return
-        if from_path:
-            if tr.status == "CLOSED" and ticket and self.executor is not None and self.executor.position(ticket) is not None:
-                self.executor.close(ticket)                    # stop lógico tocado antes de sincronizar com o broker
-            elif tr.status == "OPEN" and ticket and self.executor is not None and abs(tr.stop_r - before[1]) > 1e-9:
-                self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
-        else:
-            self._apply_to_broker(tr, reading, before, res)   # ENCERRAR / parcial / trailing / zero a zero chegam ao broker
-        self.mem.log_monitor(tr.trade_id, reading)
-        res.readings.append((tr, reading))
-        self.log(render_monitor(tr, reading))
-        if tr.status == "CLOSED":
-            self._finalize(tr, now, res)
-        else:
-            self.mem.save_state(tr.trade_id, tr.state_dict())
-            if reading.action == "PROTEGER":
-                self._send(format_protection(tr, reading), res)
-            elif reading.action in ("REDUZIR", "ESTENDER"):
-                self._send("📊 GOLD AI MONITOR\n" + render_monitor(tr, reading), res)
-
-    def _apply_to_broker(self, tr: ManagedTrade, reading: MonitorReading, before: tuple[float, float], res: CycleResult) -> None:
-        """Traduz a decisão do monitor em ações no broker (LIVE / SEMI_LIVE)."""
-        ticket = self.tickets.get(tr.trade_id)
-        if not ticket or self.executor is None:
-            return
-        remaining_before, stop_before = before
-        if reading.action == "ENCERRAR" and tr.status == "CLOSED":
-            in_profit = reading.current_r > 0
-            if self.mode == TradingMode.SEMI_LIVE and in_profit and not self.ks.paused:
-                # ação crítica em SEMI_LIVE: pede confirmação, mas protege com stop no zero a zero
-                self.executor.modify(ticket, tr.plan.entry, None)
-                tr.status, tr.close_reason, tr.result_r, tr.closed_at = "OPEN", "", None, None
-                tr.remaining = remaining_before
-                tr.stop_r = max(stop_before, 0.0)
-                self.pending_close_confirm.append(tr.trade_id)
-                self._send(f"🟠 SEMI-LIVE: monitor pede ENCERRAR #{tr.trade_id:05d} com lucro ({reading.current_r:+.2f}R). Stop movido ao zero a zero. Responda /CLOSE CONFIRM.", res)
-                reading.action, reading.note = "PROTEGER", reading.note + " (aguardando confirmação para encerrar)"
-                return
-            ok, price = self.executor.close(ticket)
-            if ok and price is not None:
-                tr.result_r = round(tr.realized_r + (remaining_before) * tr.r_at(price), 3) if tr.result_r is None else tr.result_r
-            return
-        if tr.remaining < remaining_before:  # parcial (PROTEGER/REDUZIR)
-            pos = self.executor.position(ticket)
-            if pos is not None:
-                vol = round(pos.volume * (1 - tr.remaining / remaining_before), 2)
-                vol = max(self.limits.min_lot, vol)
-                if vol < pos.volume:
-                    self.executor.close(ticket, vol, "GoldAI partial")
-        if abs(tr.stop_r - stop_before) > 1e-9:
-            self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
-
-    def _close_trade(self, tr: ManagedTrade, r_exit: float, reason: str, now: datetime, res: CycleResult, price_hint: Optional[float]) -> None:
-        ticket = self.tickets.get(tr.trade_id)
-        if ticket and self.executor is not None:
-            ok, price = self.executor.close(ticket)
-            if ok and price is not None:
-                r_exit = tr.r_at(price)
-        tr.close(r_exit, reason, now)
-        self._finalize(tr, now, res)
-
-    def _finalize(self, tr: ManagedTrade, now: datetime, res: CycleResult, pnl_usd: Optional[float] = None) -> None:
-        risk = tr.plan.risk_usd or 0.0
-        pnl = pnl_usd if pnl_usd is not None else round((tr.result_r or 0.0) * risk, 2)
-        minutes = (now - tr.plan.time).total_seconds() / 60
-        self.mem.close_managed(tr.trade_id, tr.result_r or 0.0, tr.close_reason, now, tr.state_dict())
-        # previsão correta? lead time?
-        correct = (tr.result_r or 0.0) > 0
-        lead = next((h.time for h in tr.history if h.current_r >= 1.0), None)
-        lead_min = (lead - tr.plan.time).total_seconds() / 60 if lead else None
-        self.mem.save_financial_result(tr.trade_id, pnl, round(minutes, 1), lead_min)
-        self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
-        self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
-        self.log(render_evolution(tr))
-        self.log(self.perf.render())
-        if tr.close_reason in ("TESE INVALIDADA", "EXIT SCORE"):
-            self._send(format_scenario_change(tr, tr.history[-1]), res)
-        self._send(format_result(tr, pnl, correct, lead_min, minutes), res)
-        if tr in self.managed:
-            self.managed.remove(tr)
-        self.tickets.pop(tr.trade_id, None)
-        if self.perf.trading_stop:
-            self._send("🚨 TRADING STOP — perda diária máxima atingida; sem novas entradas hoje", res)
-
-
-# ============================================================================
 # VALIDATION
 # ============================================================================
 
@@ -5405,6 +5187,7 @@ class ValidationReport:
     audit_violations: list[str] = field(default_factory=list)
     n_audited: int = 0
     min_signals: int = 20  # abaixo disso nenhuma conclusão estatística é honesta
+    opportunity_text: str = ""
 
     def verdict(self) -> str:
         m = re.search(r"Lead time \(acertos\): média ([\d.]+) min", self.walk_forward_text)
@@ -5426,8 +5209,12 @@ class ValidationReport:
         audit = f"🔍 AUDITORIA ANTI LOOK-AHEAD: {self.n_audited} snapshots, {len(self.audit_violations)} violação(ões)"
         if self.audit_violations:
             audit += "\n" + "\n".join(f"  ✗ {v}" for v in self.audit_violations[:10])
-        return "\n\n".join(["🧪 GOLD AI ENGINE 2.1 — VALIDATION ENGINE", audit, self.backtest_text, self.walk_forward_text,
-                            self.calibration.render(), self.scoreboard.render(), f"VEREDITO: {self.verdict()}"])
+        parts = ["🧪 GOLD AI ENGINE — VALIDATION ENGINE", audit, self.backtest_text, self.walk_forward_text,
+                 self.calibration.render(), self.scoreboard.render()]
+        if self.opportunity_text:
+            parts.append(self.opportunity_text)
+        parts.append(f"VEREDITO: {self.verdict()}")
+        return "\n\n".join(parts)
 
 
 # ============================================================================
@@ -5626,7 +5413,7 @@ def evaluate(signals: Iterable[SignalRecord], path: Sequence[tuple[datetime, flo
     m.n_moves = len(moves)
     for mv in moves:
         for s in sigs:
-            if s.direction == mv.direction and mv.start - timedelta(minutes=horizon_min) <= s.time < mv.evident_at:
+            if s.direction == mv.direction and mv.evident_at - timedelta(minutes=horizon_min) <= s.time < mv.evident_at:
                 mv.detected_by = s
                 break
     m.n_moves_detected = sum(1 for mv in moves if mv.detected_by)
@@ -5714,11 +5501,14 @@ class BacktestResult:
     cfg: EngineConfig
     trades: Optional[object] = None   # trading.RStats (2.2)
     trade_rows: list[dict] = field(default_factory=list)
+    opportunity: Optional[object] = None  # opportunity.OpportunityReport (3.0)
 
     def render(self) -> str:
         out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
         if self.trades is not None:
             out += "\n\n" + self.trades.render()
+        if self.opportunity is not None:
+            out += "\n\n" + self.opportunity.render()
         return out
 
 
@@ -5748,9 +5538,21 @@ class Backtester:
         managed: list[tuple[ManagedTrade, dict, int]] = []   # (trade, row, índice de abertura)
         horizon_bars = self.horizon_min // 60
         prev_i = start - 1
+        decisions: list[DecisionRecord] = []
+        entries: list[tuple] = []
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
+            # OPPORTUNITY ENGINE: cada passo é uma oportunidade analisada
+            d_dir = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+            entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
+            rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
+            rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
+            if abs(a.score) >= 40 and d_dir != Direction.LATERAL:
+                rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
+            decisions.append(rec)
+            if entered:
+                entries.append((a.time, sig.direction.value))
             # 2.3: operações abertas continuam sendo analisadas a cada passo (ADAPTIVE EXIT)
             if self.adaptive_exit:
                 for tr, row, i0 in list(managed):
@@ -5784,8 +5586,10 @@ class Backtester:
         path = [(c.time, c.close) for c in xau[start:end]]
         atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
         threshold = self.threshold_atr * statistics.fmean(atrs)
+        curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
+        opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
         return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows)
+                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp)
 
 
 @dataclass
@@ -5867,7 +5671,473 @@ def validate(frame: HistoryFrame, cfg: Optional[EngineConfig] = None, n_folds: i
     calib = calibration_table((o.signal.probability, o.result == "ACERTO") for o in oos if o.result != "LATERAL")
     board = factor_scoreboard([{"direction": o.signal.direction, "hit": o.result == "ACERTO", "factors": o.signal.factors,
                                 "technical": o.signal.technical} for o in oos if o.result != "LATERAL"])
-    return ValidationReport(full.render(), wf.render(), calib, board, violations, audited)
+    rep = ValidationReport(full.render(), wf.render(), calib, board, violations, audited)
+    # oportunidades fora da amostra: agrega os folds de teste
+    rep.opportunity_text = "OOS por fold:\n" + "\n".join(f"  fold {k}: captura {('n/d' if r.opportunity.capture_rate is None else f'{r.opportunity.capture_rate:.0%}')} · "
+                                                         f"entry rate {('n/d' if r.opportunity.entry_rate is None else f'{r.opportunity.entry_rate:.0%}')}"
+                                                         + (" ⚠️ OVERFILTER" if r.opportunity.overfilter else "") for k, (_, r) in enumerate(wf.folds, 1))
+    return rep
+
+
+# ============================================================================
+# OPPORTUNITY
+# ============================================================================
+
+"""GOLD AI ENGINE 3.0 — OPPORTUNITY ENGINE (medição, não regras).
+
+🔥 OPPORTUNITY CAPTURE RATE  movimentos relevantes do período × quantos a IA capturou com entrada
+   ENTRY RATE                oportunidades analisadas × entradas (⚠️ OVERFILTER abaixo do mínimo)
+   FILTER ATTRIBUTION        qual regra bloqueou cada oportunidade e o que teria acontecido (expectancy hipotética)
+   THRESHOLD CURVE           entradas × expectancy por limiar de score — a região ideal, não o score mais alto
+
+Filosofia: analisar muito, decidir simples, agir quando existir vantagem. Se o sistema entra pouco,
+não se adiciona filtro: identifica-se qual regra elimina oportunidades lucrativas e reduz-se o seu peso.
+"""
+
+
+
+
+# Categorias de bloqueio (uma por decisão, a primeira que impediu a entrada)
+RULES = ("SEM_SINAL", "SEM_VANTAGEM", "CONFIANCA", "EVIDENCIA", "CONFLITO", "ESTAGIO_3", "SPREAD", "VIABILIDADE",
+         "KILL_SWITCH", "TRADING_STOP", "POSICAO_ABERTA", "LOTE", "AUTORIZACAO", "ENTRADA")
+
+
+def classify_reason(decision: str) -> str:
+    d = decision.lower()
+    if d.startswith(("🟢 paper open", "🟢 position open")):
+        return "ENTRADA"
+    if "aguardando autoriza" in d:
+        return "AUTORIZACAO"
+    if "sem sinal" in d or "não é operacional" in d:
+        return "SEM_SINAL"
+    if "sem vantagem" in d:
+        return "SEM_VANTAGEM"
+    if "confiança" in d:
+        return "CONFIANCA"
+    if "evidência" in d:
+        return "EVIDENCIA"
+    if "conflitantes" in d:
+        return "CONFLITO"
+    if "perseguir" in d:
+        return "ESTAGIO_3"
+    if "spread" in d:
+        return "SPREAD"
+    if "espaço estatístico" in d or "viabil" in d:
+        return "VIABILIDADE"
+    if "kill switch" in d or "trading_enabled" in d or "/stop" in d or "pausado" in d:
+        return "KILL_SWITCH"
+    if "trading stop" in d or "drawdown" in d:
+        return "TRADING_STOP"
+    if "posição ativa" in d or "posições" in d:
+        return "POSICAO_ABERTA"
+    if "lote" in d:
+        return "LOTE"
+    return "OUTRO"
+
+
+@dataclass
+class DecisionRecord:
+    time: datetime
+    price: float
+    score: float
+    direction: str                 # ALTA | BAIXA | LATERAL
+    action: str                    # ENTRADA | bloqueio (RULES)
+    reason: str = ""
+    atr: float = 0.0
+    hypothetical_r: Optional[float] = None   # o que teria acontecido com a hipótese 3R (stop 1.2 ATR)
+    evidence_level: int = 0
+    confidence: float = 0.0
+
+
+def hypothetical_trade(rec: DecisionRecord, candles: Sequence[Candle], horizon_min: int, stop_atr: float = 1.2) -> Optional[float]:
+    """Resultado em R da operação que a regra bloqueou, com a hipótese padrão (stop 1.2 ATR, alvo 3R)."""
+    if rec.direction not in ("ALTA", "BAIXA") or rec.atr <= 0:
+        return None
+    sign = 1.0 if rec.direction == "ALTA" else -1.0
+    plan = TradePlan(Direction(rec.direction), rec.price, rec.price - sign * stop_atr * rec.atr, rec.atr, rec.time)
+    fut = [c for c in candles if c.time > rec.time]
+    if not fut or (fut[-1].time - rec.time) < timedelta(minutes=min(horizon_min, 30)):
+        return None
+    res = simulate_trade(plan, fut, ExitStrategy("3R", target_r=3.0), horizon_min)
+    return None if res.exit_reason == "OPEN" else res.r_multiple
+
+
+@dataclass
+class OpportunityReport:
+    period_hours: float
+    n_moves: int
+    n_captured: int
+    capture_rate: Optional[float]
+    n_analyzed: int
+    n_entries: int
+    entry_rate: Optional[float]
+    overfilter: bool
+    attribution: list[dict] = field(default_factory=list)     # {rule, n, hyp_n, hyp_expectancy, hyp_win}
+    threshold_curve: list[dict] = field(default_factory=list) # {threshold, n, expectancy, win_rate}
+    min_entry_rate: float = 0.05
+    min_capture_rate: float = 0.25
+
+    def render(self) -> str:
+        f = lambda x: "n/d" if x is None else f"{x:.0%}"  # noqa: E731
+        lines = ["🔥 OPPORTUNITY ENGINE", f"Período: {self.period_hours:.0f} h",
+                 f"OPPORTUNITY CAPTURE RATE: {f(self.capture_rate)}  ({self.n_captured}/{self.n_moves} movimentos relevantes capturados com entrada)",
+                 f"ENTRY RATE: {f(self.entry_rate)}  ({self.n_entries} entradas em {self.n_analyzed} oportunidades analisadas)"]
+        if self.overfilter:
+            lines.append(f"⚠️ OVERFILTER — entry rate < {self.min_entry_rate:.0%} ou captura < {self.min_capture_rate:.0%}: identificar a regra que elimina oportunidades lucrativas")
+        if self.attribution:
+            lines.append("Atribuição por filtro (o que a regra bloqueou e o que teria acontecido com a hipótese 3R):")
+            for a in self.attribution:
+                hyp = f"E hipotética {a['hyp_expectancy']:+.2f}R (win {a['hyp_win']:.0%}, n={a['hyp_n']})" if a["hyp_n"] else "sem resultado hipotético ainda"
+                flag = " ◀ regra cara: bloqueia oportunidades lucrativas" if (a["hyp_n"] >= 10 and a["hyp_expectancy"] > 0.2) else ""
+                lines.append(f"  {a['rule']:<15} n={a['n']:<4} {hyp}{flag}")
+        if self.threshold_curve:
+            lines.append("Curva limiar × entradas × expectancy (região ideal = maior expectancy com volume suficiente):")
+            best = max((r for r in self.threshold_curve if r["n"] >= 10), key=lambda r: r["expectancy"], default=None)
+            for r in self.threshold_curve:
+                mark = " ◀ região ideal" if best is r else ""
+                lines.append(f"  Score ≥ {r['threshold']:<3} entradas {r['n']:<5} E={r['expectancy']:+.2f}R  win {r['win_rate']:.0%}{mark}")
+        return "\n".join(lines)
+
+
+def threshold_curve(rows: Sequence[dict], thresholds: Sequence[int] = (40, 50, 60, 70, 80)) -> list[dict]:
+    """rows: {"score": |score| na entrada, "r": resultado em R}."""
+    out = []
+    for t in thresholds:
+        sub = [r["r"] for r in rows if abs(r["score"]) >= t and r["r"] is not None]
+        if not sub:
+            out.append({"threshold": t, "n": 0, "expectancy": 0.0, "win_rate": 0.0})
+            continue
+        out.append({"threshold": t, "n": len(sub), "expectancy": round(statistics.fmean(sub), 3), "win_rate": sum(1 for x in sub if x > 0) / len(sub)})
+    return out
+
+
+def attribution(decisions: Sequence[DecisionRecord]) -> list[dict]:
+    by: dict[str, list[DecisionRecord]] = {}
+    for d in decisions:
+        by.setdefault(d.action, []).append(d)
+    out = []
+    for rule, recs in sorted(by.items(), key=lambda kv: -len(kv[1])):
+        hyp = [r.hypothetical_r for r in recs if r.hypothetical_r is not None]
+        out.append({"rule": rule, "n": len(recs), "hyp_n": len(hyp), "hyp_expectancy": round(statistics.fmean(hyp), 3) if hyp else 0.0,
+                    "hyp_win": (sum(1 for x in hyp if x > 0) / len(hyp)) if hyp else 0.0})
+    return out
+
+
+def opportunity_report(decisions: Sequence[DecisionRecord], prices: Sequence[tuple[datetime, float]], entries: Sequence[tuple[datetime, str]],
+                       threshold_usd: float, horizon_min: int = 240, trade_rows: Sequence[dict] = (),
+                       min_entry_rate: float = 0.05, min_capture_rate: float = 0.25) -> OpportunityReport:
+    """decisions: uma por ciclo analisado; prices: (t, close) do período; entries: (t, direção) das entradas;
+    trade_rows: {"score", "r"} das operações resolvidas (curva de limiar)."""
+    prices = sorted(prices)
+    hours = (prices[-1][0] - prices[0][0]).total_seconds() / 3600 if len(prices) > 1 else 0.0
+    moves = detect_moves(prices, threshold_usd, horizon_min) if len(prices) > 1 else []
+    captured = 0
+    for mv in moves:
+        if any(d == mv.direction and mv.evident_at - timedelta(minutes=horizon_min) <= t < mv.evident_at for t, d in entries):
+            captured += 1
+    analyzed = [d for d in decisions if d.action != "SEM_SINAL"] or list(decisions)
+    n_entries = sum(1 for d in decisions if d.action == "ENTRADA")
+    entry_rate = (n_entries / len(analyzed)) if analyzed else None
+    capture = (captured / len(moves)) if moves else None
+    overfilter = (entry_rate is not None and len(analyzed) >= 20 and entry_rate < min_entry_rate) or (capture is not None and len(moves) >= 10 and capture < min_capture_rate)
+    return OpportunityReport(hours, len(moves), captured, capture, len(analyzed), n_entries, entry_rate, overfilter,
+                             attribution([d for d in decisions if d.action != "ENTRADA"]), threshold_curve(trade_rows), min_entry_rate, min_capture_rate)
+
+
+# ============================================================================
+# LIVE_ENGINE
+# ============================================================================
+
+"""GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE (ciclo completo).
+
+DADOS → SNAPSHOT → PREDICTOR → PRE-MOVE → DECISION ENGINE → TRADE PLAN → RISK ENGINE → POSITION SIZE
+→ MT5 EXECUTOR → BROKER → CONFIRMAÇÃO → 🔄 TRADE MONITOR → MANTER/PROTEGER/ENCERRAR → RESULTADO
+→ SQLITE → PERFORMANCE → NOVO CAPITAL → NOVO POSITION SIZE → PRÓXIMO.
+
+Três cérebros: PREDICTION ENGINE (GoldAIEngine) · TRADE ENGINE (MaxProfitEngine/StopEngine/sizing) ·
+TRADE MONITOR (monitor.TradeMonitor). O núcleo preditivo (2.1–2.3) não é alterado.
+Nasce em PAPER. LIVE exige autorização explícita.
+"""
+
+
+
+
+
+@dataclass
+class CycleResult:
+    assessment: Optional[Assessment]
+    signal: Optional[Signal]
+    decision: str = ""
+    plan: Optional[TradePlan] = None
+    readings: list[tuple[ManagedTrade, MonitorReading]] = field(default_factory=list)
+    messages: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+class LiveExecutionEngine:
+    EXECUTABLE = {SignalType.BUY, SignalType.STRONG_BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE}
+
+    def __init__(self, mem: PredictionMemory, limits: GuardLimits, mode: TradingMode = TradingMode.PAPER, equity: float = 10000.0,
+                 executor=None, sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None,
+                 commands: Optional[TelegramCommands] = None, horizon_min: int = 240, engine: Optional[GoldAIEngine] = None,
+                 log: Callable[[str], None] = print, authorized: bool = False) -> None:
+        self.mem, self.limits, self.mode = mem, limits, mode
+        self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
+        self.sender = sender or TelegramSender(dry_run=True)
+        self.ks = kill_switch or KillSwitch()
+        self.commands = commands
+        self.horizon = horizon_min
+        self.engine = engine or GoldAIEngine()
+        self.log = log
+        self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
+        start_equity = mem.last_equity() or equity
+        self.perf = PerformanceEngine(limits, start_equity)
+        if mem.last_equity() is None:
+            mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
+        self.monitor = TradeMonitor(history=mem.r_stats())
+        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(), horizon_min, limits.min_rr_to_structure)
+        self.managed: list[ManagedTrade] = mem.managed_trades()
+        self.tickets: dict[int, int] = {}             # trade_id → ticket no broker
+        for tr in self.managed:
+            row = mem.conn.execute("SELECT ticket FROM trades WHERE id=?", (tr.trade_id,)).fetchone()
+            if row and row["ticket"]:
+                self.tickets[tr.trade_id] = int(row["ticket"])
+        self.pending_close_confirm: list[int] = []
+
+    # ------------------------------------------------------------------ util
+    def _send(self, text: str, res: CycleResult) -> None:
+        res.messages.append(text)
+        self.sender.send(text)
+
+    def status_text(self) -> str:
+        return format_status(self.perf, self.ks, self.managed, self.mode.value)
+
+    # ------------------------------------------------------------------ comandos
+    def handle_commands(self, res: CycleResult, now: datetime) -> None:
+        if self.commands is None:
+            return
+        for action in self.commands.apply(self.commands.poll(), self.ks):
+            if action == "STATUS":
+                self._send(self.status_text(), res)
+            elif action in ("STOP", "PAUSE", "RESUME"):
+                self._send(f"🔧 comando /{action} aplicado — " + self.ks.new_entries_allowed()[1], res)
+            elif action == "CLOSE_REQUESTED":
+                self._send(f"⚠️ /CLOSE solicitado para {len(self.managed)} posição(ões). Responda /CLOSE CONFIRM para encerrar.", res)
+            elif action == "CLOSE_CONFIRMED":
+                for tr in list(self.managed):
+                    self._close_trade(tr, tr.r_at(tr.plan.entry), "MANUAL", now, res, price_hint=None)
+                self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
+
+    # ------------------------------------------------------------------ ciclo
+    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None) -> CycleResult:
+        res = CycleResult(None, None)
+        now = snap.time
+        self.handle_commands(res, now)
+        if not snap.candles:
+            res.notes.append("sem candles XAU — ciclo abortado")
+            return res
+        fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
+        # capital: em LIVE/SEMI_LIVE vem do broker
+        if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
+            eq = self.executor.account_equity()
+            if eq:
+                before = self.perf.equity
+                self.perf.sync_equity(eq, now)
+                if abs(eq - before) > 0.005:
+                    self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
+        # resolve previsões e operações simuladas pendentes; atualiza histórico
+        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):
+            res.notes.append(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
+        for tid, sim in self.mem.auto_resolve_trades(fine, now):
+            pr = sim["profile"]
+            res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
+        self.mpe.history = self.monitor.history = self.mem.r_stats()
+        self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
+
+        self.mem.store_prices(fine)
+        self.mem.resolve_hypotheticals(now, self.horizon)
+        a, sig = self.engine.run_cycle(snap, new_event_key=new_event_key)
+        res.assessment, res.signal = a, sig
+        # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
+        for tr in list(self.managed):
+            self._monitor_trade(tr, a, snap, fine, res)
+        # DECISION ENGINE
+        if sig is not None:
+            self._send(sig.text, res)
+            pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon)
+            res.decision = self._decide_entry(sig, a, snap, pid, res)
+        else:
+            res.decision = "SEM SINAL — " + a.edge_status
+        # OPPORTUNITY ENGINE: toda oportunidade analisada vira um registro (entrada ou regra que bloqueou)
+        direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+        self.mem.record_decision(DecisionRecord(now, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
+                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence))
+        return res
+
+    # ------------------------------------------------------------------ entrada
+    def _decide_entry(self, sig: Signal, a: Assessment, snap: MarketSnapshot, pid: int, res: CycleResult) -> str:
+        if sig.type not in self.EXECUTABLE or sig.direction == Direction.LATERAL:
+            return f"NO_TRADE — sinal {sig.type.value} não é operacional"
+        allowed, why = self.ks.new_entries_allowed()
+        if not allowed:
+            return f"BLOQUEADA — {why}"
+        blocks = self.perf.blocks(a.time)
+        if blocks:
+            self._send("\n".join(blocks), res)
+            return "BLOQUEADA — " + "; ".join(blocks)
+        spread = None
+        if self.executor is not None:
+            try:
+                bid, ask = self.executor.client.tick()
+                spread = round(ask - bid, 2)
+            except Exception:  # noqa: BLE001
+                spread = None
+        reasons = no_trade_check(a, self.limits, spread)
+        if reasons:
+            return "🟡 NÃO OPERAR — " + "; ".join(reasons)
+        # uma posição por ativo (memória + broker)
+        if self.managed or (self.executor is not None and self.executor.positions()):
+            return "BLOQUEADA — já existe posição ativa em XAUUSD (MAX_POSITIONS)"
+        plan = self.mpe.plan(a, snap, sig.direction, sig.type.value)
+        res.plan = plan
+        if not plan.viable:
+            return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
+        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value)   # capital + risco + stop + contrato
+        if not plan.lots:
+            return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+        self.log(plan.render())
+        if self.mode == TradingMode.AUTHORIZE and not self.authorized:
+            self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render(), res)
+            return "AGUARDANDO AUTORIZAÇÃO"
+        execution = None
+        if self.mode != TradingMode.PAPER:
+            if self.executor is None:
+                return "BLOQUEADA — sem executor MT5 configurado"
+            execution = self.executor.open(plan, comment=f"GoldAI {sig.type.value}"[:31])
+            self.log(execution.render())
+            if execution.error:
+                self._send("❌ " + execution.render(), res)
+                return "FALHA DE EXECUÇÃO — " + execution.error
+            if execution.mismatches:
+                self._send("⚠️ " + execution.render(), res)
+                if any(m.startswith("SL real") for m in execution.mismatches):
+                    self.executor.close(execution.ticket)
+                    return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
+            self.authorized = False
+        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon)
+        thesis = Thesis.from_assessment(a, plan.direction)
+        tr = ManagedTrade(tid, plan, thesis)
+        if execution is not None:
+            self.tickets[tid] = execution.ticket
+            tr.plan.entry = execution.fill_price or plan.entry
+        self.mem.save_thesis(tid, thesis, tr.state_dict())
+        self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
+        self.managed.append(tr)
+        self._send(format_entry(plan, a, self.mode.value, execution), res)
+        return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
+
+    # ------------------------------------------------------------------ monitor
+    def _monitor_trade(self, tr: ManagedTrade, a: Assessment, snap: MarketSnapshot, fine, res: CycleResult) -> None:
+        now = snap.time
+        ticket = self.tickets.get(tr.trade_id)
+        # 1) o broker fechou (stop/TP)?
+        if ticket and self.executor is not None:
+            closed = self.executor.closed_result(ticket)
+            if closed is not None:
+                r_exit = tr.r_at(closed["price"]) if closed.get("price") else tr.stop_r
+                tr.close(r_exit, "BROKER", closed.get("time") or now)
+                self._finalize(tr, now, res, pnl_usd=closed.get("profit"))
+                return
+        # 2) caminho do preço desde a última leitura (stop/trailing) + reavaliação da tese
+        before = (tr.remaining, tr.stop_r)
+        reading = self.monitor.check_path(tr, fine)
+        from_path = reading is not None
+        if reading is None and tr.status == "OPEN":
+            reading = self.monitor.evaluate(tr, a, snap)
+        if reading is None:
+            return
+        if from_path:
+            if tr.status == "CLOSED" and ticket and self.executor is not None and self.executor.position(ticket) is not None:
+                self.executor.close(ticket)                    # stop lógico tocado antes de sincronizar com o broker
+            elif tr.status == "OPEN" and ticket and self.executor is not None and abs(tr.stop_r - before[1]) > 1e-9:
+                self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
+        else:
+            self._apply_to_broker(tr, reading, before, res)   # ENCERRAR / parcial / trailing / zero a zero chegam ao broker
+        self.mem.log_monitor(tr.trade_id, reading)
+        res.readings.append((tr, reading))
+        self.log(render_monitor(tr, reading))
+        if tr.status == "CLOSED":
+            self._finalize(tr, now, res)
+        else:
+            self.mem.save_state(tr.trade_id, tr.state_dict())
+            if reading.action == "PROTEGER":
+                self._send(format_protection(tr, reading), res)
+            elif reading.action in ("REDUZIR", "ESTENDER"):
+                self._send("📊 GOLD AI MONITOR\n" + render_monitor(tr, reading), res)
+
+    def _apply_to_broker(self, tr: ManagedTrade, reading: MonitorReading, before: tuple[float, float], res: CycleResult) -> None:
+        """Traduz a decisão do monitor em ações no broker (LIVE / SEMI_LIVE)."""
+        ticket = self.tickets.get(tr.trade_id)
+        if not ticket or self.executor is None:
+            return
+        remaining_before, stop_before = before
+        if reading.action == "ENCERRAR" and tr.status == "CLOSED":
+            in_profit = reading.current_r > 0
+            if self.mode == TradingMode.SEMI_LIVE and in_profit and not self.ks.paused:
+                # ação crítica em SEMI_LIVE: pede confirmação, mas protege com stop no zero a zero
+                self.executor.modify(ticket, tr.plan.entry, None)
+                tr.status, tr.close_reason, tr.result_r, tr.closed_at = "OPEN", "", None, None
+                tr.remaining = remaining_before
+                tr.stop_r = max(stop_before, 0.0)
+                self.pending_close_confirm.append(tr.trade_id)
+                self._send(f"🟠 SEMI-LIVE: monitor pede ENCERRAR #{tr.trade_id:05d} com lucro ({reading.current_r:+.2f}R). Stop movido ao zero a zero. Responda /CLOSE CONFIRM.", res)
+                reading.action, reading.note = "PROTEGER", reading.note + " (aguardando confirmação para encerrar)"
+                return
+            ok, price = self.executor.close(ticket)
+            if ok and price is not None:
+                tr.result_r = round(tr.realized_r + (remaining_before) * tr.r_at(price), 3) if tr.result_r is None else tr.result_r
+            return
+        if tr.remaining < remaining_before:  # parcial (PROTEGER/REDUZIR)
+            pos = self.executor.position(ticket)
+            if pos is not None:
+                vol = round(pos.volume * (1 - tr.remaining / remaining_before), 2)
+                vol = max(self.limits.min_lot, vol)
+                if vol < pos.volume:
+                    self.executor.close(ticket, vol, "GoldAI partial")
+        if abs(tr.stop_r - stop_before) > 1e-9:
+            self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
+
+    def _close_trade(self, tr: ManagedTrade, r_exit: float, reason: str, now: datetime, res: CycleResult, price_hint: Optional[float]) -> None:
+        ticket = self.tickets.get(tr.trade_id)
+        if ticket and self.executor is not None:
+            ok, price = self.executor.close(ticket)
+            if ok and price is not None:
+                r_exit = tr.r_at(price)
+        tr.close(r_exit, reason, now)
+        self._finalize(tr, now, res)
+
+    def _finalize(self, tr: ManagedTrade, now: datetime, res: CycleResult, pnl_usd: Optional[float] = None) -> None:
+        risk = tr.plan.risk_usd or 0.0
+        pnl = pnl_usd if pnl_usd is not None else round((tr.result_r or 0.0) * risk, 2)
+        minutes = (now - tr.plan.time).total_seconds() / 60
+        self.mem.close_managed(tr.trade_id, tr.result_r or 0.0, tr.close_reason, now, tr.state_dict())
+        # previsão correta? lead time?
+        correct = (tr.result_r or 0.0) > 0
+        lead = next((h.time for h in tr.history if h.current_r >= 1.0), None)
+        lead_min = (lead - tr.plan.time).total_seconds() / 60 if lead else None
+        self.mem.save_financial_result(tr.trade_id, pnl, round(minutes, 1), lead_min)
+        self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
+        self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
+        self.log(render_evolution(tr))
+        self.log(self.perf.render())
+        if tr.close_reason in ("TESE INVALIDADA", "EXIT SCORE"):
+            self._send(format_scenario_change(tr, tr.history[-1]), res)
+        self._send(format_result(tr, pnl, correct, lead_min, minutes), res)
+        if tr in self.managed:
+            self.managed.remove(tr)
+        self.tickets.pop(tr.trade_id, None)
+        if self.perf.trading_stop:
+            self._send("🚨 TRADING STOP — perda diária máxima atingida; sem novas entradas hoje", res)
 
 
 # ============================================================================
@@ -6142,6 +6412,9 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(rs.render())
     print()
     print(mem.exit_learning())
+    print()
+    mem.resolve_hypotheticals(datetime.now(timezone.utc))
+    print(mem.opportunity_report().render())
     if rs.n:
         best = next((s for s in rs.strategies if s.name == rs.best), None)
         print(f"\nExpectancy em R ({rs.best}): {best.expectancy_r:+.2f}R por operação · "

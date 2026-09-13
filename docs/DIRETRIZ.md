@@ -391,3 +391,16 @@ Regras literais da especificação:
    MAX_SPREAD · MAX_SLIPPAGE. Perda diária atingida → 🚨 TRADING STOP.
 6. Kill switch obrigatório: TRADING_ENABLED=false · /STOP · /PAUSE · /STATUS · /CLOSE (com confirmação).
 7. O 3.0 nasce em PAPER. PAPER → estatística positiva → AUTHORIZE → microvolume → LIVE.
+
+
+---
+
+# ADENDO 3.0-B — OPPORTUNITY ENGINE
+
+Antes de mudar qualquer regra, medir: OPPORTUNITY CAPTURE RATE (movimentos relevantes capturados),
+ENTRY RATE (oportunidades analisadas → entradas; ⚠️ OVERFILTER), atribuição por filtro (qual regra
+bloqueou e o que teria acontecido) e a curva limiar × expectancy (a região ideal, não o score máximo).
+
+Se o sistema entra pouco, não se adiciona filtro: identifica-se a regra que elimina oportunidades
+lucrativas e retira-se ou reduz-se o seu peso. Analisar muito, decidir simples, agir quando existir
+vantagem.

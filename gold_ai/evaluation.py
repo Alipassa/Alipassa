@@ -199,7 +199,7 @@ def evaluate(signals: Iterable[SignalRecord], path: Sequence[tuple[datetime, flo
     m.n_moves = len(moves)
     for mv in moves:
         for s in sigs:
-            if s.direction == mv.direction and mv.start - timedelta(minutes=horizon_min) <= s.time < mv.evident_at:
+            if s.direction == mv.direction and mv.evident_at - timedelta(minutes=horizon_min) <= s.time < mv.evident_at:
                 mv.detected_by = s
                 break
     m.n_moves_detected = sum(1 for mv in moves if mv.detected_by)
@@ -288,11 +288,14 @@ class BacktestResult:
     cfg: EngineConfig
     trades: Optional[object] = None   # trading.RStats (2.2)
     trade_rows: list[dict] = field(default_factory=list)
+    opportunity: Optional[object] = None  # opportunity.OpportunityReport (3.0)
 
     def render(self) -> str:
         out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
         if self.trades is not None:
             out += "\n\n" + self.trades.render()
+        if self.opportunity is not None:
+            out += "\n\n" + self.opportunity.render()
         return out
 
 
@@ -324,9 +327,22 @@ class Backtester:
         managed: list[tuple[ManagedTrade, dict, int]] = []   # (trade, row, índice de abertura)
         horizon_bars = self.horizon_min // 60
         prev_i = start - 1
+        from .opportunity import DecisionRecord, hypothetical_trade
+        decisions: list[DecisionRecord] = []
+        entries: list[tuple] = []
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
+            # OPPORTUNITY ENGINE: cada passo é uma oportunidade analisada
+            d_dir = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+            entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
+            rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
+            rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
+            if abs(a.score) >= 40 and d_dir != Direction.LATERAL:
+                rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
+            decisions.append(rec)
+            if entered:
+                entries.append((a.time, sig.direction.value))
             # 2.3: operações abertas continuam sendo analisadas a cada passo (ADAPTIVE EXIT)
             if self.adaptive_exit:
                 for tr, row, i0 in list(managed):
@@ -360,8 +376,11 @@ class Backtester:
         path = [(c.time, c.close) for c in xau[start:end]]
         atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
         threshold = self.threshold_atr * statistics.fmean(atrs)
+        from .opportunity import opportunity_report
+        curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
+        opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
         return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg,
-                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows)
+                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp)
 
 
 @dataclass
@@ -445,4 +464,10 @@ def validate(frame: HistoryFrame, cfg: Optional[EngineConfig] = None, n_folds: i
     calib = calibration_table((o.signal.probability, o.result == "ACERTO") for o in oos if o.result != "LATERAL")
     board = factor_scoreboard([{"direction": o.signal.direction, "hit": o.result == "ACERTO", "factors": o.signal.factors,
                                 "technical": o.signal.technical} for o in oos if o.result != "LATERAL"])
-    return ValidationReport(full.render(), wf.render(), calib, board, violations, audited)
+    rep = ValidationReport(full.render(), wf.render(), calib, board, violations, audited)
+    # oportunidades fora da amostra: agrega os folds de teste
+    from .opportunity import opportunity_report
+    rep.opportunity_text = "OOS por fold:\n" + "\n".join(f"  fold {k}: captura {('n/d' if r.opportunity.capture_rate is None else f'{r.opportunity.capture_rate:.0%}')} · "
+                                                         f"entry rate {('n/d' if r.opportunity.entry_rate is None else f'{r.opportunity.entry_rate:.0%}')}"
+                                                         + (" ⚠️ OVERFILTER" if r.opportunity.overfilter else "") for k, (_, r) in enumerate(wf.folds, 1))
+    return rep

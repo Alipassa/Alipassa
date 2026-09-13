@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS trades (
     probabilidade REAL,
     confianca REAL
 );
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hora TEXT NOT NULL,
+    preco REAL, score REAL, direcao TEXT, acao TEXT, motivo TEXT, atr REAL,
+    nivel_evidencia INTEGER, confianca REAL,
+    r_hipotetico REAL, resolvido INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS prices (
+    hora TEXT PRIMARY KEY,
+    close REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS account (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hora TEXT NOT NULL,
@@ -425,6 +436,71 @@ class PredictionMemory:
             recs.append({"type": r["sinal_tipo"] or "?", "results": results,
                          "profile": ExcursionProfile(r["max_r"] or 0.0, r["mae_r"] or 0.0, bool(r["estopada"]), False, 0)})
         return r_stats(recs)
+
+    # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
+    def record_decision(self, rec) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO decisions (hora, preco, score, direcao, acao, motivo, atr, nivel_evidencia, confianca) VALUES (?,?,?,?,?,?,?,?,?)",
+            (rec.time.isoformat(), rec.price, rec.score, rec.direction, rec.action, rec.reason[:300], rec.atr, rec.evidence_level, rec.confidence))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def store_prices(self, candles: Iterable) -> int:
+        rows = [(c.time.astimezone(timezone.utc).isoformat(), c.close) for c in candles]
+        if not rows:
+            return 0
+        self.conn.executemany("INSERT OR IGNORE INTO prices (hora, close) VALUES (?,?)", rows)
+        self.conn.commit()
+        return len(rows)
+
+    def prices(self, since: Optional[datetime] = None) -> list[tuple[datetime, float]]:
+        q = "SELECT hora, close FROM prices" + (" WHERE hora >= ?" if since else "") + " ORDER BY hora"
+        rows = self.conn.execute(q, (since.isoformat(),) if since else ()).fetchall()
+        return [(datetime.fromisoformat(r["hora"]), r["close"]) for r in rows]
+
+    def resolve_hypotheticals(self, now: datetime, horizon_min: int = 240) -> int:
+        """Preenche o resultado hipotético (3R, stop 1.2 ATR) das decisões bloqueadas com os preços gravados."""
+        from .models import Candle
+        from .opportunity import DecisionRecord, hypothetical_trade
+
+        rows = self.conn.execute("SELECT * FROM decisions WHERE resolvido=0 AND acao NOT IN ('ENTRADA','SEM_SINAL') AND direcao IN ('ALTA','BAIXA')").fetchall()
+        if not rows:
+            return 0
+        prices = self.prices()
+        candles = [Candle(t, p, p, p, p, 0.0) for t, p in prices]
+        n = 0
+        for r in rows:
+            t0 = datetime.fromisoformat(r["hora"])
+            rec = DecisionRecord(t0, r["preco"], r["score"], r["direcao"], r["acao"], r["motivo"] or "", r["atr"] or 0.0)
+            expired = now >= t0 + timedelta(minutes=horizon_min)
+            res = hypothetical_trade(rec, candles, horizon_min)
+            if res is not None or expired:
+                self.conn.execute("UPDATE decisions SET r_hipotetico=?, resolvido=1 WHERE id=?", (res, r["id"]))
+                n += 1
+        self.conn.commit()
+        return n
+
+    def decisions(self, since: Optional[datetime] = None) -> list:
+        from .opportunity import DecisionRecord
+
+        q = "SELECT * FROM decisions" + (" WHERE hora >= ?" if since else "") + " ORDER BY id"
+        rows = self.conn.execute(q, (since.isoformat(),) if since else ()).fetchall()
+        return [DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
+                               r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0) for r in rows]
+
+    def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None):
+        from .opportunity import opportunity_report
+
+        decisions = self.decisions(since)
+        prices = self.prices(since)
+        entries = [(datetime.fromisoformat(r["aberta_em"]), r["direcao"]) for r in self.conn.execute("SELECT aberta_em, direcao FROM trades").fetchall()]
+        atrs = [r["atr"] for r in self.conn.execute("SELECT atr FROM trades WHERE atr IS NOT NULL").fetchall()] or [d.atr for d in decisions if d.atr]
+        threshold = (sum(atrs) / len(atrs)) if atrs else 9.0
+        trade_rows = [{"score": r["score_entrada"] or 0.0, "r": r["resultado_r"]} for r in
+                      self.conn.execute("SELECT score_entrada, resultado_r FROM trades WHERE resultado_r IS NOT NULL").fetchall()]
+        # decisões bloqueadas com resultado hipotético também alimentam a curva de limiar
+        trade_rows += [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
+        return opportunity_report(decisions, prices, entries, threshold, horizon_min, trade_rows)
 
     def resolved_records(self) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM predictions WHERE resultado IN ('ACERTO','ERRO') AND previsao IN ('ALTA','BAIXA')").fetchall()

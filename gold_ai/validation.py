@@ -225,6 +225,7 @@ class ValidationReport:
     audit_violations: list[str] = field(default_factory=list)
     n_audited: int = 0
     min_signals: int = 20  # abaixo disso nenhuma conclusão estatística é honesta
+    opportunity_text: str = ""
 
     def verdict(self) -> str:
         import re
@@ -247,5 +248,9 @@ class ValidationReport:
         audit = f"🔍 AUDITORIA ANTI LOOK-AHEAD: {self.n_audited} snapshots, {len(self.audit_violations)} violação(ões)"
         if self.audit_violations:
             audit += "\n" + "\n".join(f"  ✗ {v}" for v in self.audit_violations[:10])
-        return "\n\n".join(["🧪 GOLD AI ENGINE 2.1 — VALIDATION ENGINE", audit, self.backtest_text, self.walk_forward_text,
-                            self.calibration.render(), self.scoreboard.render(), f"VEREDITO: {self.verdict()}"])
+        parts = ["🧪 GOLD AI ENGINE — VALIDATION ENGINE", audit, self.backtest_text, self.walk_forward_text,
+                 self.calibration.render(), self.scoreboard.render()]
+        if self.opportunity_text:
+            parts.append(self.opportunity_text)
+        parts.append(f"VEREDITO: {self.verdict()}")
+        return "\n\n".join(parts)

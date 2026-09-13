@@ -194,6 +194,26 @@ touch STOP_TRADING                                                 # kill switch
 
 Caminho recomendado: PAPER → estatística positiva (`stats`, `validate`, `simulate`) → AUTHORIZE → microvolume em SEMI-LIVE → LIVE.
 
+## OPPORTUNITY ENGINE — medir antes de mudar regras
+
+Sem regras novas. O 3.0 passa a responder, no PAPER real e no backtest:
+
+| Métrica | Pergunta | Onde |
+| --- | --- | --- |
+| 🔥 **OPPORTUNITY CAPTURE RATE** | de N movimentos relevantes do período, quantos a IA capturou com uma entrada antes de ficarem evidentes? | `stats`, `simulate`, `validate` (por fold OOS) |
+| **ENTRY RATE** | de N oportunidades analisadas, quantas viraram entrada? Abaixo de 5 % (ou captura < 25 %) → ⚠️ OVERFILTER | idem |
+| **Atribuição por filtro** | qual regra bloqueou cada oportunidade (sem vantagem, confiança, evidência, conflito, viabilidade, kill switch, posição aberta…) e **o que teria acontecido** com a hipótese 3R/stop 1.2 ATR? Regra com expectancy hipotética > +0.2R em ≥ 10 casos é marcada como "regra cara" | `stats` (com preços gravados pelo `live`) |
+| **Curva limiar × expectancy** | Score ≥ 50/60/70/80 → entradas e expectancy; a região ideal é a de maior expectancy com volume suficiente, não o score mais alto | `stats`, `simulate`, `backtest` |
+
+O `live` grava cada decisão (`decisions`) e os preços (`prices`), e resolve sozinho o resultado hipotético das
+oportunidades bloqueadas. Se o PAPER entrar pouco, a resposta não é mais filtro: é ler a atribuição e reduzir o peso
+da regra que elimina oportunidades lucrativas.
+
+### Ordem definitiva antes de dinheiro real
+
+1. PAPER + dados reais → 2. dias/semanas → 3. `stats` → 4. `validate` → 5. expectancy → 6. Entry Rate → 7. Opportunity Capture
+→ 8. 3R / trailing / adaptive → 9. AUTHORIZE → 10. só então LIVE.
+
 ## Uso rápido
 
 ```bash

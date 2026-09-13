@@ -300,6 +300,10 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(rs.render())
     print()
     print(mem.exit_learning())
+    print()
+    from datetime import datetime, timezone
+    mem.resolve_hypotheticals(datetime.now(timezone.utc))
+    print(mem.opportunity_report().render())
     if rs.n:
         best = next((s for s in rs.strategies if s.name == rs.best), None)
         print(f"\nExpectancy em R ({rs.best}): {best.expectancy_r:+.2f}R por operação · "

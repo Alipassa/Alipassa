@@ -116,6 +116,8 @@ class LiveExecutionEngine:
         self.mpe.history = self.monitor.history = self.mem.r_stats()
         self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
 
+        self.mem.store_prices(fine)
+        self.mem.resolve_hypotheticals(now, self.horizon)
         a, sig = self.engine.run_cycle(snap, new_event_key=new_event_key)
         res.assessment, res.signal = a, sig
         # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
@@ -128,6 +130,11 @@ class LiveExecutionEngine:
             res.decision = self._decide_entry(sig, a, snap, pid, res)
         else:
             res.decision = "SEM SINAL — " + a.edge_status
+        # OPPORTUNITY ENGINE: toda oportunidade analisada vira um registro (entrada ou regra que bloqueou)
+        from .opportunity import DecisionRecord, classify_reason
+        direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+        self.mem.record_decision(DecisionRecord(now, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
+                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence))
         return res
 
     # ------------------------------------------------------------------ entrada

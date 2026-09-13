@@ -18,7 +18,7 @@ VERSION = "3.0.0"
 
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "trading", "monitor",
-         "execution", "guard", "live_engine", "validation", "evaluation", "cli"]
+         "execution", "guard", "validation", "evaluation", "opportunity", "live_engine", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
 """GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE — entrypoint único (XAU/USD).
