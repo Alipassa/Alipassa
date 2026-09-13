@@ -149,3 +149,8 @@ class TelegramSender:
         with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
             body = json.loads(resp.read().decode())
             return bool(body.get("ok"))
+
+
+def format_decision(decision) -> str:
+    """Mensagem do TRADE SIMULATOR / gestor de posição (2.2)."""
+    return "🧾 GOLD AI TRADE\n" + decision.render()

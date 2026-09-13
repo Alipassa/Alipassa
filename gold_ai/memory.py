@@ -45,6 +45,28 @@ CREATE TABLE IF NOT EXISTS predictions (
     resolvido_em TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pred_resultado ON predictions(resultado);
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prediction_id INTEGER,
+    aberta_em TEXT NOT NULL,
+    modo TEXT NOT NULL,
+    sinal_tipo TEXT,
+    direcao TEXT NOT NULL,
+    entrada REAL NOT NULL,
+    stop REAL NOT NULL,
+    atr REAL,
+    lote REAL,
+    risco_usd REAL,
+    alvos TEXT,
+    estrategia TEXT,
+    horizonte_min INTEGER DEFAULT 240,
+    status TEXT DEFAULT 'OPEN',
+    max_r REAL, mae_r REAL,
+    hit_1r INTEGER, hit_2r INTEGER, hit_3r INTEGER, hit_4r INTEGER,
+    estopada INTEGER,
+    resultados TEXT,
+    fechada_em TEXT
+);
 """
 
 
@@ -207,6 +229,55 @@ class PredictionMemory:
         if done:
             self.conn.commit()
         return done
+
+    # ------------------------------------------------------------------ 2.2: operações simuladas
+    def open_trade(self, plan, mode: str, prediction_id: Optional[int] = None, horizon_min: int = 240) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO trades (prediction_id, aberta_em, modo, sinal_tipo, direcao, entrada, stop, atr, lote, risco_usd, alvos,
+               estrategia, horizonte_min) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (prediction_id, plan.time.astimezone(timezone.utc).isoformat(), mode, plan.signal_type, plan.direction.value, plan.entry,
+             plan.stop, plan.atr, plan.lots, plan.risk_usd, json.dumps(plan.targets), plan.recommended, horizon_min))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def open_trades(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM trades WHERE status='OPEN' ORDER BY id").fetchall()
+
+    def auto_resolve_trades(self, candles: Iterable, now: datetime) -> list[tuple[int, dict]]:
+        """Simula cada operação aberta com os candles reais (todas as estratégias). Fecha quando o stop
+        inicial é tocado, quando todas as estratégias saíram, ou ao expirar o horizonte."""
+        from .models import Direction
+        from .trading import TradePlan, simulate_all
+
+        cs = sorted(candles, key=lambda c: c.time)
+        done: list[tuple[int, dict]] = []
+        for row in self.open_trades():
+            t0 = datetime.fromisoformat(row["aberta_em"])
+            horizon = row["horizonte_min"] or 240
+            if not any(c.time > t0 for c in cs):
+                continue
+            plan = TradePlan(Direction(row["direcao"]), row["entrada"], row["stop"], row["atr"] or 0.0, t0)
+            sim = simulate_all(plan, cs, horizon)
+            prof = sim["profile"]
+            expired = now >= t0 + timedelta(minutes=horizon) or prof.horizon_reached
+            all_closed = all(r.exit_reason != "OPEN" for r in sim["details"].values())
+            if prof.stopped or expired or all_closed:
+                self.conn.execute(
+                    """UPDATE trades SET status='CLOSED', max_r=?, mae_r=?, hit_1r=?, hit_2r=?, hit_3r=?, hit_4r=?, estopada=?, resultados=?, fechada_em=? WHERE id=?""",
+                    (prof.max_r_before_stop, prof.mae_r, int(prof.hit(1)), int(prof.hit(2)), int(prof.hit(3)), int(prof.hit(4)),
+                     int(prof.stopped), json.dumps(sim["results"]), now.isoformat(), row["id"]))
+                done.append((row["id"], sim))
+        if done:
+            self.conn.commit()
+        return done
+
+    def r_stats(self):
+        from .trading import ExcursionProfile, r_stats
+
+        rows = self.conn.execute("SELECT * FROM trades WHERE status='CLOSED'").fetchall()
+        recs = [{"type": r["sinal_tipo"] or "?", "results": json.loads(r["resultados"] or "{}"),
+                 "profile": ExcursionProfile(r["max_r"] or 0.0, r["mae_r"] or 0.0, bool(r["estopada"]), False, 0)} for r in rows]
+        return r_stats(recs)
 
     def resolved_records(self) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM predictions WHERE resultado IN ('ACERTO','ERRO') AND previsao IN ('ALTA','BAIXA')").fetchall()

@@ -119,6 +119,21 @@ def cmd_live(args: argparse.Namespace) -> int:
     from .report import render_dashboard
     from .validation import IsotonicCalibrator
 
+    from .telegram import format_decision, load_env_file
+    from .trading import PositionManager, RiskLimits, TradingMode
+
+    limits = RiskLimits.from_env(load_env_file())
+    mode = TradingMode(args.mode.upper())
+    if mode == TradingMode.LIVE and not args.authorize:
+        print("modo LIVE exige --authorize explícito; rebaixando para AUTHORIZE")
+        mode = TradingMode.AUTHORIZE
+    pm_executor = None
+    if mode != TradingMode.PAPER and args.source == "mt5":
+        from .data.mt5 import MT5Executor
+        pm_executor = MT5Executor(source.client, volume=args.volume)
+    print(f"modo de operação: {mode.value} · risco/trade {limits.risk_per_trade_pct}% · perda diária máx {limits.max_daily_loss_pct}% · "
+          f"posições máx {limits.max_positions} · lote máx {limits.max_lot}")
+
     calibrator = None
     if args.calibrator and os.path.exists(args.calibrator):
         with open(args.calibrator, encoding="utf-8") as f:
@@ -127,6 +142,8 @@ def cmd_live(args: argparse.Namespace) -> int:
     engine = GoldAIEngine(EngineConfig(), calibrator=calibrator)
     sender = TelegramSender(dry_run=not args.send)
     mem = PredictionMemory(args.db)
+    pm = PositionManager(mode, limits, args.equity, mem.r_stats(), args.horizon, pm_executor)
+    pm.authorized = args.authorize
     try:
         while True:
             snap = source.collect() if source is data else source.snapshot()
@@ -140,6 +157,12 @@ def cmd_live(args: argparse.Namespace) -> int:
                 fine = snap.candles.get("M1") or snap.candles.get("M5") or snap.candles.get("M15") or []
                 for pid, out in mem.auto_resolve(fine, snap.time, snap.atr or 5.0, args.horizon):
                     print(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
+                for tid, sim in mem.auto_resolve_trades(fine, snap.time):
+                    pr = sim["profile"]
+                    print(f"[trade] operação #{tid} fechada → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R, "
+                          + ", ".join(f"{k} {v:+.2f}R" for k, v in sim["results"].items()))
+                    pm.risk.open_positions = max(0, pm.risk.open_positions - 1)
+                pm.mpe.history = mem.r_stats()
                 engine.expected_lead_min = mem.lead_time_stats()["media"]
                 assessment, signal = engine.run_cycle(snap, new_event_key=snap.news[0].headline if snap.news else None)
                 print(render_dashboard(assessment, engine.expected_lead_min))
@@ -147,7 +170,13 @@ def cmd_live(args: argparse.Namespace) -> int:
                     print(render_report(assessment))
                 if signal:
                     sender.send(signal.text)
-                    mem.record(assessment, signal.type.value, atr=snap.atr, horizon_min=args.horizon)
+                    pid = mem.record(assessment, signal.type.value, atr=snap.atr, horizon_min=args.horizon)
+                    decision = pm.decide(signal, snap)
+                    print(decision.render())
+                    if decision.action in ("PAPER", "SENT"):
+                        mem.open_trade(decision.plan, mode.value, pid, args.horizon)
+                    if args.send and decision.action != "NO_TRADE":
+                        sender.send(format_decision(decision))
                     if executor is not None:
                         plan = executor.plan(signal)
                         if plan is not None:
@@ -212,6 +241,26 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_simulate(args: argparse.Namespace) -> int:
+    """2.2 TRADE SIMULATOR sobre histórico: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy em R."""
+    from .evaluation import Backtester, walk_forward
+
+    frame = _load_frame(args)
+    bt = Backtester(frame, EngineConfig(), step=args.step, threshold_atr=args.threshold_atr, horizon_min=args.horizon)
+    if args.walk_forward:
+        wf = walk_forward(bt, n_folds=args.folds)
+        print(wf.render())
+        rs = wf.oos_trades
+    else:
+        r = bt.run()
+        print(r.render())
+        rs = r.trades
+    if rs and rs.n:
+        print(f"\nRESPOSTA: com {rs.n} operações, 3R é atingido antes do stop em {rs.reach_3r_before_stop:.0%} dos casos; "
+              f"melhor estratégia de saída: {rs.best} (E={max(s.expectancy_r for s in rs.strategies):+.2f}R).")
+    return 0
+
+
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """Ajusta o calibrador isotônico com as previsões resolvidas no SQLite e salva em JSON (usado por `live --calibrator`)."""
     mem = PredictionMemory(args.db)
@@ -251,6 +300,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(mem.calibration().render())
     print()
     print(mem.scoreboard().render())
+    print()
+    rs = mem.r_stats()
+    print(rs.render())
+    if rs.n:
+        best = next((s for s in rs.strategies if s.name == rs.best), None)
+        print(f"\nExpectancy em R ({rs.best}): {best.expectancy_r:+.2f}R por operação · "
+              f"1R {rs.reach['1R']:.0%} · 2R {rs.reach['2R']:.0%} · 3R {rs.reach['3R']:.0%} · 3R antes do stop {rs.reach_3r_before_stop:.0%}")
     mem.close()
     return 0
 
@@ -317,6 +373,8 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--authorize", action="store_true", help="AUTORIZA envio real de ordens ao broker")
     lv.add_argument("--volume", type=float, default=0.01)
     lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão")
+    lv.add_argument("--mode", choices=["paper", "authorize", "live"], default="paper", help="🟡 paper · 🟠 authorize · 🔴 live (exige --authorize)")
+    lv.add_argument("--equity", type=float, default=10000.0, help="capital de referência para o lote (USD)")
     lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")
     lv.add_argument("-v", "--verbose", action="store_true", help="imprime o relatório completo além do painel")
     lv.set_defaults(func=cmd_live)
@@ -333,6 +391,18 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("--horizon", type=int, default=240)
     va.add_argument("--out", default=None, help="salva o relatório em arquivo")
     va.set_defaults(func=cmd_validate)
+
+    si = sub.add_parser("simulate", help="2.2 TRADE SIMULATOR: 1R/2R/3R/4R antes do stop, estratégias de saída, expectancy em R")
+    si.add_argument("--csv", default=None, help="CSV XAU H1: time,open,high,low,close,volume")
+    si.add_argument("--dxy-csv", default=None)
+    si.add_argument("--us10y-csv", default=None)
+    si.add_argument("--symbol", default="GC=F")
+    si.add_argument("--step", type=int, default=1)
+    si.add_argument("--folds", type=int, default=4)
+    si.add_argument("--threshold-atr", type=float, default=1.0)
+    si.add_argument("--horizon", type=int, default=240)
+    si.add_argument("--walk-forward", action="store_true")
+    si.set_defaults(func=cmd_simulate)
 
     ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
     ca.add_argument("--db", default="gold_ai.db")

@@ -329,3 +329,27 @@ COT · TECHNICAL · NEWS · STATUS · DECISÃO.
 Regra: nenhuma conclusão com menos de 20 sinais resolvidos fora da amostra. O próximo passo não
 é dinheiro real: é rodar `live` por dias ou semanas, deixar o loop resolver as previsões e ler
 `stats` e `validate`.
+
+
+---
+
+# ADENDO 2.2 — TRADE SIMULATOR
+
+Pergunta central: **quando o motor dá um PRE-MOVE, quantas vezes o preço atinge 1R, 2R e 3R antes
+do stop?** E qual saída (1R, 2R, 3R, 4R, trailing, parcial + trailing) tem a melhor expectativa em R?
+
+Hipótese inicial: RISCO = 1R, ALVO = 3R. O Validation Engine mede; se 3R for ruim e 2R + trailing
+for melhor, o sistema muda o TP ótimo.
+
+MAX PROFIT ENGINE: alvo estatístico · estrutural · de volatilidade · por risco/retorno, com
+probabilidade estimada por R.
+
+Gestão de risco obrigatória, definida pelo usuário: RISK_PER_TRADE, MAX_DAILY_LOSS, MAX_POSITIONS,
+MAX_LOT, MAX_SPREAD, MAX_SLIPPAGE. A IA pode dizer "87 % de confiança", mas não pode transformar
+isso em mais risco.
+
+Regra NÃO OPERAR: fatores conflitantes, score baixo, confiança baixa → 🟡 NÃO OPERAR. Tão
+importante quanto saber comprar e vender.
+
+Modos: 🟡 PAPER · 🟠 AUTHORIZE · 🔴 LIVE. Dinheiro real só depois do simulador validado no
+histórico e no walk-forward.

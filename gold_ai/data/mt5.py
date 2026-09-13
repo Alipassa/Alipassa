@@ -202,6 +202,22 @@ class MT5Executor:
         plan = OrderPlan(sig.direction, self.volume, entry, sl, round(tp, 2) if tp else None, f"GoldAI {sig.type.value}", notes=notes)
         return plan
 
+    def send_plan(self, plan, authorize: bool = False) -> OrderPlan:
+        """Executa um trading.TradePlan (2.2): stop do Stop Engine, TP da estratégia recomendada, lote do gestor de risco."""
+        from ..trading import STRATEGIES
+
+        st = next((s for s in STRATEGIES if s.name == plan.recommended), None)
+        tp = plan.price_at_r(st.target_r) if st and st.target_r else (plan.price_at_r(st.partial_r) if st and st.partial_r else None)
+        order = OrderPlan(plan.direction, plan.lots or self.volume, plan.entry, round(plan.stop, 2), round(tp, 2) if tp else None,
+                          f"GoldAI {plan.signal_type} {plan.recommended}", notes=[])
+        if not plan.lots:
+            order.notes.append("lote zero — gestor de risco")
+        if plan.confidence < self.min_confidence:
+            order.notes.append(f"confiança {plan.confidence:.0f} < {self.min_confidence:.0f}")
+        if plan.evidence_level < self.min_level:
+            order.notes.append(f"evidência nível {plan.evidence_level} < {self.min_level}")
+        return self.execute(order, authorize=authorize)
+
     def execute(self, plan: OrderPlan, authorize: bool = False) -> OrderPlan:
         plan.authorized = authorize
         if not authorize or plan.notes:

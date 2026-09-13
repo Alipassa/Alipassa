@@ -286,15 +286,21 @@ class BacktestResult:
     signals: list[SignalRecord]
     n_steps: int
     cfg: EngineConfig
+    trades: Optional[object] = None   # trading.RStats (2.2)
+    trade_rows: list[dict] = field(default_factory=list)
 
     def render(self) -> str:
-        return f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
+        out = f"BACKTEST — {self.n_steps} passos, {len(self.signals)} sinais\n" + self.metrics.render()
+        if self.trades is not None:
+            out += "\n\n" + self.trades.render()
+        return out
 
 
 class Backtester:
     def __init__(self, frame: HistoryFrame, cfg: Optional[EngineConfig] = None, warmup: int = 220, step: int = 1,
-                 threshold_atr: float = 1.0, horizon_min: int = 240, include_watch: bool = False) -> None:
+                 threshold_atr: float = 1.0, horizon_min: int = 240, include_watch: bool = False, simulate_trades: bool = True) -> None:
         self.frame = frame
+        self.simulate_trades = simulate_trades
         self.cfg = cfg or EngineConfig()
         self.warmup, self.step = warmup, step
         self.threshold_atr, self.horizon_min = threshold_atr, horizon_min
@@ -306,7 +312,11 @@ class Backtester:
         xau = self.frame.xau
         start = max(self.warmup, start or self.warmup)
         end = min(len(xau), end or len(xau))
+        from .trading import MaxProfitEngine, r_stats, simulate_all
+
+        mpe = MaxProfitEngine(horizon_min=self.horizon_min)
         signals: list[SignalRecord] = []
+        trade_rows: list[dict] = []
         for i in range(start, end, self.step):
             snap = self.frame.snapshot_at(i)
             a, sig = engine.run_cycle(snap)
@@ -317,16 +327,22 @@ class Backtester:
             if sig.direction == Direction.LATERAL:
                 continue
             signals.append(record_from(a, sig, snap.atr))
+            if self.simulate_trades and sig.type != SignalType.WATCH:
+                plan = mpe.plan(a, snap, sig.direction, sig.type.value)
+                sim = simulate_all(plan, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
+                trade_rows.append({"type": sig.type.value, "profile": sim["profile"], "results": sim["results"]})
         path = [(c.time, c.close) for c in xau[start:end]]
         atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
         threshold = self.threshold_atr * statistics.fmean(atrs)
-        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg)
+        return BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, (end - start) // self.step, cfg,
+                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows)
 
 
 @dataclass
 class WalkForwardResult:
     folds: list[tuple[EngineConfig, BacktestResult]]
     oos: Metrics
+    oos_trades: Optional[object] = None  # trading.RStats fora da amostra
 
     def render(self) -> str:
         lines = ["🔁 WALK-FORWARD (fora da amostra) — treina → testa → avança → treina → testa"]
@@ -335,6 +351,9 @@ class WalkForwardResult:
                          f"precisão={'n/d' if r.metrics.precision is None else f'{r.metrics.precision:.0%}'} lead={'n/d' if r.metrics.lead_time_avg is None else f'{r.metrics.lead_time_avg:.0f} min'}")
         lines.append("AGREGADO OOS:")
         lines.append(self.oos.render())
+        if self.oos_trades is not None:
+            lines.append("")
+            lines.append(self.oos_trades.render())
         return "\n".join(lines)
 
 
@@ -377,7 +396,9 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + train_folds * fold_len:]]
     atrs = [s.atr for s in all_sigs if s.atr] or [1.0]
     oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
-    return WalkForwardResult(folds, oos)
+    from .trading import r_stats
+    rows = [r for _, res in folds for r in res.trade_rows]
+    return WalkForwardResult(folds, oos, r_stats(rows) if rows else None)
 
 
 # --------------------------------------------------------------------------- 2.1 validação consolidada

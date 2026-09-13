@@ -70,6 +70,37 @@ O veredito só sai de "INCONCLUSIVO" com pelo menos 20 sinais resolvidos fora da
 que ele responde: *quando o motor diz PRE-MOVE, o XAU/USD anda na direção prevista, com quantos
 minutos de antecedência, e a probabilidade declarada bate com a observada?*
 
+## 2.2 — TRADE SIMULATOR · STOP ENGINE · MAX PROFIT ENGINE · GESTÃO DE RISCO
+
+Prova a capacidade **operacional** antes de qualquer ordem real. Cada sinal vira uma operação simulada:
+
+```text
+PRE-MOVE → DIREÇÃO → ENTRADA → STOP → 1R → 2R → 3R → TRAILING → RESULTADO
+```
+
+| Módulo | O que faz |
+| --- | --- |
+| `trading.StopEngine` | stop na invalidação estrutural, limitado a [0.6, 2.5] ATR |
+| `trading.simulate_trade` / `excursion_profile` | simula candle a candle (conservador: stop e alvo no mesmo candle = stop); até onde o preço foi antes do stop inicial |
+| `trading.STRATEGIES` | saídas comparadas: 1R · 2R · 3R · 4R · trailing (1R após 1R) · parcial 50 % em 2R + trailing |
+| `trading.r_stats` | distribuição (stop antes de 1R / 1R / 2R / 3R / +3R e continuou), % que atinge cada R antes do stop, expectancy em R, win rate, profit factor por estratégia, melhor estratégia |
+| `trading.MaxProfitEngine` | alvo estatístico (MFE mediana em R), estrutural (próximo S/R), de volatilidade (ATR × √horizonte), por risco/retorno; probabilidade por R do histórico; **TP ótimo** — hipótese inicial 3R até haver ≥ 20 operações |
+| `trading.RiskLimits` / `RiskManager` | `RISK_PER_TRADE`, `MAX_DAILY_LOSS`, `MAX_POSITIONS`, `MAX_LOT`, `MAX_SPREAD`, `MAX_SLIPPAGE` no `.env`; lote sai do risco fixo, **nunca da confiança** |
+| `trading.no_trade_check` | 🟡 NÃO OPERAR quando não há vantagem, confiança < 60, evidência < nível 2, ≥ 2 fatores contra a direção, estágio 3 ou spread alto |
+| `trading.PositionManager` | modos 🟡 PAPER (simula) · 🟠 AUTHORIZE (prepara e espera) · 🔴 LIVE (envia ao MT5, exige `--authorize`) |
+| `memory.auto_resolve_trades` | no `live`, fecha as operações simuladas com candles reais e alimenta o Max Profit Engine |
+
+```bash
+python -m gold_ai simulate --csv xau_h1.csv                 # 1R/2R/3R antes do stop + melhor saída (backtest)
+python -m gold_ai simulate --symbol GC=F --walk-forward     # idem fora da amostra
+python -m gold_ai live --mode paper --equity 10000 --send   # operações simuladas com dados reais
+python -m gold_ai live --source mt5 --mode authorize        # prepara a ordem e espera
+python -m gold_ai live --source mt5 --mode live --authorize # envia ao MT5 dentro dos limites do .env
+python -m gold_ai stats                                     # itens 1–15: sinais, win rate, lead, MFE/MAE, Brier, ECE, fatores, 1R/2R/3R, expectancy
+```
+
+Sequência: GOLD AI 2.1 → VALIDATION → TRADE SIMULATOR → RESULTADO ESTATÍSTICO → 3.0 → MT5 → corretora.
+
 ## Uso rápido
 
 ```bash
