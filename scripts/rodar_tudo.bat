@@ -68,9 +68,14 @@ set "NOME=extra - estimativa de lucro com noticias"
 set "CMD=%PY% %ENGINE% estimate --start %INICIO% --end %FIM% --markets %MERCADOS% --equity 10000 --risk 3 --events dados\noticias_historicas.csv --news-mode full --out estimativa_news.txt"
 call :passo
 
+set "NOME=DOCTOR - tudo funcionando? eficiencia?"
+set "CMD=%PY% %ENGINE% doctor --mt5 --out logs\doctor.txt"
+call :passo
+type logs\doctor.txt
+
 echo.
 echo ============================================================
-echo  CONCLUIDO. Resultados: prova.txt, teste_ab.txt, estimativa_news.txt
+echo  CONCLUIDO. Resultados: prova.txt, teste_ab.txt, estimativa_news.txt, logs\doctor.txt
 echo  Log completo: %LOG%
 echo ============================================================
 echo [%date% %time%] FIM >> "%LOG%"

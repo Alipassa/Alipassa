@@ -582,6 +582,47 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
     return verdicts
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """DOCTOR: tudo está funcionando? qual a eficiência? — painel por camada com ação, e leitura do que está provado."""
+    from .doctor import run_doctor
+    from .telegram import TelegramSender, load_env_file
+
+    env = load_env_file()
+    mt5_probe = None
+    if args.mt5:
+        def mt5_probe():
+            try:
+                from .data.mt5 import MT5Client, MT5Config
+                c = MT5Client(MT5Config.from_env(env))
+                c.connect()
+                bid, ask = c.tick()
+                off = c.server_offset_hours
+                c.close()
+                return True, f"conectado · {c.cfg.symbol} bid {bid:g} ask {ask:g} · fuso do servidor UTC{off:+.0f}h"
+            except Exception as e:  # noqa: BLE001
+                return False, str(e)[:160]
+    tg_probe = None
+    if args.telegram:
+        def tg_probe():
+            try:
+                snd = TelegramSender(env_file=".env", quiet=True)
+                if snd.dry_run:
+                    return False, "sem TOKEN_TELEGRAM/CHAT_ID"
+                ok = snd.send("🩺 MARKET AI DOCTOR: teste de envio OK")
+                return ok, "mensagem de teste enviada" if ok else "API respondeu erro"
+            except Exception as e:  # noqa: BLE001
+                return False, str(e)[:160]
+    start = datetime.fromisoformat(args.start).date() if args.start else None
+    end = datetime.fromisoformat(args.end).date() if args.end else None
+    rep = run_doctor(env, args.db, args.events, tuple(s.strip().upper() for s in args.markets.split(",") if s.strip()), start, end, mt5_probe, tg_probe)
+    print(rep.render())
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(rep.render())
+    ok, warn, bad = rep.score
+    return 1 if bad else 0
+
+
 def cmd_reaction(args: argparse.Namespace) -> int:
     """REACTION ENGINE: learn (banco histórico × preço → tempo de reação por evento e ativo) · stats (o que o live viveu) · clock (agora)."""
     from .reaction import ReactionStats
@@ -1151,6 +1192,17 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--csv-dir", default=None)
     hi.add_argument("--no-fred", action="store_true")
     hi.set_defaults(func=cmd_history)
+
+    dc = sub.add_parser("doctor", help="tudo está funcionando? qual a eficiência? — painel por camada (✅ ⚠️ ❌) com ação e leitura do que está provado")
+    dc.add_argument("--mt5", action="store_true", help="testa a conexão com o MetaTrader 5 (terminal aberto)")
+    dc.add_argument("--telegram", action="store_true", help="envia uma mensagem de teste ao Telegram")
+    dc.add_argument("--db", default="gold_ai.db")
+    dc.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    dc.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    dc.add_argument("--start", default="2026-01-01")
+    dc.add_argument("--end", default=None)
+    dc.add_argument("--out", default=None)
+    dc.set_defaults(func=cmd_doctor)
 
     rc = sub.add_parser("reaction", help="REACTION ENGINE: learn (tempo de reação por evento/ativo no histórico) | stats (vivido) | clock (agora)")
     rc.add_argument("action", choices=["learn", "stats", "clock"])

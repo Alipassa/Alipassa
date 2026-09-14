@@ -212,6 +212,17 @@ ao atingir +10% no dia o Risk Guard bloqueia novas entradas até o dia seguinte 
 o monitor. Sem edge, não opera — a meta não cria entradas. Com 3% por operação, +10% = +3,33R líquidos no dia (+1R = +3%).
 O painel de capital mostra a meta em USD, o % do dia e quantos R faltam.
 
+## 🩺 Tudo está funcionando? Qual a eficiência? — `doctor`
+
+```bash
+python market_ai_engine_v4.py doctor --mt5 --telegram      # ou 2 cliques em verificar.bat
+```
+Painel por camada com ✅ ⚠️ ❌ e a ação correspondente: `.env`, Telegram (envia teste), MT5 (conecta, mostra bid/ask e fuso),
+banco de eventos (cobertura MACRO/NEWS), ticks/M1 por símbolo, líder USD, REACTION EDGE, memória do live (análises, previsões,
+operações, reações, última análise há quanto tempo) e os resultados (`prova.txt`, `teste_ab.txt`, `estimativa_news.txt`).
+Fecha com a leitura de eficiência: o que está **provado** (vivido em PAPER/LIVE; OOS histórico) e o que ainda é hipótese.
+`rodar_tudo.bat` termina chamando o doctor. Scripts de 2 cliques: `rodar_tudo.bat` (pipeline), `rodar_live.bat` (PAPER 24/7), `verificar.bat`.
+
 ## Entrypoint único
 
 Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:
