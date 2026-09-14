@@ -56,7 +56,7 @@ class HiResMeasureTests(unittest.TestCase):
         self.assertAlmostEqual(rec.move_at[60], 0.32, places=2)
         self.assertAlmostEqual(rec.move_at[300], 0.815, places=2)
         self.assertAlmostEqual(rec.base.time_to_first, 35 / 60, places=2)           # 0,15 ATR aos 35 s
-        self.assertAlmostEqual(rec.base.time_to_confirmation, 73.33 / 60, places=2)  # 0,40 ATR aos 73 s (interpolação 40→90 s)
+        self.assertAlmostEqual(rec.base.time_to_confirmation, 74 / 60, places=2)      # 0,40 ATR aos 74 s (interpolação 40→90 s, ticks inteiros)
         self.assertAlmostEqual(rec.short_mfe, 0.815, places=2)                       # 0–5 min
         self.assertAlmostEqual(rec.follow_mfe, 1.2, places=2)                        # 5–60 min
         self.assertAlmostEqual(rec.base.max_adverse_atr, 0.0, places=2)
