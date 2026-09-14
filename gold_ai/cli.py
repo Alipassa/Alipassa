@@ -327,7 +327,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         # exportação de M1 / ticks do MT5 para CSV (a corretora guarda M1 por anos e ticks por semanas/meses)
         from .data.mt5 import MT5Client, MT5Config, MT5Error
         from .data.multi import MultiMarketData
-        from .markets import get_market
+        from .markets import MARKETS, get_market
         from .reaction_hires import save_candles, save_ticks
         cfg = MT5Config.from_env(env)
         symbol_map = MultiMarketData.symbol_map_from_env(env)
@@ -344,7 +344,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(f"fuso do servidor da corretora: UTC{client.server_offset_hours:+.0f}h (carimbos convertidos para UTC; force com MT5_UTC_OFFSET_HOURS)")
         symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
         for sym in symbols:
-            broker = symbol_map.get(sym) or (get_market(sym).mt5 if sym in __import__("gold_ai.markets", fromlist=["MARKETS"]).MARKETS else sym)
+            broker = symbol_map.get(sym) or (get_market(sym).mt5 if sym in MARKETS else sym)
             try:
                 if args.tf.upper() == "TICK":
                     n = 0

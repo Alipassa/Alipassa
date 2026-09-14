@@ -10624,7 +10624,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(f"fuso do servidor da corretora: UTC{client.server_offset_hours:+.0f}h (carimbos convertidos para UTC; force com MT5_UTC_OFFSET_HOURS)")
         symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
         for sym in symbols:
-            broker = symbol_map.get(sym) or (get_market(sym).mt5 if sym in __import__("gold_ai.markets", fromlist=["MARKETS"]).MARKETS else sym)
+            broker = symbol_map.get(sym) or (get_market(sym).mt5 if sym in MARKETS else sym)
             try:
                 if args.tf.upper() == "TICK":
                     n = 0
