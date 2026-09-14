@@ -204,6 +204,14 @@ python market_ai_engine_v4.py sweep --start 2026-01-01 --market US500 --events d
 - A reação real é medida no fechamento do candle H1 seguinte ao evento; a sequência 12:29 → 12:31 → 12:35 exige histórico M1/M5.
 - Só depois deste teste o funil é recalibrado (`sweep`, piso escolhido no treino de cada fold).
 
+## 🎯 Perfil agressivo com trava (3% por operação · meta +10%/dia)
+
+`.env`: `RISK_PER_TRADE=3`, `DAILY_TARGET=10`, `MAX_DAILY_LOSS=6`, `MAX_LOT=1.0`, `MAX_TOTAL_OPEN_RISK=6`, `MAX_CORRELATED_RISK=3`.
+O lote acompanha o capital (compounding) e **nunca** sobe após perda; martingale não existe. A meta é **trava, não obrigação**:
+ao atingir +10% no dia o Risk Guard bloqueia novas entradas até o dia seguinte e avisa no Telegram; posições abertas seguem com
+o monitor. Sem edge, não opera — a meta não cria entradas. Com 3% por operação, +10% = +3,33R líquidos no dia (+1R = +3%).
+O painel de capital mostra a meta em USD, o % do dia e quantos R faltam.
+
 ## Entrypoint único
 
 Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:

@@ -331,3 +331,7 @@ class LiveExecutionEngine:
         self.tickets.pop(tr.trade_id, None)
         if self.perf.trading_stop:
             self._send("🚨 TRADING STOP — perda diária máxima atingida; sem novas entradas hoje", res)
+        if self.perf.target_reached and not getattr(self, "_target_announced", None) == self.perf.day:
+            self._target_announced = self.perf.day
+            self._send(f"🎯 META DIÁRIA ATINGIDA — {self.perf.daily_pct:+.1f}% hoje ({self.perf.daily_pnl:+.2f} USD). Ganho protegido: sem novas entradas até amanhã; "
+                       "posições abertas seguem com o monitor.", res)

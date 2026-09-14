@@ -334,3 +334,35 @@ class LiveCycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DailyTargetTests(unittest.TestCase):
+    def test_target_is_a_lock_not_an_obligation(self):
+        from datetime import datetime, timezone
+        from gold_ai.guard import GuardLimits, PerformanceEngine
+        lim = GuardLimits.from_env({"RISK_PER_TRADE": "3", "MAX_DAILY_LOSS": "6", "DAILY_TARGET": "10", "MAX_LOT": "1.0"})
+        self.assertEqual((lim.risk_per_trade_pct, lim.daily_target_pct, lim.max_daily_loss_pct), (3.0, 10.0, 6.0))
+        p = PerformanceEngine(lim, 10000.0)
+        t = datetime(2026, 9, 14, 13, 0, tzinfo=timezone.utc)
+        p.roll_day(t)
+        self.assertEqual(p.risk_usd, 300.0)                      # 3% de 10 000
+        self.assertEqual(p.daily_target_usd, 1000.0)
+        self.assertAlmostEqual(p.r_to_target(), 3.33, places=2)  # +3,33R líquidos para +10%
+        self.assertEqual(p.blocks(t), [])                        # meta longe: nada bloqueia, nada obriga
+        p.record_result(600.0, t, "t1")                          # +2R → risco passa a 3% de 10 600 (compounding, nunca por perda)
+        self.assertEqual(p.risk_usd, 318.0)
+        self.assertFalse(p.target_reached)
+        p.record_result(-318.0, t, "t2")                         # −1R: risco cai junto com o capital; nunca sobe para recuperar
+        self.assertEqual(p.risk_usd, round(10282.0 * 0.03, 2))
+        p.record_result(750.0, t, "t3")                          # dia +1 032 ≥ 1 000 → META
+        self.assertTrue(p.target_reached)
+        self.assertTrue(any("META DIÁRIA ATINGIDA" in b for b in p.blocks(t)))
+        self.assertFalse(p.trading_stop)                         # meta ≠ stop por perda
+        self.assertIn("META ATINGIDA", p.render())
+        p.roll_day(datetime(2026, 9, 15, 0, 5, tzinfo=timezone.utc))
+        self.assertFalse(p.target_reached)                       # dia novo, trava liberada
+        self.assertEqual(p.blocks(datetime(2026, 9, 15, 0, 5, tzinfo=timezone.utc)), [])
+        # perda diária 6% = duas perdas cheias
+        q = PerformanceEngine(lim, 10000.0)
+        q.record_result(-300.0, t); q.record_result(-300.0, t)
+        self.assertTrue(q.trading_stop)

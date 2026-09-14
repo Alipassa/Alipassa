@@ -33,6 +33,7 @@ class TradingMode(str, Enum):
 class GuardLimits(RiskLimits):
     max_drawdown_pct: float = 10.0
     min_rr_to_structure: float = 2.0     # se a resistência/suporte forte estiver antes disto (em R), não há expectativa
+    daily_target_pct: float = 0.0        # META DIÁRIA (0 = desligada): ao atingir, sem novas entradas até o dia seguinte — trava, não obrigação
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "GuardLimits":
@@ -40,6 +41,7 @@ class GuardLimits(RiskLimits):
         g = cls(**base.__dict__)
         g.max_drawdown_pct = float(env.get("MAX_DRAWDOWN", g.max_drawdown_pct))
         g.min_rr_to_structure = float(env.get("MIN_RR_TO_STRUCTURE", g.min_rr_to_structure))
+        g.daily_target_pct = float(env.get("DAILY_TARGET", g.daily_target_pct) or 0.0)
         return g
 
 
@@ -79,6 +81,7 @@ class PerformanceEngine:
     day: Optional[str] = None
     daily_pnl: float = 0.0
     trading_stop: bool = False
+    target_reached: bool = False      # 🎯 meta diária atingida: protege o ganho (sem novas entradas hoje)
     history: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -87,7 +90,22 @@ class PerformanceEngine:
     def roll_day(self, t: datetime) -> None:
         d = t.strftime("%Y-%m-%d")
         if d != self.day:
-            self.day, self.daily_pnl, self.trading_stop = d, 0.0, False
+            self.day, self.daily_pnl, self.trading_stop, self.target_reached = d, 0.0, False, False
+
+    @property
+    def daily_target_usd(self) -> Optional[float]:
+        return round(self.equity_start_of_day() * self.limits.daily_target_pct / 100.0, 2) if self.limits.daily_target_pct > 0 else None
+
+    @property
+    def daily_pct(self) -> float:
+        base = self.equity_start_of_day()
+        return round(100.0 * self.daily_pnl / base, 2) if base else 0.0
+
+    def r_to_target(self) -> Optional[float]:
+        """Quantos R líquidos faltam para a meta com o risco atual (informativo — a meta nunca força entrada)."""
+        if self.daily_target_usd is None or self.risk_usd <= 0:
+            return None
+        return round(max(0.0, (self.daily_target_usd - self.daily_pnl) / self.risk_usd), 2)
 
     @property
     def risk_usd(self) -> float:
@@ -106,6 +124,8 @@ class PerformanceEngine:
         self.history.append({"time": t.isoformat(), "pnl": pnl_usd, "equity": self.equity, "note": note})
         if self.daily_pnl <= -self.equity_start_of_day() * self.limits.max_daily_loss_pct / 100.0:
             self.trading_stop = True
+        if self.daily_target_usd is not None and self.daily_pnl >= self.daily_target_usd:
+            self.target_reached = True
 
     def equity_start_of_day(self) -> float:
         return self.equity - self.daily_pnl
@@ -125,12 +145,21 @@ class PerformanceEngine:
             out.append(f"🚨 TRADING STOP — perda diária {self.daily_pnl:+.2f} USD atingiu {self.limits.max_daily_loss_pct:.1f}% do capital")
         if self.drawdown_pct >= self.limits.max_drawdown_pct:
             out.append(f"🚨 drawdown {self.drawdown_pct:.1f}% ≥ MAX_DRAWDOWN {self.limits.max_drawdown_pct:.1f}%")
+        if self.daily_target_usd is not None and (self.target_reached or self.daily_pnl >= self.daily_target_usd):
+            self.target_reached = True
+            out.append(f"🎯 META DIÁRIA ATINGIDA — dia {self.daily_pnl:+.2f} USD ({self.daily_pct:+.1f}% ≥ {self.limits.daily_target_pct:.0f}%): "
+                       "sem novas entradas hoje; posições abertas seguem com o monitor")
         return out
 
     def render(self) -> str:
+        meta = ""
+        if self.daily_target_usd is not None:
+            r = self.r_to_target()
+            meta = (f" · 🎯 meta {self.limits.daily_target_pct:.0f}% = {self.daily_target_usd:,.2f} USD ({self.daily_pct:+.1f}% hoje"
+                    + (f", faltam ≈ {r:.2f}R" if r else ", ATINGIDA") + ")")
         return (f"💼 CAPITAL {self.equity:,.2f} USD · pico {self.peak_equity:,.2f} · drawdown {self.drawdown_pct:.1f}% · "
-                f"dia {self.daily_pnl:+.2f} · risco/operação {self.limits.risk_per_trade_pct}% = {self.risk_usd:.2f} USD"
-                + (" · 🚨 TRADING STOP" if self.trading_stop else ""))
+                f"dia {self.daily_pnl:+.2f} · risco/operação {self.limits.risk_per_trade_pct}% = {self.risk_usd:.2f} USD" + meta
+                + (" · 🚨 TRADING STOP" if self.trading_stop else "") + (" · 🎯 META ATINGIDA" if self.target_reached else ""))
 
 
 def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float, point_value_usd: Optional[float] = None) -> tuple[float, float]:

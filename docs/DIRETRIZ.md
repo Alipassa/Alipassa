@@ -457,3 +457,10 @@ Regras:
     Segundos exigem ticks/M1 (`history prices`, `reaction learn --tf TICK`): dois horizontes (reação 0–5 min, continuação
     5–60 min), lead-lag condicional e simulação com spread + slippage + latência. O robô não opera atraso detectado: opera
     configurações que sobreviveram ao custo, fora da amostra.
+
+12. **PERFIL AGRESSIVO COM TRAVA** `[guard.PerformanceEngine, .env]`: RISK_PER_TRADE=3 (o lote acompanha o capital —
+    compounding; nunca sobe após perda; martingale proibido), DAILY_TARGET=10 (meta = trava: ao atingir, sem novas
+    entradas até o dia seguinte, posições abertas seguem com o monitor; a meta nunca força entrada — sem edge, não opera),
+    MAX_DAILY_LOSS=6 (duas perdas cheias), MAX_LOT=1.0, MAX_TOTAL_OPEN_RISK=6, MAX_CORRELATED_RISK=3. Aritmética: com 3%
+    por operação, +10% = +3,33R líquidos no dia. O Reaction Engine só prioriza curtíssimo prazo depois de edge líquido
+    comprovado (`reaction learn --tf BOTH`, veredito 🟢 com amostra).
