@@ -158,6 +158,11 @@ movimento pleno. Saídas: QUICK (take +0,40 ATR ou 5 min, stop −0,5) · EXTEND
 60 min) · FOLLOW (stop/60 min). A coluna "ingênua" entra em toda reação do líder com a mesma saída: a diferença é o valor do
 filtro temporal. Walk-forward por construção; líquido de spread, slippage e latência. Atrasos padrão: TICK 1,5,10,30,60 s; M1 60,120,300 s.
 
+**A tabela que importa** — `📊 REACTION CLOCK − INGÊNUA por ativo × atraso`: n, INGÊNUA (R), CLOCK (R), Δ, EXTEND, PF. Se Δ ficar
+positivo depois dos custos e fora da amostra, o relógio adiciona valor. `reaction learn --tf BOTH` roda TICK (existe vantagem em
+segundos?) e M1 (sobrevive a meses e regimes?; reamostrado dos ticks quando não há `<SYM>_m1.csv`) e fecha com
+`🧭 ESTABILIDADE TICK × M1`: só 🟢🟢 nas duas resoluções é evidência MUITO FORTE.
+
 **REACTION EDGE por ativo**: o relógio não funciona igual em todos os mercados. O relatório fecha com o veredito por ativo
 (🟢 forte · 🟡 moderado · 🔴 sem edge · ⚪ inconclusivo) na melhor combinação atraso × saída, e grava `dados/reaction_edge.json`.
 O `live --markets` e o `markets` leem esse arquivo: o Asset Selector ganha a dimensão "reaction" (10%), que só pesa quando o

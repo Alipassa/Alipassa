@@ -9,6 +9,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from datetime import timedelta
+from typing import Optional
 
 from .config import EngineConfig
 from .engine import GoldAIEngine
@@ -463,8 +464,9 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 1
 
 
-def _reaction_learn_hires(args: argparse.Namespace) -> int:
-    """Alta resolução: ticks/M1 exportados do MT5 (`history prices`) × banco de eventos → segundos, dois horizontes, lead-lag, custo."""
+def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, edge_out: Optional[str] = None):
+    """Alta resolução: ticks/M1 (`history prices`) × banco de eventos → segundos, dois horizontes, lead-lag, custo, prova do relógio,
+    tabela CLOCK − INGÊNUA e veredito por ativo. Devolve a lista de vereditos (ou 1 em erro)."""
     from .history import EXTRA_TRANSMISSION, TYPICAL, load_history, rule_direction
     from .markets import get_market
     from .news_engine import TRANSMISSION
@@ -475,7 +477,8 @@ def _reaction_learn_hires(args: argparse.Namespace) -> int:
         return 1
     hist = load_history(args.events)
     csv_dir = args.csv_dir or "dados"
-    tf = args.tf.upper()
+    tf = (tf or args.tf).upper()
+    edge_out = args.edge_out if edge_out is None else edge_out
 
     def read_candles(path):
         from .models import Candle
@@ -495,6 +498,8 @@ def _reaction_learn_hires(args: argparse.Namespace) -> int:
         if os.path.exists(p_c):
             return PricePath.from_candles(read_candles(p_c), spread, 1 if tf == "M1" else 5), tf
         if os.path.exists(p_t):
+            if tf in ("M1", "M5"):
+                return PricePath.from_ticks(load_ticks(p_t)).resample(1 if tf == "M1" else 5), f"{tf} (reamostrado dos ticks)"
             return PricePath.from_ticks(load_ticks(p_t)), "ticks"
         return None, ""
 
@@ -557,26 +562,41 @@ def _reaction_learn_hires(args: argparse.Namespace) -> int:
         ct = ClockTradeTest(delay_sec=d, p_min=args.p_min, slippage_atr=args.slippage, latency_sec=args.latency)
         results[d] = ct.run(sim_items)
         txt += "\n\n" + ct.render(results[d])
+    from .reaction_hires import delta_table, render_delta
+    txt += "\n\n" + render_delta(delta_table(results), tf)
     verdicts = asset_verdicts(results)
     txt += "\n\n" + render_verdicts(verdicts, tf)
-    if args.edge_out:
-        save_reaction_edge(verdicts, args.edge_out, tf)
-        txt += f"\n   veredito salvo em {args.edge_out} (o `live --markets` e o `markets` leem este arquivo)"
+    if edge_out:
+        save_reaction_edge(verdicts, edge_out, tf)
+        txt += f"\n   veredito salvo em {edge_out} (o `live --markets` e o `markets` leem este arquivo)"
     txt += "\n\nLIMITES: manchetes GDELT (volinfo) têm published_at no fim do dia — só releases (ALFRED/TE) têm hora exata para segundos; "
     txt += "custo = ask/bid reais dos ticks (ou spread típico no M1) + slippage + latência; liquidez fora do horário e gaps não modelados."
     print(txt)
     if args.out:
-        with open(args.out, "w", encoding="utf-8") as f:
-            f.write(txt)
-    return 0
+        with open(args.out, "a" if tf == "M1" and args.tf.upper() == "BOTH" else "w", encoding="utf-8") as f:
+            f.write(("\n\n" if tf == "M1" and args.tf.upper() == "BOTH" else "") + txt)
+    return verdicts
 
 
 def cmd_reaction(args: argparse.Namespace) -> int:
     """REACTION ENGINE: learn (banco histórico × preço → tempo de reação por evento e ativo) · stats (o que o live viveu) · clock (agora)."""
     from .reaction import ReactionStats
 
+    if args.action == "learn" and args.tf.upper() == "BOTH":
+        from .reaction_hires import render_stability
+        outs = {}
+        for tf in ("TICK", "M1"):
+            print(f"\n{'=' * 100}\n{tf}\n{'=' * 100}")
+            outs[tf] = _reaction_learn_hires(args, tf=tf, edge_out=(args.edge_out if tf == "TICK" else ""))
+        if isinstance(outs["TICK"], list) and isinstance(outs["M1"], list):
+            txt = render_stability(outs["TICK"], outs["M1"])
+            print("\n" + txt)
+            if args.out:
+                with open(args.out, "a", encoding="utf-8") as f:
+                    f.write("\n\n" + txt)
+        return 0
     if args.action == "learn" and args.tf.upper() in ("M1", "M5", "TICK"):
-        return _reaction_learn_hires(args)
+        return 0 if isinstance(_reaction_learn_hires(args), list) else 1
     if args.action == "learn":
         from .history import load_history
         if not os.path.exists(args.events):
@@ -1137,7 +1157,7 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument("--db", default="gold_ai.db")
     rc.add_argument("--csv-dir", default=None)
     rc.add_argument("--no-fred", action="store_true")
-    rc.add_argument("--tf", default="H1", help="learn: H1 (Yahoo/CSV) | M1 | M5 | TICK (CSVs exportados por `history prices`)")
+    rc.add_argument("--tf", default="H1", help="learn: H1 (Yahoo/CSV) | M1 | M5 | TICK | BOTH (TICK + M1 reamostrado + tabela de estabilidade)")
     rc.add_argument("--lead-usd", default="USDX", help="learn M1/TICK: símbolo exportado do líder USD (ex.: USDX); vazio = sem líder")
     rc.add_argument("--lead-yield", default=None, help="learn M1/TICK: símbolo exportado do líder de juros (ex.: USTNOTE)")
     rc.add_argument("--slippage", type=float, default=0.02, help="trade sim: slippage em ATR por perna")

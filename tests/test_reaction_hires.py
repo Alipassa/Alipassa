@@ -279,3 +279,33 @@ class DukascopyTests(unittest.TestCase):
         self.assertTrue(all("/XAUUSD/" in c for c in http.calls))
         imp.hours("USDX", [h])
         self.assertIn("/DOLLARIDXUSD/", http.calls[-1])
+
+
+class DeltaAndStabilityTests(unittest.TestCase):
+    def test_delta_table_stability_and_resample(self):
+        from gold_ai.reaction_hires import ClockTradeTest, asset_verdicts, delta_table, render_delta, render_stability
+        items = ClockTradeTestTests()._items(n=30, good=26, contra_first=True)   # 4 primeiros contra: o relógio (sem histórico / P baixa) não entra
+        results = {}
+        for d in (5, 30):
+            ct = ClockTradeTest(delay_sec=d, p_min=0.55, min_n=3)
+            results[d] = ct.run(items)
+        rows = delta_table(results)
+        self.assertEqual([(r.symbol, r.delay_sec) for r in rows], [("XAUUSD", 5), ("XAUUSD", 30)])
+        r5 = rows[0]
+        self.assertEqual(r5.n, 26)
+        self.assertEqual(r5.n_naive, 30)
+        self.assertGreater(r5.clock_r, r5.naive_r)                    # a ingênua paga os 4 contra; o relógio os evita → Δ > 0
+        self.assertIsNotNone(r5.pf_quick)
+        txt = render_delta(rows, "TICK")
+        self.assertIn("Δ CLOCK−ING", txt)
+        v_tick = asset_verdicts(results)
+        # M1 reamostrado dos mesmos ticks: a relação deve sobreviver (vantagem em −0,8 ATR em 5 min é visível em barras de 1 min)
+        items_m1 = [(rec, path.resample(1), atr) for rec, path, atr in items]
+        self.assertEqual(items_m1[0][1].resolution_sec, 60.0)
+        self.assertTrue(all(q.time.second == 0 for q in items_m1[0][1].q))
+        ct = ClockTradeTest(delay_sec=60, p_min=0.55, min_n=3)
+        v_m1 = asset_verdicts({60: ct.run(items_m1)})
+        st = render_stability(v_tick, v_m1)
+        self.assertIn("XAUUSD", st)
+        self.assertIn("ESTABILIDADE TICK × M1", st)
+        self.assertTrue(("MUITO FORTE" in st) or ("forte com reserva" in st) or ("moderado" in st))

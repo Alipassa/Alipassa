@@ -59,6 +59,21 @@ class PricePath:
         half = spread / 2
         return cls([Quote(c.time, c.close - half, c.close + half) for c in candles], minutes * 60.0)
 
+    def resample(self, minutes: int = 1) -> "PricePath":
+        """Ticks → barras de `minutes` (mid = último, spread = média): para checar se a relação sobrevive à resolução de minuto."""
+        buckets: dict[datetime, list[Quote]] = {}
+        for q in self.q:
+            key = q.time.replace(second=0, microsecond=0)
+            key = key.replace(minute=(key.minute // minutes) * minutes)
+            buckets.setdefault(key, []).append(q)
+        out = []
+        for key in sorted(buckets):
+            qs = buckets[key]
+            sp = statistics.fmean(x.spread for x in qs)
+            mid = qs[-1].mid
+            out.append(Quote(key + timedelta(minutes=minutes), mid - sp / 2, mid + sp / 2))     # carimbo no FECHO da barra (só passado)
+        return PricePath(out, minutes * 60.0)
+
     def at_or_before(self, t: datetime) -> Optional[Quote]:
         from bisect import bisect_right
         i = bisect_right(self.times, t)
@@ -382,12 +397,24 @@ class ClockTestRow:
     win_quick: float
     win_extend: float
     cost: float
+    pf_quick: Optional[float] = None
+    pf_extend: Optional[float] = None
+    trades_quick: list = field(default_factory=list)
+    trades_extend: list = field(default_factory=list)
+    trades_naive: list = field(default_factory=list)
 
     def row(self) -> str:
         tag = "⚪" if self.n_entries < 20 else ("🟢" if max(self.net_quick, self.net_extend, self.net_follow) > 0.02 else "🔴")
         sk = " ".join(f"{k}:{v}" for k, v in self.skipped.items() if v)
         return (f"{self.kind:<18}{self.target:<8}{self.n_events:>5}{self.n_lead:>5}{self.n_entries:>5}{self.naive_net_quick:>+9.3f}{self.net_quick:>+9.3f}"
                 f"{self.net_extend:>+9.3f}{self.net_follow:>+9.3f}{self.win_quick:>6.0%}{self.win_extend:>6.0%}{self.cost:>7.3f}  {tag}  {sk}")
+
+
+def profit_factor(xs: Sequence[float]) -> Optional[float]:
+    wins, losses = sum(x for x in xs if x > 0), -sum(x for x in xs if x < 0)
+    if not xs:
+        return None
+    return (wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
 
 
 class ClockTradeTest:
@@ -520,7 +547,8 @@ class ClockTradeTest:
             rows.append(ClockTestRow(key[0], key[1], c["eventos"], c["líder"], c["entradas"], self.skipped[key], m(self.naive.get(key, [])),
                                      m([t.net_quick for t in tr]), m([t.net_extend for t in tr]), m([t.net_follow for t in tr]),
                                      (sum(1 for t in tr if t.net_quick > 0) / len(tr)) if tr else 0.0, (sum(1 for t in tr if t.net_extend > 0) / len(tr)) if tr else 0.0,
-                                     m([t.cost for t in tr])))
+                                     m([t.cost for t in tr]), profit_factor([t.net_quick for t in tr]), profit_factor([t.net_extend for t in tr]),
+                                     [t.net_quick for t in tr], [t.net_extend for t in tr], list(self.naive.get(key, []))))
         return rows
 
     def render(self, rows: Sequence[ClockTestRow]) -> str:
@@ -630,3 +658,76 @@ def load_reaction_edge(path: str) -> dict[str, float]:
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     return {sym: float(v["edge_score"]) for sym, v in data.items() if v.get("verdict") in ("🟢", "🟡", "🔴")}
+
+
+# --------------------------------------------------------------------------- A TABELA QUE IMPORTA: REACTION CLOCK − INGÊNUA, por ativo × atraso
+@dataclass
+class DeltaRow:
+    symbol: str
+    delay_sec: int
+    n: int
+    n_naive: int
+    naive_r: float
+    clock_r: float
+    extend_r: float
+    pf_quick: Optional[float]
+    pf_extend: Optional[float]
+
+    @property
+    def delta_r(self) -> float:
+        return self.clock_r - self.naive_r
+
+    def row(self) -> str:
+        pf = lambda v: "  n/d" if v is None else ("    ∞" if v == float("inf") else f"{v:5.2f}")  # noqa: E731
+        tag = "⚪" if self.n < 20 else ("🟢" if self.delta_r > 0 and self.clock_r > 0 else "🔴")
+        return (f"{self.symbol:<8}{self.delay_sec:>5}s{self.n:>6}{self.n_naive:>7}{self.naive_r:>+10.2f}R{self.clock_r:>+10.2f}R{self.delta_r:>+9.2f}R"
+                f"{self.extend_r:>+9.2f}R{pf(self.pf_quick):>7}{pf(self.pf_extend):>7}  {tag}")
+
+
+def delta_table(results: dict[int, list[ClockTestRow]]) -> list[DeltaRow]:
+    out = []
+    for delay, rows in sorted(results.items()):
+        by_sym: dict[str, list[ClockTestRow]] = {}
+        for r in rows:
+            by_sym.setdefault(r.target, []).append(r)
+        for sym, rs in sorted(by_sym.items()):
+            q = [x for r in rs for x in r.trades_quick]
+            e = [x for r in rs for x in r.trades_extend]
+            nv = [x for r in rs for x in r.trades_naive]
+            m = lambda xs: (statistics.fmean(xs) / STOP_ATR) if xs else 0.0  # noqa: E731
+            out.append(DeltaRow(sym, delay, len(q), len(nv), m(nv), m(q), m(e), profit_factor(q), profit_factor(e)))
+    return sorted(out, key=lambda d: (d.symbol, d.delay_sec))
+
+
+def render_delta(rows: Sequence[DeltaRow], resolution: str) -> str:
+    head = f"{'ativo':<8}{'atraso':>6}{'n':>6}{'n ing.':>7}{'INGÊNUA':>11}{'CLOCK':>11}{'Δ CLOCK−ING':>10}{'EXTEND':>10}{'PF Q':>7}{'PF E':>7}"
+    lines = [f"📊 REACTION CLOCK − INGÊNUA por ativo × atraso ({resolution}; R = 0,5 ATR; líquido de custos; walk-forward por construção)", head]
+    lines += [r.row() for r in rows]
+    lines.append("   Δ > 0 com n ≥ 20 e CLOCK > 0 = o relógio adiciona valor 🟢 · ⚪ amostra insuficiente · 🔴 relógio não ajuda ou perde")
+    return "\n".join(lines)
+
+
+def render_stability(tick: Sequence[AssetVerdict], m1: Sequence[AssetVerdict]) -> str:
+    """TICK responde 'existe vantagem em segundos?'; M1 responde 'sobrevive a meses/regimes?'. Só a concordância vale como MUITO FORTE."""
+    t = {v.symbol: v for v in tick}
+    m = {v.symbol: v for v in m1}
+    lines = [f"🧭 ESTABILIDADE TICK × M1 — evidência só é MUITO FORTE quando as duas resoluções apontam na mesma direção",
+             f"{'ativo':<8}{'TICK':<16}{'n':>5}{'líq.':>8}{'M1':<16}{'n':>5}{'líq.':>8}  conclusão"]
+    label = {"🟢": "🟢 forte", "🟡": "🟡 moderado", "🔴": "🔴 sem edge", "⚪": "⚪ inconclusivo"}
+    for sym in sorted(set(t) | set(m)):
+        a, b = t.get(sym), m.get(sym)
+        va, vb = (a.verdict if a else "⚪"), (b.verdict if b else "⚪")
+        if va == "🟢" and vb == "🟢":
+            concl = "🟢🟢 MUITO FORTE — segundos e meses concordam"
+        elif "🟢" in (va, vb) and "🟡" in (va, vb):
+            concl = "🟢🟡 forte com reserva"
+        elif "⚪" in (va, vb):
+            concl = "⚪ falta amostra numa das resoluções"
+        elif va == "🔴" or vb == "🔴":
+            concl = "🔴 uma resolução nega — não operar"
+        else:
+            concl = "🟡 moderado nas duas"
+        fa = (f"{a.n:>5}{a.net / STOP_ATR:>+7.2f}R" if a else f"{'':>5}{'':>8}")
+        fb = (f"{b.n:>5}{b.net / STOP_ATR:>+7.2f}R" if b else f"{'':>5}{'':>8}")
+        lines.append(f"{sym:<8}{label[va]:<16}{fa}{label[vb]:<16}{fb}  {concl}")
+    return "\n".join(lines)
