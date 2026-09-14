@@ -296,7 +296,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         from .data import DataEngineConfig, HttpClient
         from .data.dukascopy import DUKA_INSTRUMENTS, DukascopyImporter
         from .reaction_hires import save_ticks
-        http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=365 * 24 * 3600)
+        http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=365 * 24 * 3600, timeout=90, retries=2)   # arquivos de hora podem ter MBs
         imp = DukascopyImporter(http, log=print)
         out_dir = args.out_dir or "dados"
         os.makedirs(out_dir, exist_ok=True)
@@ -320,6 +320,8 @@ def cmd_history(args: argparse.Namespace) -> int:
             n = save_ticks(ticks, dest)
             first = f" · 1º tick {ticks[0][0]:%Y-%m-%d %H:%M} bid {ticks[0][1]:g} ask {ticks[0][2]:g} (confira a escala!)" if ticks else " · nenhum tick (instrumento/escala/período?)"
             print(f"{sym} ({inst}, escala {args.scale or sc:g}): {n} ticks → {dest}{first}")
+        if imp.failed:
+            print(f"\n{len(imp.failed)} hora(s) falharam (timeout/503 do Dukascopy). Repita o mesmo comando: as horas já baixadas estão em cache e só as que faltam são pedidas.")
         return 0
     if args.action == "prices":
         # exportação de M1 / ticks do MT5 para CSV (a corretora guarda M1 por anos e ticks por semanas/meses)

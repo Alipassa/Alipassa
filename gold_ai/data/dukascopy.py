@@ -48,20 +48,46 @@ def hour_url(instrument: str, t: datetime) -> str:
 
 
 class DukascopyImporter:
-    def __init__(self, http, log: Optional[Callable[[str], None]] = None) -> None:
-        self.http, self._log = http, log
+    """Uma hora que falhe (timeout, 503) é tentada de novo com espera crescente; se persistir, é anotada em `failed` e pulada —
+    o download continua. Horas baixadas ficam em cache (HttpClient), então repetir o comando refaz só o que faltou."""
+
+    def __init__(self, http, log: Optional[Callable[[str], None]] = None, retries: int = 4, sleep=None, pace: float = 0.15) -> None:
+        import time as _time
+        self.http, self._log, self.retries, self.pace = http, log, retries, pace
+        self._sleep = sleep or _time.sleep
+        self.failed: list[tuple[str, datetime, str]] = []
+
+    def _fetch_hour(self, inst: str, h: datetime) -> Optional[bytes]:
+        from .http import DataError
+        for attempt in range(self.retries + 1):
+            try:
+                data = self.http.get_bytes(hour_url(inst, h), ttl=365 * 24 * 3600, allow_404=True)
+                if self.pace:
+                    self._sleep(self.pace)
+                return data
+            except (DataError, OSError, EOFError) as e:
+                if attempt == self.retries:
+                    self.failed.append((inst, h, str(e)[-80:]))
+                    if self._log:
+                        self._log(f"  {inst} {h:%Y-%m-%d %H}h: FALHOU após {self.retries + 1} tentativas — pulada (repita o comando para completar)")
+                    return None
+                self._sleep(min(60.0, 3.0 * (2 ** attempt)))
+        return None
 
     def hours(self, market: str, hours: Sequence[datetime], scale: Optional[float] = None) -> list[tuple[datetime, float, float]]:
         inst, sc = DUKA_INSTRUMENTS.get(market.upper(), (market.upper(), 1000.0))
         sc = scale or sc
         out = []
-        seen = set()
         for h in sorted(set(x.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc) for x in hours)):
-            if h in seen:
+            if h.weekday() == 5 or (h.weekday() == 6 and h.hour < 22):
+                continue                                              # mercado fechado: nem pede
+            data = self._fetch_hour(inst, h)
+            if data is None:
                 continue
-            seen.add(h)
-            data = self.http.get_bytes(hour_url(inst, h), ttl=365 * 24 * 3600, allow_404=True)
-            out += parse_bi5(data, h, sc)
+            try:
+                out += parse_bi5(data, h, sc)
+            except Exception as e:  # noqa: BLE001 — arquivo corrompido/incompleto
+                self.failed.append((inst, h, f"bi5 inválido: {e}"))
         out.sort()
         return out
 

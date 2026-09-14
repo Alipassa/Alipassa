@@ -279,6 +279,25 @@ class DukascopyTests(unittest.TestCase):
         self.assertTrue(all("/XAUUSD/" in c for c in http.calls))
         imp.hours("USDX", [h])
         self.assertIn("/DOLLARIDXUSD/", http.calls[-1])
+        # fim de semana não é pedido; hora que falha é anotada e pulada, o resto continua
+        from gold_ai.data.http import DataError
+
+        class Flaky(Http):
+            def get_bytes(self, url, ttl=None, allow_404=False):
+                self.calls.append(url)
+                if "/13h_" in url:
+                    raise DataError("falha ao buscar x: HTTP Error 503")
+                return super().get_bytes(url, ttl, allow_404)
+        fl = Flaky()
+        slept = []
+        imp2 = DukascopyImporter(fl, retries=2, sleep=slept.append, pace=0.0)
+        sat = datetime(2026, 3, 14, 12, tzinfo=UTC)
+        out2 = imp2.hours("XAUUSD", [h, h + timedelta(hours=1), sat])
+        self.assertEqual(len(out2), 1)                                                     # 12h ok, 13h falhou, sábado nem pedido
+        self.assertEqual(len(imp2.failed), 1)
+        self.assertEqual(sum(1 for c in fl.calls if "/13h_" in c), 3)                      # 1 + 2 tentativas
+        self.assertFalse(any("/14/" in c for c in fl.calls))
+        self.assertTrue(any(w >= 3.0 for w in slept))
 
 
 class DeltaAndStabilityTests(unittest.TestCase):
