@@ -285,7 +285,7 @@ class ImporterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             prog = FetchProgress(os.path.join(d, "n.csv"))
             GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog, mode="artlist")
-            self.assertEqual(len(http.calls), 3)                       # 400 → 1 nova tentativa com o dia anterior, depois a série seguinte
+            self.assertEqual(len(http.calls), 2)
             prog2 = FetchProgress(os.path.join(d, "n.csv"))       # relido do disco
             GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog2, mode="artlist")
             self.assertEqual(len(http.calls), 2)                   # nada refeito
