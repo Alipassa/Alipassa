@@ -222,9 +222,23 @@ class GDELTImporter:
     """GDELT limita a ~1 requisição a cada 5 s (HTTP 429 acima disso): as chamadas são espaçadas por `min_interval`,
     um 429 espera e tenta de novo, e `checkpoint` recebe o parcial após cada janela (nada se perde se cair no meio)."""
 
-    def __init__(self, http, min_interval: float = 8.0, retry_wait: float = 60.0, max_retries: int = 5, sleep=time.sleep, log=None) -> None:
+    def __init__(self, http, min_interval: float = 8.0, retry_wait: float = 60.0, max_retries: int = 5, sleep=time.sleep, log=None,
+                 max_wait: float = 240.0, budget_sec: Optional[float] = None, clock=time.monotonic) -> None:
         self.http, self.min_interval, self.retry_wait, self.max_retries = http, min_interval, retry_wait, max_retries
         self._sleep, self._log, self._last = sleep, log, 0.0
+        self.max_wait, self.budget_sec, self._clock = max_wait, budget_sec, clock
+        self._t0 = clock()
+        self.out_of_budget = False
+
+    def _budget_left(self) -> bool:
+        if self.budget_sec is None:
+            return True
+        if self._clock() - self._t0 > self.budget_sec:
+            if not self.out_of_budget and self._log:
+                self._log(f"GDELT: orçamento de {self.budget_sec / 60:.0f} min esgotado — parando; repita o comando depois para completar")
+            self.out_of_budget = True
+            return False
+        return True
 
     def _get(self, url: str):
         from .http import DataError
@@ -243,7 +257,9 @@ class GDELTImporter:
                 rate = "429" in str(e)
                 m = re.search(r"Retry-After (\d+)s", str(e))
                 # 429 é bloqueio por rajada: espera exponencial (60 s, 2, 4, 8, 16 min) ou o Retry-After do servidor
-                wait = (float(m.group(1)) if m else self.retry_wait * (2 ** attempt)) if rate else min(self.retry_wait, 20.0)
+                wait = (float(m.group(1)) if m else min(self.max_wait, self.retry_wait * (2 ** attempt))) if rate else min(self.retry_wait, 20.0)
+                if not self._budget_left():
+                    raise
                 if self._log:
                     self._log(f"GDELT {'429 (bloqueio por excesso de requisições)' if rate else 'falha de rede'}: aguardando {wait / 60:.1f} min e tentando de novo ({attempt + 1}/{self.max_retries})")
                 self._sleep(wait)
@@ -277,6 +293,10 @@ class GDELTImporter:
                 t1 = min(t + timedelta(days=chunk_days), t_end)
                 key = f"gdelt:{topic}:{t:%Y%m%d}:{t1:%Y%m%d}:{mode}{':enrich' if enrich else ''}"
                 if progress is not None and progress.has(key):
+                    t = t1
+                    continue
+                if not self._budget_left():
+                    self.failed.append((topic, f"{t:%Y-%m-%d}→{t1:%Y-%m-%d}", "orçamento de tempo esgotado"))
                     t = t1
                     continue
                 try:

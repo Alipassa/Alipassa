@@ -417,12 +417,13 @@ def cmd_history(args: argparse.Namespace) -> int:
 
             def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
                 save_history(merge(hist, partial), path)
-            imp = GDELTImporter(http, min_interval=args.pace, log=print)
+            imp = GDELTImporter(http, min_interval=args.pace, log=print, budget_sec=(args.max_minutes * 60 if args.max_minutes else None))
             new = imp.fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint, enrich=args.enrich,
                             progress=progress, mode=args.gdelt_mode)
             if imp.failed:
-                print(f"janelas com falha ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
-                      "; ".join(f"{t} {w}" for t, w, _ in imp.failed))
+                print(f"janelas pendentes ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
+                      "; ".join(f"{t} {w}" for t, w, _ in imp.failed[:12]) + (" …" if len(imp.failed) > 12 else ""))
+                gdelt_incomplete = True
         print(f"{args.action}: {len(new)} registros novos ({new.stats()})")
         if args.action in ("fetch-te", "fetch-alfred") and len(new):
             src = "tradingeconomics" if args.action == "fetch-te" else "alfred"
@@ -434,7 +435,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         apply_rule_effects(hist)
         n = save_history(hist, path)
         print(f"salvo: {path} · {n} linhas\n" + coverage(hist, start, end).render())
-        return 0
+        return 2 if locals().get("gdelt_incomplete") else 0
     if not exists:
         print(f"{path} não existe — use `history template` ou um fetch-*")
         return 1
@@ -1197,6 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--gdelt-mode", choices=["volinfo", "artlist"], default="volinfo",
                     help="volinfo (padrão): manchetes mais relevantes de CADA DIA + volume, 1 chamada/janela; artlist: as mais recentes com hora exata")
     hi.add_argument("--pace", type=float, default=8.0, help="GDELT: segundos entre chamadas (aumente se receber 429 repetidos)")
+    hi.add_argument("--max-minutes", type=float, default=None, help="GDELT: orçamento de tempo; ao esgotar, salva o que veio e devolve código 2 (incompleto)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")

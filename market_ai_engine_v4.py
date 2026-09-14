@@ -7132,9 +7132,23 @@ class GDELTImporter:
     """GDELT limita a ~1 requisição a cada 5 s (HTTP 429 acima disso): as chamadas são espaçadas por `min_interval`,
     um 429 espera e tenta de novo, e `checkpoint` recebe o parcial após cada janela (nada se perde se cair no meio)."""
 
-    def __init__(self, http, min_interval: float = 8.0, retry_wait: float = 60.0, max_retries: int = 5, sleep=time.sleep, log=None) -> None:
+    def __init__(self, http, min_interval: float = 8.0, retry_wait: float = 60.0, max_retries: int = 5, sleep=time.sleep, log=None,
+                 max_wait: float = 240.0, budget_sec: Optional[float] = None, clock=time.monotonic) -> None:
         self.http, self.min_interval, self.retry_wait, self.max_retries = http, min_interval, retry_wait, max_retries
         self._sleep, self._log, self._last = sleep, log, 0.0
+        self.max_wait, self.budget_sec, self._clock = max_wait, budget_sec, clock
+        self._t0 = clock()
+        self.out_of_budget = False
+
+    def _budget_left(self) -> bool:
+        if self.budget_sec is None:
+            return True
+        if self._clock() - self._t0 > self.budget_sec:
+            if not self.out_of_budget and self._log:
+                self._log(f"GDELT: orçamento de {self.budget_sec / 60:.0f} min esgotado — parando; repita o comando depois para completar")
+            self.out_of_budget = True
+            return False
+        return True
 
     def _get(self, url: str):
         for attempt in range(self.max_retries + 1):
@@ -7152,7 +7166,9 @@ class GDELTImporter:
                 rate = "429" in str(e)
                 m = re.search(r"Retry-After (\d+)s", str(e))
                 # 429 é bloqueio por rajada: espera exponencial (60 s, 2, 4, 8, 16 min) ou o Retry-After do servidor
-                wait = (float(m.group(1)) if m else self.retry_wait * (2 ** attempt)) if rate else min(self.retry_wait, 20.0)
+                wait = (float(m.group(1)) if m else min(self.max_wait, self.retry_wait * (2 ** attempt))) if rate else min(self.retry_wait, 20.0)
+                if not self._budget_left():
+                    raise
                 if self._log:
                     self._log(f"GDELT {'429 (bloqueio por excesso de requisições)' if rate else 'falha de rede'}: aguardando {wait / 60:.1f} min e tentando de novo ({attempt + 1}/{self.max_retries})")
                 self._sleep(wait)
@@ -7185,6 +7201,10 @@ class GDELTImporter:
                 t1 = min(t + timedelta(days=chunk_days), t_end)
                 key = f"gdelt:{topic}:{t:%Y%m%d}:{t1:%Y%m%d}:{mode}{':enrich' if enrich else ''}"
                 if progress is not None and progress.has(key):
+                    t = t1
+                    continue
+                if not self._budget_left():
+                    self.failed.append((topic, f"{t:%Y-%m-%d}→{t1:%Y-%m-%d}", "orçamento de tempo esgotado"))
                     t = t1
                     continue
                 try:
@@ -10917,12 +10937,13 @@ def cmd_history(args: argparse.Namespace) -> int:
 
             def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
                 save_history(merge(hist, partial), path)
-            imp = GDELTImporter(http, min_interval=args.pace, log=print)
+            imp = GDELTImporter(http, min_interval=args.pace, log=print, budget_sec=(args.max_minutes * 60 if args.max_minutes else None))
             new = imp.fetch(start, end, topics, chunk_days=args.chunk_days, max_records=args.max_records, checkpoint=checkpoint, enrich=args.enrich,
                             progress=progress, mode=args.gdelt_mode)
             if imp.failed:
-                print(f"janelas com falha ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
-                      "; ".join(f"{t} {w}" for t, w, _ in imp.failed))
+                print(f"janelas pendentes ({len(imp.failed)}) — rode o mesmo comando de novo para completá-las: " +
+                      "; ".join(f"{t} {w}" for t, w, _ in imp.failed[:12]) + (" …" if len(imp.failed) > 12 else ""))
+                gdelt_incomplete = True
         print(f"{args.action}: {len(new)} registros novos ({new.stats()})")
         if args.action in ("fetch-te", "fetch-alfred") and len(new):
             src = "tradingeconomics" if args.action == "fetch-te" else "alfred"
@@ -10934,7 +10955,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         apply_rule_effects(hist)
         n = save_history(hist, path)
         print(f"salvo: {path} · {n} linhas\n" + coverage(hist, start, end).render())
-        return 0
+        return 2 if locals().get("gdelt_incomplete") else 0
     if not exists:
         print(f"{path} não existe — use `history template` ou um fetch-*")
         return 1
@@ -11654,6 +11675,7 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--gdelt-mode", choices=["volinfo", "artlist"], default="volinfo",
                     help="volinfo (padrão): manchetes mais relevantes de CADA DIA + volume, 1 chamada/janela; artlist: as mais recentes com hora exata")
     hi.add_argument("--pace", type=float, default=8.0, help="GDELT: segundos entre chamadas (aumente se receber 429 repetidos)")
+    hi.add_argument("--max-minutes", type=float, default=None, help="GDELT: orçamento de tempo; ao esgotar, salva o que veio e devolve código 2 (incompleto)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")

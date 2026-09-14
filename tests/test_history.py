@@ -279,6 +279,22 @@ class ImporterTests(unittest.TestCase):
         cov = coverage(h, date(2026, 1, 1), date(2026, 1, 30))
         self.assertAlmostEqual(cov.news_pct, 1.0)
 
+    def test_gdelt_time_budget_stops_cleanly(self):
+        arts = {"articles": [{"title": "OPEC cuts output", "seendate": "20260114T140000Z", "domain": "x.com"}]}
+        http = FakeHttp({"mode=artlist": arts})
+        clock = [0.0]
+
+        def tick():
+            clock[0] += 100.0        # cada chamada de relógio avança 100 s
+            return clock[0]
+        imp = GDELTImporter(http, sleep=lambda s: None, log=lambda m: None, budget_sec=250.0, clock=tick)
+        h = imp.fetch(date(2026, 1, 1), date(2026, 6, 1), ["petroleo"], chunk_days=30, mode="artlist")
+        self.assertTrue(imp.out_of_budget)
+        self.assertGreater(len(imp.failed), 0)                                      # janelas restantes marcadas como pendentes
+        self.assertTrue(all(r == "orçamento de tempo esgotado" for _, _, r in imp.failed))
+        self.assertLess(len(http.calls), 6)                                          # parou antes de pedir tudo
+        self.assertGreaterEqual(len(h), 1)                                           # o que veio antes do limite foi mantido
+
     def test_gdelt_resume_skips_done_windows(self):
         arts = {"articles": [{"title": "OPEC cuts output", "seendate": "20260114T140000Z", "domain": "x.com"}]}
         http = FakeHttp({"mode=artlist": arts})
