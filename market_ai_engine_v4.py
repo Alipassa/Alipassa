@@ -11504,7 +11504,18 @@ def cmd_event(args: argparse.Namespace) -> int:
     return 0
 
 
+def _utf8_console() -> None:
+    """Windows: com a saída redirecionada para arquivo o Python usa cp1252 e '→'/emoji derrubam o programa. Força UTF-8."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream and hasattr(stream, "reconfigure") and (stream.encoding or "").lower().replace("-", "") != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
     p = argparse.ArgumentParser(prog="gold-ai", description="GOLD AI ENGINE — inteligência preditiva do ouro (XAU/USD)")
     sub = p.add_subparsers(dest="cmd", required=True)
 

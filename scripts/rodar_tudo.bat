@@ -7,6 +7,9 @@ REM  Tudo fica em logs\ ; resultados: prova.txt, teste_ab.txt, estimativa_news.t
 REM ============================================================================
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
+chcp 65001 > nul
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONUTF8=1"
 if not exist logs mkdir logs
 set "PY=python"
 set "ENGINE=market_ai_engine_v4.py"

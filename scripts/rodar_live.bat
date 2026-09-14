@@ -5,6 +5,9 @@ REM  Coloque na MESMA pasta de market_ai_engine_v4.py e do .env. MT5 aberto e lo
 REM  Modo PAPER: nunca envia ordem real. Para parar: feche esta janela ou /STOP no Telegram.
 REM ============================================================================
 cd /d "%~dp0"
+chcp 65001 > nul
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONUTF8=1"
 if not exist logs mkdir logs
 set MERCADOS=XAUUSD,US500,EURUSD,USDJPY,WTI
 :loop
