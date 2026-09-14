@@ -36,7 +36,7 @@ def ticks(moves_by_sec: dict[int, float], p0=2500.0, spread=0.30, hours_before=1
             m = moves_by_sec[prev]
         else:
             m = moves_by_sec[prev] + (moves_by_sec[nxt] - moves_by_sec[prev]) * (sec - prev) / (nxt - prev)
-        mid = p0 + m * 10.0
+        mid = p0 + m * atr_range
         out.append((T0 + timedelta(seconds=sec), mid - spread / 2, mid + spread / 2))
     return out
 
