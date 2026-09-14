@@ -134,6 +134,20 @@ python market_ai_engine_v4.py reaction clock --markets XAUUSD,US500            #
 No `live --markets` o relógio roda a cada ciclo, amostra USD/yields/alvo por evento e, ao fechar o horizonte, grava a reação no
 SQLite (`reactions`): o sistema aprende com os eventos que viveu. No backtest com `--events`, o relógio usa só o passado.
 
+**Segundos exigem ticks/M1.** Exporte do seu MT5 (a corretora guarda M1 por anos e ticks por semanas) e meça em alta resolução:
+
+```bash
+python market_ai_engine_v4.py history prices --tf TICK --markets XAUUSD,US500 --extra USDX --start 2026-08-01   # dados/<SYM>_ticks.csv
+python market_ai_engine_v4.py history prices --tf M1 --markets XAUUSD,US500,EURUSD,USDJPY,WTI --extra USDX --start 2026-01-01
+python market_ai_engine_v4.py reaction learn --tf TICK --markets XAUUSD,US500 --lead-usd USDX --slippage 0.02 --latency 0.5 --out reacao_ticks.txt
+```
+
+Saída: movimento mediano a T+1s/5s/10s/30s/60s/300s, dois horizontes (SHORT-TERM REACTION 0–5 min e FOLLOW-THROUGH 5–60 min),
+**LEAD-LAG** ("quando o líder se move após este evento, P(alvo confirma), em quanto tempo, com que magnitude") e o
+**REACTION TRADE SIM**: entrada em T(líder)+atraso+latência a ask/bid reais + slippage, saída em 5 min ou até 60 min com stop —
+expectancy líquida por atraso. Só configurações 🟢 com n ≥ 20 são candidatas; uma vantagem de 5 s some se o custo for maior que o
+movimento capturado. Nada disto entra no motor de decisão antes de sobreviver a esse teste.
+
 ## 🗄️ BANCO HISTÓRICO DE NOTÍCIAS/EVENTOS — point-in-time para o backtest
 
 O histórico H1 gratuito não tem notícias nem calendário; por isso o backtest via menos evidência do que o `live`. O banco

@@ -454,3 +454,6 @@ Regras:
     o alvo e os líderes (USD, yields) levam para reagir; a mediana por tipo de evento, aprendida só com eventos já
     concluídos, permite detectar a assimetria temporal (líderes reagiram, alvo ainda não, tempo dentro da janela histórica)
     = PRESSÃO LATENTE, evidência para o pré-movimento. Nunca usa a reação do próprio evento para decidir sobre ele.
+    Segundos exigem ticks/M1 (`history prices`, `reaction learn --tf TICK`): dois horizontes (reação 0–5 min, continuação
+    5–60 min), lead-lag condicional e simulação com spread + slippage + latência. O robô não opera atraso detectado: opera
+    configurações que sobreviveram ao custo, fora da amostra.

@@ -1,0 +1,146 @@
+"""Testes — REACTION ENGINE alta resolução: ticks, dois horizontes, lead-lag, custo de execução, exportação MT5."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+
+from gold_ai.data.mt5 import MT5Client, MT5Config
+from gold_ai.models import Candle
+from gold_ai.reaction_hires import (BUCKETS_SEC, LeadLagStats, PricePath, Quote, ReactionTradeSim, load_ticks, measure_hires, save_candles,
+                                    save_ticks)
+
+UTC = timezone.utc
+T0 = datetime(2026, 3, 11, 12, 30, tzinfo=UTC)
+
+
+def ticks(moves_by_sec: dict[int, float], p0=2500.0, spread=0.30, hours_before=15, atr_range=10.0):
+    """Ticks a cada segundo por 1h após T0 seguindo `moves_by_sec` (ATR=10) por interpolação; antes de T0, ruído leve por 15h (ATR ≈ 10)."""
+    out = []
+    t = T0 - timedelta(hours=hours_before)
+    k = 0
+    while t < T0:
+        mid = p0 + (atr_range / 2) * ((k % 120) / 60.0 - 1.0)     # oscila ±5 → amplitude horária ≈ 10
+        out.append((t, mid - spread / 2, mid + spread / 2))
+        t += timedelta(seconds=30)
+        k += 1
+    keys = sorted(moves_by_sec)
+    for sec in range(0, 3601):
+        prev = max([s for s in keys if s <= sec], default=None)
+        nxt = min([s for s in keys if s > sec], default=None)
+        if prev is None:
+            m = 0.0
+        elif nxt is None:
+            m = moves_by_sec[prev]
+        else:
+            m = moves_by_sec[prev] + (moves_by_sec[nxt] - moves_by_sec[prev]) * (sec - prev) / (nxt - prev)
+        mid = p0 + m * 10.0
+        out.append((T0 + timedelta(seconds=sec), mid - spread / 2, mid + spread / 2))
+    return out
+
+
+class HiResMeasureTests(unittest.TestCase):
+    def test_seconds_buckets_two_horizons_and_lead_lag(self):
+        # alvo (ouro, esperado ↓): nada até 20 s, −0,2 ATR aos 40 s, −0,5 aos 90 s, −0,8 aos 240 s, −1,2 aos 1800 s, recua para −0,9 no fim
+        path = PricePath.from_ticks(ticks({0: 0.0, 20: 0.0, 40: -0.2, 90: -0.5, 240: -0.8, 1800: -1.2, 3600: -0.9}))
+        usd = PricePath.from_ticks(ticks({0: 0.0, 10: 0.0, 15: 0.1, 60: 0.2}, p0=104.0, spread=0.01, atr_range=0.3))   # +0,1 ATR(0,3)=+0,03 → 0,029% ... precisa ≥0,08%
+        usd = PricePath.from_ticks(ticks({0: 0.0, 10: 0.0, 15: 1.0, 60: 1.5}, p0=104.0, spread=0.01, atr_range=0.1))   # +1 ATR(0,1)=+0,1 → +0,096% ≥ 0,08% aos 15 s
+        atr = path.atr_at(T0)
+        self.assertGreater(atr, 5.0)
+        rec = measure_hires("CPI", "cpi", T0, "XAUUSD", -1.0, path, 10.0, {"USD": usd}, {"USD": +1.0})
+        self.assertEqual(rec.base.resolution_min, 1 / 60)
+        self.assertAlmostEqual(rec.move_at[1], 0.0, places=2)
+        self.assertAlmostEqual(rec.move_at[30], 0.1, places=2)
+        self.assertAlmostEqual(rec.move_at[60], 0.32, places=2)
+        self.assertAlmostEqual(rec.move_at[300], 0.815, places=2)
+        self.assertAlmostEqual(rec.base.time_to_first, 35 / 60, places=2)           # 0,15 ATR aos 35 s
+        self.assertAlmostEqual(rec.base.time_to_confirmation, 73.33 / 60, places=2)  # 0,40 ATR aos 73 s (interpolação 40→90 s)
+        self.assertAlmostEqual(rec.short_mfe, 0.815, places=2)                       # 0–5 min
+        self.assertAlmostEqual(rec.follow_mfe, 1.2, places=2)                        # 5–60 min
+        self.assertAlmostEqual(rec.base.max_adverse_atr, 0.0, places=2)
+        self.assertTrue(rec.base.direction_correct)
+        self.assertAlmostEqual(rec.spread_atr, 0.03, places=3)
+        self.assertEqual(rec.lead_first_sec, 15.0)
+        self.assertAlmostEqual(rec.lead_lag_sec, 20.0, places=1)                     # alvo reagiu 20 s depois do USD
+        self.assertIsNone(measure_hires("X", "cpi", T0, "XAUUSD", 0.0, path, 10.0))
+
+    def test_lead_lag_and_trade_sim_after_costs(self):
+        # 30 eventos: em 24 o líder reage e o ouro acompanha (−0,8 ATR em 5 min); em 6 o líder reage e o ouro anda contra (+0,3)
+        recs, items = [], []
+        for k in range(30):
+            follow = k < 24
+            moves = {0: 0.0, 20: 0.0, 60: (-0.3 if follow else 0.15), 300: (-0.8 if follow else 0.3), 3600: (-1.0 if follow else 0.2)}
+            t0 = T0 + timedelta(days=k)
+            tk = [(t + timedelta(days=k), b, a) for t, b, a in ticks(moves)]
+            path = PricePath.from_ticks(tk)
+            usd = PricePath.from_ticks([(t + timedelta(days=k), b, a) for t, b, a in ticks({0: 0.0, 10: 0.0, 15: 1.0, 60: 1.5}, p0=104.0, spread=0.01, atr_range=0.1)])
+            rec = measure_hires(f"CPI{k}", "cpi", t0, "XAUUSD", -1.0, path, 10.0, {"USD": usd}, {"USD": +1.0})
+            recs.append(rec)
+            items.append((rec, path, 10.0))
+        ll = LeadLagStats(recs)
+        row = ll.rows()[0]
+        self.assertEqual((row.n, row.n_lead), (30, 30))
+        self.assertAlmostEqual(row.p_confirm_given_lead, 0.8)
+        self.assertIn("P(B|A)", ll.render())
+        sim = ReactionTradeSim(slippage_atr=0.02, latency_sec=0.5)
+        rows = sim.table(items, delays=(1, 30, 300))
+        by_delay = {r.delay_sec: r for r in rows}
+        self.assertEqual(by_delay[1].n, 30)
+        self.assertGreater(by_delay[1].net_short, 0.4)                     # sobra depois de spread (0,03) + slippage (0,04)
+        self.assertGreater(by_delay[1].cost, 0.06)
+        self.assertLess(by_delay[300].net_short, by_delay[1].net_short)   # entrar 5 min depois captura menos (sai 5 min após a entrada)
+        self.assertGreater(by_delay[1].net_follow, by_delay[1].net_short)  # continuação capturou mais (−1,0 aos 60 min)
+        txt = sim.render(rows)
+        self.assertIn("🟢", txt)
+        self.assertIn("REACTION TRADE SIM", txt)
+        # custo maior que o movimento → 🔴
+        sim2 = ReactionTradeSim(slippage_atr=0.6, latency_sec=0.5)
+        self.assertIn("🔴", sim2.render(sim2.table(items, delays=(1,))))
+
+    def test_csv_roundtrip_and_m1_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            tk = ticks({0: 0.0, 60: 0.5})[:50]
+            p = os.path.join(d, "XAUUSD_ticks.csv")
+            self.assertEqual(save_ticks(tk, p), 50)
+            back = load_ticks(p)
+            self.assertEqual(len(back), 50)
+            self.assertAlmostEqual(back[0][1], tk[0][1], places=5)
+            cs = [Candle(T0 + timedelta(minutes=i), 2500, 2501, 2499, 2500 + i, 10) for i in range(5)]
+            pc = os.path.join(d, "XAUUSD_m1.csv")
+            self.assertEqual(save_candles(cs, pc), 5)
+        path = PricePath.from_candles(cs, 0.30, 1)
+        self.assertEqual(path.resolution_sec, 60.0)
+        q = path.at_or_before(T0 + timedelta(minutes=2, seconds=30))
+        self.assertAlmostEqual(q.mid, 2502.0)
+        self.assertAlmostEqual(q.spread, 0.30)
+
+
+class MT5ExportTests(unittest.TestCase):
+    def test_rates_range_and_ticks_range(self):
+        from tests.test_mt5 import FakeMT5
+
+        class Fake(FakeMT5):
+            COPY_TICKS_INFO = 1
+
+            def copy_rates_range(self, symbol, tf, start, end):
+                return self.copy_rates_from_pos(symbol, tf, 0, 3)
+
+            def copy_ticks_range(self, symbol, start, end, flags):
+                base = int(start.timestamp()) * 1000
+                return [{"time": int(start.timestamp()), "time_msc": base + i * 250, "bid": 2650.0 + i * 0.01, "ask": 2650.3 + i * 0.01} for i in range(4)] + \
+                       [{"time": int(start.timestamp()) + 1, "time_msc": base + 1000, "bid": 0.0, "ask": 2650.5}]   # bid 0 → herda o anterior
+        c = MT5Client(MT5Config(symbol="XAUUSD"), mt5=Fake())
+        c.connect()
+        cs = c.rates_range("XAUUSD", "M1", T0, T0 + timedelta(hours=1))
+        self.assertEqual(len(cs), 3)
+        tk = c.ticks_range("XAUUSD", T0, T0 + timedelta(seconds=2))
+        self.assertEqual(len(tk), 5)
+        self.assertEqual((tk[1][0] - tk[0][0]).total_seconds(), 0.25)
+        self.assertAlmostEqual(tk[4][1], 2650.03)                          # bid herdado
+        self.assertAlmostEqual(tk[4][2], 2650.5)
+
+
+if __name__ == "__main__":
+    unittest.main()

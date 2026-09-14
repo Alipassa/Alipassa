@@ -114,6 +114,35 @@ class MT5Client:
             raise MT5Error(f"copy_rates_from_pos({tf}) falhou: {self.mt5.last_error()}")
         return rates_to_candles(rates)
 
+    def rates_range(self, symbol: str, tf: str, start: datetime, end: datetime) -> list[Candle]:
+        """Histórico por intervalo (copy_rates_range) — M1 costuma existir por anos na corretora."""
+        if not self.mt5.symbol_select(symbol, True):
+            raise MT5Error(f"símbolo {symbol} indisponível: {self.mt5.last_error()}")
+        rates = self.mt5.copy_rates_range(symbol, getattr(self.mt5, TF_TO_MT5[tf]), start, end)
+        if rates is None:
+            raise MT5Error(f"copy_rates_range({symbol},{tf}) falhou: {self.mt5.last_error()}")
+        return rates_to_candles(rates)
+
+    def ticks_range(self, symbol: str, start: datetime, end: datetime) -> list[tuple[datetime, float, float]]:
+        """Ticks (time_msc, bid, ask) por intervalo (copy_ticks_range, COPY_TICKS_INFO) — a corretora guarda semanas/meses."""
+        if not self.mt5.symbol_select(symbol, True):
+            raise MT5Error(f"símbolo {symbol} indisponível: {self.mt5.last_error()}")
+        flags = getattr(self.mt5, "COPY_TICKS_INFO", 1)
+        ticks = self.mt5.copy_ticks_range(symbol, start, end, flags)
+        if ticks is None:
+            raise MT5Error(f"copy_ticks_range({symbol}) falhou: {self.mt5.last_error()}")
+        out = []
+        last_bid = last_ask = None
+        for r in ticks:
+            ms = int(r["time_msc"]) if _has(r, "time_msc") else int(r["time"]) * 1000
+            bid = float(r["bid"]) if _has(r, "bid") and r["bid"] else last_bid
+            ask = float(r["ask"]) if _has(r, "ask") and r["ask"] else last_ask
+            if bid is None or ask is None:
+                continue
+            last_bid, last_ask = bid, ask
+            out.append((datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc), bid, ask))
+        return out
+
     def tick(self) -> tuple[float, float]:
         t = self.mt5.symbol_info_tick(self.cfg.symbol)
         if t is None:

@@ -279,6 +279,46 @@ def cmd_history(args: argparse.Namespace) -> int:
     hist = load_history(path) if exists else EventHistory()
     start = date.fromisoformat(args.start) if args.start else date(2026, 1, 1)
     end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date()
+    if args.action == "prices":
+        # exportação de M1 / ticks do MT5 para CSV (a corretora guarda M1 por anos e ticks por semanas/meses)
+        from .data.mt5 import MT5Client, MT5Config, MT5Error
+        from .data.multi import MultiMarketData
+        from .markets import get_market
+        from .reaction_hires import save_candles, save_ticks
+        cfg = MT5Config.from_env(env)
+        symbol_map = MultiMarketData.symbol_map_from_env(env)
+        out_dir = args.out_dir or "dados"
+        os.makedirs(out_dir, exist_ok=True)
+        t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+        t1 = datetime(end.year, end.month, end.day, 23, 59, tzinfo=timezone.utc)
+        try:
+            client = MT5Client(cfg)
+            client.connect()
+        except MT5Error as e:
+            print(f"MT5 indisponível: {e}")
+            return 1
+        symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
+        for sym in symbols:
+            broker = symbol_map.get(sym) or (get_market(sym).mt5 if sym in __import__("gold_ai.markets", fromlist=["MARKETS"]).MARKETS else sym)
+            try:
+                if args.tf.upper() == "TICK":
+                    n = 0
+                    rows = []
+                    t = t0
+                    while t < t1:                      # ticks em blocos de 1 dia (volume grande)
+                        tt = min(t + timedelta(days=1), t1)
+                        rows += client.ticks_range(broker, t, tt)
+                        t = tt
+                    n = save_ticks(rows, os.path.join(out_dir, f"{sym}_ticks.csv"))
+                    print(f"{sym} ({broker}): {n} ticks → {out_dir}/{sym}_ticks.csv")
+                else:
+                    cs = client.rates_range(broker, args.tf.upper(), t0, t1)
+                    n = save_candles(cs, os.path.join(out_dir, f"{sym}_{args.tf.lower()}.csv"))
+                    print(f"{sym} ({broker}): {n} candles {args.tf.upper()} → {out_dir}/{sym}_{args.tf.lower()}.csv")
+            except MT5Error as e:
+                print(f"{sym} ({broker}): FALHOU — {e}")
+        client.close()
+        return 0
     if args.action == "template":
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         ex = HistoricalEvent(datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc), datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc), "EXEMPLO_CPI_202601",
@@ -382,10 +422,106 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 1
 
 
+def _reaction_learn_hires(args: argparse.Namespace) -> int:
+    """Alta resolução: ticks/M1 exportados do MT5 (`history prices`) × banco de eventos → segundos, dois horizontes, lead-lag, custo."""
+    from .history import EXTRA_TRANSMISSION, TYPICAL, load_history, rule_direction
+    from .markets import get_market
+    from .news_engine import TRANSMISSION
+    from .reaction_hires import LeadLagStats, PricePath, ReactionTradeSim, load_ticks, measure_hires
+
+    if not os.path.exists(args.events):
+        print(f"banco histórico não encontrado: {args.events}")
+        return 1
+    hist = load_history(args.events)
+    csv_dir = args.csv_dir or "dados"
+    tf = args.tf.upper()
+
+    def read_candles(path):
+        from .models import Candle
+        import csv as _csv
+        out = []
+        with open(path, encoding="utf-8") as f:
+            for r in _csv.DictReader(f):
+                t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
+                out.append(Candle(t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r.get("volume") or 0)))
+        return out
+
+    def load_path(sym: str, spread: float):
+        p_t = os.path.join(csv_dir, f"{sym}_ticks.csv")
+        p_c = os.path.join(csv_dir, f"{sym}_{tf.lower()}.csv")
+        if tf == "TICK" and os.path.exists(p_t):
+            return PricePath.from_ticks(load_ticks(p_t)), "ticks"
+        if os.path.exists(p_c):
+            return PricePath.from_candles(read_candles(p_c), spread, 1 if tf == "M1" else 5), tf
+        if os.path.exists(p_t):
+            return PricePath.from_ticks(load_ticks(p_t)), "ticks"
+        return None, ""
+
+    leads = {}
+    if args.lead_usd:
+        lp, kind = load_path(args.lead_usd.upper(), 0.0)
+        if lp:
+            leads["USD"] = lp
+            print(f"líder USD: {args.lead_usd} ({kind})")
+        else:
+            print(f"líder USD {args.lead_usd}: arquivo não encontrado em {csv_dir} (sem líder USD → lead-lag e trade sim ficam vazios)")
+    if args.lead_yield:
+        lp, kind = load_path(args.lead_yield.upper(), 0.0)
+        if lp:
+            leads["YIELD"] = lp
+            print(f"líder YIELD: {args.lead_yield} ({kind})")
+    all_recs, sim_items = [], []
+    for sym in (x.strip().upper() for x in args.markets.split(",") if x.strip()):
+        spec = get_market(sym)
+        path, kind = load_path(sym, spec.typical_spread)
+        if path is None:
+            print(f"{sym}: sem {sym}_{tf.lower()}.csv / {sym}_ticks.csv em {csv_dir} — exporte com `history prices --tf {tf} --markets {sym}`")
+            continue
+        n = 0
+        for e in hist.events:
+            if e.revised is not None:
+                continue
+            sign, sigma = 0.0, None
+            if e.surprise is not None:
+                sign = 1.0 if e.surprise > 0 else -1.0 if e.surprise < 0 else 0.0
+                typ = TYPICAL.get(e.kind, max(abs(e.forecast or e.previous or 1.0) * 0.1, 0.1))
+                sigma = e.surprise / typ if typ else None
+            elif e.kind in TRANSMISSION and e.actual is None:
+                sign = 1.0
+            if sign == 0.0:
+                continue
+            exp = rule_direction(e.kind, sign, sigma, sym)
+            if exp == 0.0:
+                continue
+            chans = TRANSMISSION.get(e.kind) or EXTRA_TRANSMISSION.get(e.kind) or {}
+            lead_dirs = {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}
+            atr = path.atr_at(e.published_at)
+            if not atr:
+                continue
+            rec = measure_hires(e.event_id, e.kind, e.published_at, sym, exp, path, atr, leads, lead_dirs)
+            if rec:
+                all_recs.append(rec)
+                sim_items.append((rec, path, atr))
+                n += 1
+        print(f"{sym}: {n} eventos medidos em {kind} (resolução {path.resolution_sec:.0f} s)")
+    ll = LeadLagStats(all_recs)
+    sim = ReactionTradeSim(slippage_atr=args.slippage, latency_sec=args.latency)
+    txt = ll.render() + "\n\n" + sim.render(sim.table(sim_items))
+    txt += "\n\nLIMITES: manchetes GDELT (volinfo) têm published_at no fim do dia — só releases (ALFRED/TE) têm hora exata para segundos; "
+    txt += "custo = ask/bid reais dos ticks (ou spread típico no M1) + slippage + latência; liquidez fora do horário e gaps não modelados."
+    print(txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt)
+    return 0
+
+
 def cmd_reaction(args: argparse.Namespace) -> int:
     """REACTION ENGINE: learn (banco histórico × preço → tempo de reação por evento e ativo) · stats (o que o live viveu) · clock (agora)."""
     from .reaction import ReactionStats
 
+    if args.action == "learn" and args.tf.upper() in ("M1", "M5", "TICK"):
+        return _reaction_learn_hires(args)
     if args.action == "learn":
         from .history import load_history
         if not os.path.exists(args.events):
@@ -904,8 +1040,11 @@ def main(argv: list[str] | None = None) -> int:
     sw.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     sw.set_defaults(func=cmd_sweep)
 
-    hi = sub.add_parser("history", help="BANCO HISTÓRICO de eventos/notícias point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats | list")
-    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list"])
+    hi = sub.add_parser("history", help="BANCO HISTÓRICO point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats | list | prices (M1/ticks do MT5)")
+    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list", "prices"])
+    hi.add_argument("--tf", default="M1", help="prices: M1 | M5 | TICK (ticks bid/ask, blocos diários)")
+    hi.add_argument("--extra", default=None, help="prices: símbolos extras da corretora para líderes, ex.: USDX,USTNOTE")
+    hi.add_argument("--out-dir", default="dados")
     hi.add_argument("--kind", default=None, help="list: cpi, core_cpi, nfp, unemployment, jobless_claims, gdp, ppi, retail_sales, earnings, core_pce…")
     hi.add_argument("--category", default=None, help="list: MACRO, CENTRAL_BANK, GEOPOLITICAL, ENERGY, CHINA, NEWS")
     hi.add_argument("--limit", type=int, default=40)
@@ -937,6 +1076,11 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument("--db", default="gold_ai.db")
     rc.add_argument("--csv-dir", default=None)
     rc.add_argument("--no-fred", action="store_true")
+    rc.add_argument("--tf", default="H1", help="learn: H1 (Yahoo/CSV) | M1 | M5 | TICK (CSVs exportados por `history prices`)")
+    rc.add_argument("--lead-usd", default="USDX", help="learn M1/TICK: símbolo exportado do líder USD (ex.: USDX); vazio = sem líder")
+    rc.add_argument("--lead-yield", default=None, help="learn M1/TICK: símbolo exportado do líder de juros (ex.: USTNOTE)")
+    rc.add_argument("--slippage", type=float, default=0.02, help="trade sim: slippage em ATR por perna")
+    rc.add_argument("--latency", type=float, default=0.5, help="trade sim: latência de execução em segundos")
     rc.add_argument("--out", default=None)
     rc.set_defaults(func=cmd_reaction)
 
