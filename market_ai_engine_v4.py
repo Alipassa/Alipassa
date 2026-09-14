@@ -3124,6 +3124,40 @@ class HttpClient:
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
         raise DataError(f"falha ao buscar {url}: {last}")
 
+    def get_bytes(self, url: str, ttl: Optional[int] = None, allow_404: bool = False) -> bytes:
+        """Download binário (ex.: ticks .bi5 do Dukascopy). 404 com allow_404 → b'' (hora sem dados). Cache em disco por URL."""
+        ttl = self.ttl if ttl is None else ttl
+        p = self._cache_path(url)
+        if p:
+            pb = p + ".bin"
+            if os.path.exists(pb) and time.time() - os.path.getmtime(pb) < ttl:
+                with open(pb, "rb") as f:
+                    return f.read()
+        last: Optional[Exception] = None
+        for attempt in range(self.retries):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": self.user_agent, "Accept": "*/*"})
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
+                    data = resp.read()
+                if p:
+                    with open(p + ".bin", "wb") as f:
+                        f.write(data)
+                return data
+            except urllib.error.HTTPError as e:  # pragma: no cover - rede
+                if e.code == 404 and allow_404:
+                    if p:
+                        with open(p + ".bin", "wb") as f:
+                            f.write(b"")
+                    return b""
+                if e.code == 429:
+                    raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests") from e
+                last = e
+                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
+            except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
+                last = e
+                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
+        raise DataError(f"falha ao buscar {url}: {last}")
+
     def get_json(self, url: str, ttl: Optional[int] = None) -> Any:
         try:
             return json.loads(self.get_text(url, ttl))
@@ -4089,6 +4123,112 @@ class MT5Executor:
         res = mt5.order_send(req)
         plan.result = {"retcode": getattr(res, "retcode", None), "order": getattr(res, "order", None), "comment": getattr(res, "comment", "")}
         return plan
+
+
+# ============================================================================
+# DATA · DUKASCOPY
+# ============================================================================
+
+"""DUKASCOPY — ticks bid/ask históricos, gratuitos e sem chave (fonte alternativa ao MT5 para o REACTION ENGINE).
+
+URL por hora: https://datafeed.dukascopy.com/datafeed/<INSTRUMENTO>/<ANO>/<MÊS-1 com 2 dígitos>/<DIA>/<HORA>h_ticks.bi5
+Cada arquivo é LZMA com registros big-endian de 20 bytes: (ms desde o início da hora: uint32, ask: uint32, bid: uint32,
+volume ask: float32, volume bid: float32). Preços inteiros divididos pela escala do instrumento (confira o primeiro tick).
+Hora sem dados (fim de semana, feriado) = 404 → vazio. Meses no caminho começam em 00 (janeiro).
+"""
+
+
+import lzma
+import struct
+
+DUKA_BASE = "https://datafeed.dukascopy.com/datafeed"
+
+# mercado do MARKET AI → (instrumento Dukascopy, escala de preço)
+DUKA_INSTRUMENTS: dict[str, tuple[str, float]] = {
+    "XAUUSD": ("XAUUSD", 1000.0),
+    "EURUSD": ("EURUSD", 100000.0),
+    "GBPUSD": ("GBPUSD", 100000.0),
+    "USDJPY": ("USDJPY", 1000.0),
+    "US500": ("USA500IDXUSD", 1000.0),
+    "NAS100": ("USATECHIDXUSD", 1000.0),
+    "WTI": ("LIGHTCMDUSD", 1000.0),
+    "USDX": ("DOLLARIDXUSD", 1000.0),      # índice do dólar: líder USD
+    "US10Y": ("USTBONDTRUSD", 1000.0),     # T-Bond futuro (proxy inverso de yields; use --lead-yield com cautela)
+    "BTCUSD": ("BTCUSD", 10.0),
+}
+
+
+def parse_bi5(data: bytes, hour_start: datetime, scale: float) -> list[tuple[datetime, float, float]]:
+    if not data:
+        return []
+    raw = lzma.decompress(data)
+    out = []
+    for off in range(0, len(raw) - len(raw) % 20, 20):
+        ms, ask, bid, _va, _vb = struct.unpack(">IIIff", raw[off:off + 20])
+        if bid <= 0 or ask <= 0:
+            continue
+        out.append((hour_start + timedelta(milliseconds=ms), bid / scale, ask / scale))
+    return out
+
+
+def hour_url(instrument: str, t: datetime) -> str:
+    return f"{DUKA_BASE}/{instrument}/{t.year}/{t.month - 1:02d}/{t.day:02d}/{t.hour:02d}h_ticks.bi5"
+
+
+class DukascopyImporter:
+    def __init__(self, http, log: Optional[Callable[[str], None]] = None) -> None:
+        self.http, self._log = http, log
+
+    def hours(self, market: str, hours: Sequence[datetime], scale: Optional[float] = None) -> list[tuple[datetime, float, float]]:
+        inst, sc = DUKA_INSTRUMENTS.get(market.upper(), (market.upper(), 1000.0))
+        sc = scale or sc
+        out = []
+        seen = set()
+        for h in sorted(set(x.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc) for x in hours)):
+            if h in seen:
+                continue
+            seen.add(h)
+            data = self.http.get_bytes(hour_url(inst, h), ttl=365 * 24 * 3600, allow_404=True)
+            out += parse_bi5(data, h, sc)
+        out.sort()
+        return out
+
+    def around_events(self, market: str, event_times: Sequence[datetime], before_h: int = 4, after_h: int = 1, scale: Optional[float] = None,
+                      checkpoint: Optional[Callable[[list], None]] = None) -> list[tuple[datetime, float, float]]:
+        """Só as horas ao redor de cada evento (−before_h … +after_h): amostra grande sem baixar o ano inteiro."""
+        hours: list[datetime] = []
+        for t in event_times:
+            t = t.astimezone(timezone.utc)
+            for k in range(-before_h, after_h + 1):
+                hours.append(t.replace(minute=0, second=0, microsecond=0) + timedelta(hours=k))
+        uniq = sorted(set(hours))
+        if self._log:
+            self._log(f"Dukascopy {market}: {len(uniq)} horas ao redor de {len(event_times)} eventos")
+        out = []
+        for i in range(0, len(uniq), 24):
+            out += self.hours(market, uniq[i:i + 24], scale)
+            if checkpoint:
+                checkpoint(out)
+            if self._log and (i // 24) % 10 == 9:
+                self._log(f"  {market}: {min(i + 24, len(uniq))}/{len(uniq)} horas · {len(out)} ticks")
+        return out
+
+    def range(self, market: str, start: date, end: date, scale: Optional[float] = None, checkpoint: Optional[Callable[[list], None]] = None) -> list:
+        hours = []
+        t = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+        t_end = datetime(end.year, end.month, end.day, 23, tzinfo=timezone.utc)
+        while t <= t_end:
+            if t.weekday() < 5 or (t.weekday() == 6 and t.hour >= 22):
+                hours.append(t)
+            t += timedelta(hours=1)
+        if self._log:
+            self._log(f"Dukascopy {market}: {len(hours)} horas ({start} → {end})")
+        out = []
+        for i in range(0, len(hours), 24):
+            out += self.hours(market, hours[i:i + 24], scale)
+            if checkpoint:
+                checkpoint(out)
+        return out
 
 
 # ============================================================================
@@ -6133,6 +6273,96 @@ class ClockTradeTest:
         lines.append("   'ingênua' = toda reação do líder com a MESMA entrada e saída QUICK, sem relógio; a diferença para QUICK é o valor do filtro temporal")
         lines.append("   ⚪ < 20 entradas inconclusivo · 🟢 líquido > 0,02 ATR · 🔴 custo consome. Colunas de descarte: sem_hist / P_baixa / alvo_já_reagiu / fora_janela")
         return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- VEREDITO POR ATIVO → REACTION EDGE (consumível pelo Asset Selector)
+VERDICT_SCORE = {"🟢": 0.9, "🟡": 0.65, "🔴": 0.2, "⚪": 0.5}
+
+
+@dataclass
+class AssetVerdict:
+    symbol: str
+    verdict: str            # 🟢 forte | 🟡 moderado | 🔴 sem edge | ⚪ inconclusivo
+    n: int
+    net: float              # melhor expectancy líquida (ATR) entre atrasos × saídas
+    naive: float
+    delay_sec: int
+    exit: str
+    n_events: int
+    kinds: int
+
+    @property
+    def edge_score(self) -> float:
+        return VERDICT_SCORE[self.verdict]
+
+    def row(self) -> str:
+        label = {"🟢": "forte", "🟡": "moderado", "🔴": "sem edge", "⚪": "inconclusivo"}[self.verdict]
+        return (f"{self.symbol:<8}{self.verdict} {label:<13}{self.n_events:>6}{self.n:>7}{self.net:>+9.3f}{self.net / STOP_ATR:>+7.2f}R{self.naive:>+9.3f}"
+                f"{self.delay_sec:>7}s {self.exit:<7}{self.kinds:>6}")
+
+
+def asset_verdicts(results: dict[int, list[ClockTestRow]], min_n: int = 20) -> list[AssetVerdict]:
+    """`results`: atraso → linhas do ClockTradeTest. Por ativo, escolhe a melhor combinação atraso × saída (QUICK/EXTEND/FOLLOW)
+    ponderando por entradas; veredito só com n ≥ min_n."""
+    per_asset: dict[str, list[tuple[int, str, float, int, float, int, int]]] = {}
+    for delay, rows in results.items():
+        by_sym: dict[str, list[ClockTestRow]] = {}
+        for r in rows:
+            by_sym.setdefault(r.target, []).append(r)
+        for sym, rs in by_sym.items():
+            n = sum(r.n_entries for r in rs)
+            n_ev = sum(r.n_events for r in rs)
+            if n == 0:
+                per_asset.setdefault(sym, []).append((delay, "QUICK", 0.0, 0, 0.0, n_ev, len(rs)))
+                continue
+            naive_n = sum(r.n_lead for r in rs)
+            naive = sum(r.naive_net_quick * r.n_lead for r in rs) / naive_n if naive_n else 0.0
+            for ex, attr in (("QUICK", "net_quick"), ("EXTEND", "net_extend"), ("FOLLOW", "net_follow")):
+                net = sum(getattr(r, attr) * r.n_entries for r in rs) / n
+                per_asset.setdefault(sym, []).append((delay, ex, net, n, naive, n_ev, len(rs)))
+    out = []
+    for sym, combos in per_asset.items():
+        valid = [c for c in combos if c[3] >= min_n]
+        if not valid:
+            best = max(combos, key=lambda c: (c[3], c[2]))
+            out.append(AssetVerdict(sym, "⚪", best[3], best[2], best[4], best[0], best[1], best[5], best[6]))
+            continue
+        best = max(valid, key=lambda c: c[2])
+        delay, ex, net, n, naive, n_ev, kinds = best
+        if net >= 0.10 and net > naive:
+            v = "🟢"
+        elif net > 0.02:
+            v = "🟡"
+        else:
+            v = "🔴"
+        out.append(AssetVerdict(sym, v, n, net, naive, delay, ex, n_ev, kinds))
+    return sorted(out, key=lambda v: (-VERDICT_SCORE[v.verdict], -v.net))
+
+
+def render_verdicts(verdicts: Sequence[AssetVerdict], resolution: str) -> str:
+    head = f"{'ativo':<8}{'veredito':<16}{'evts':>6}{'entr':>7}{'líquido':>9}{'':>8}{'ingênua':>9}{'atraso':>8} {'saída':<7}{'tipos':>6}"
+    lines = [f"🏁 REACTION EDGE POR ATIVO ({resolution}) — o relógio não funciona igual em todos os mercados", head] + [v.row() for v in verdicts]
+    lines.append("   🟢 forte: n ≥ 20, líquido ≥ 0,10 ATR (0,2R) e acima da ingênua · 🟡 moderado: líquido > 0,02 ATR · 🔴 custo consome · ⚪ n < 20")
+    lines.append("   'melhor combinação' atraso × saída por ativo; o Asset Selector usa este veredito (reaction_edge.json) só quando o relógio marca PRESSÃO LATENTE")
+    return "\n".join(lines)
+
+
+def save_reaction_edge(verdicts: Sequence[AssetVerdict], path: str, resolution: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    data = {v.symbol: {"verdict": v.verdict, "edge_score": v.edge_score, "n": v.n, "net_atr": round(v.net, 4), "naive_atr": round(v.naive, 4),
+                       "delay_sec": v.delay_sec, "exit": v.exit, "n_events": v.n_events, "resolution": resolution,
+                       "generated_at": datetime.now(timezone.utc).isoformat()} for v in verdicts}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False)
+
+
+def load_reaction_edge(path: str) -> dict[str, float]:
+    """symbol → edge_score (0..1) só para vereditos com amostra (🟢/🟡/🔴); ⚪ é ignorado (o selector fica neutro)."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return {sym: float(v["edge_score"]) for sym, v in data.items() if v.get("verdict") in ("🟢", "🟡", "🔴")}
 
 
 # ============================================================================
@@ -8544,8 +8774,14 @@ def execution_quality(spec: MarketSpec, snap: MarketSnapshot, spread: Optional[f
 
 
 class AssetSelector:
-    def __init__(self, weights: Optional[dict[str, float]] = None) -> None:
+    """`reaction_edge` (símbolo → 0..1, de reaction_edge.json): dimensão opcional "o relógio de reação tem edge provado neste
+    mercado". Só pesa quando o snapshot marca PRESSÃO LATENTE; fora disso é neutra (0,5). Não cria entradas: só ordena."""
+
+    REACTION_WEIGHT = 0.10
+
+    def __init__(self, weights: Optional[dict[str, float]] = None, reaction_edge: Optional[dict[str, float]] = None) -> None:
         self.weights = weights or dict(WEIGHTS)
+        self.reaction_edge = dict(reaction_edge or {})
         self.first_seen: dict[str, tuple[Direction, datetime]] = {}
 
     def score(self, c: Candidate, now: datetime, spread: Optional[float] = None) -> Candidate:
@@ -8568,6 +8804,10 @@ class AssetSelector:
             "data": c.data_quality,
         }
         raw = sum(self.weights[k] * v for k, v in comp.items()) * 100.0
+        if key in self.reaction_edge:
+            latent = getattr(c.snapshot, "reaction_status", "") == "PRESSÃO LATENTE"
+            comp["reaction"] = self.reaction_edge[key] if latent else 0.5
+            raw = raw * (1.0 - self.REACTION_WEIGHT) + comp["reaction"] * self.REACTION_WEIGHT * 100.0
         c.components = {k: round(v, 3) for k, v in comp.items()}
         c.opportunity_score = round(raw * (0.5 + 0.5 * c.decay), 1)
         c.status = "🟢" if c.opportunity_score >= 60 else "🟡" if c.opportunity_score >= 45 else "🟠"
@@ -10095,7 +10335,11 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     sender = TelegramSender(dry_run=not args.send)
     commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
-    engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize)
+    edge = load_reaction_edge(args.reaction_edge) if getattr(args, "reaction_edge", None) else {}
+    if edge:
+        print("REACTION EDGE carregado (Asset Selector): " + ", ".join(f"{k} {v:.2f}" for k, v in edge.items()))
+    engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
+                            selector=AssetSelector(reaction_edge=edge))
     print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
     print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
     try:
@@ -10123,8 +10367,11 @@ def cmd_markets(args: argparse.Namespace) -> int:
     symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
     data = MultiMarketData(symbols, DataEngineConfig(enable_cot=not args.no_cot, enable_fred=not args.no_fred, enable_news=not args.no_news))
     mem = PredictionMemory(args.db)
+    edge = load_reaction_edge(args.reaction_edge) if args.reaction_edge else {}
     engine = MarketAIEngine(mem, GuardLimits.from_env(load_env_file()), symbols, TradingMode.PAPER, 10000.0, PortfolioLimits(),
-                            kill_switch=KillSwitch(enabled_env=False), log=print)   # kill switch: só ranqueia, nunca entra
+                            kill_switch=KillSwitch(enabled_env=False), log=print, selector=AssetSelector(reaction_edge=edge))   # kill switch: só ranqueia, nunca entra
+    if edge:
+        print("REACTION EDGE carregado: " + ", ".join(f"{k} {v:.2f}" for k, v in edge.items()))
     snaps = data.collect()
     print(data.coverage())
     pc = engine.run_cycle(snaps)
@@ -10181,6 +10428,33 @@ def cmd_history(args: argparse.Namespace) -> int:
     hist = load_history(path) if exists else EventHistory()
     start = date.fromisoformat(args.start) if args.start else date(2026, 1, 1)
     end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date()
+    if args.action == "prices" and args.source == "dukascopy":
+        # ticks bid/ask gratuitos (sem chave, sem MT5): por padrão só as horas ao redor dos eventos do banco
+        http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=365 * 24 * 3600)
+        imp = DukascopyImporter(http, log=print)
+        out_dir = args.out_dir or "dados"
+        os.makedirs(out_dir, exist_ok=True)
+        symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
+        ev_times = []
+        if not args.full:
+            if not exists:
+                print(f"{path} não existe — sem eventos para delimitar as horas; use --full para baixar o período inteiro")
+                return 1
+            ev_times = [e.published_at for e in hist.events if e.revised is None and e.category in ("MACRO", "CENTRAL_BANK") and start <= e.published_at.date() <= end]
+            print(f"{len(ev_times)} eventos macro com hora exata entre {start} e {end}")
+        for sym in symbols:
+            inst, sc = DUKA_INSTRUMENTS.get(sym, (sym, 1000.0))
+            dest = os.path.join(out_dir, f"{sym}_ticks.csv")
+            try:
+                ticks = imp.range(sym, start, end, args.scale, checkpoint=lambda t, d=dest: save_ticks(t, d)) if args.full else \
+                    imp.around_events(sym, ev_times, args.before, args.after, args.scale, checkpoint=lambda t, d=dest: save_ticks(t, d))
+            except Exception as e:  # noqa: BLE001
+                print(f"{sym} ({inst}): FALHOU — {e}")
+                continue
+            n = save_ticks(ticks, dest)
+            first = f" · 1º tick {ticks[0][0]:%Y-%m-%d %H:%M} bid {ticks[0][1]:g} ask {ticks[0][2]:g} (confira a escala!)" if ticks else " · nenhum tick (instrumento/escala/período?)"
+            print(f"{sym} ({inst}, escala {args.scale or sc:g}): {n} ticks → {dest}{first}")
+        return 0
     if args.action == "prices":
         # exportação de M1 / ticks do MT5 para CSV (a corretora guarda M1 por anos e ticks por semanas/meses)
         cfg = MT5Config.from_env(env)
@@ -10392,10 +10666,20 @@ def _reaction_learn_hires(args: argparse.Namespace) -> int:
         print(f"{sym}: {n} eventos medidos em {kind} (resolução {path.resolution_sec:.0f} s)")
     ll = LeadLagStats(all_recs)
     sim = ReactionTradeSim(slippage_atr=args.slippage, latency_sec=args.latency)
-    txt = ll.render() + "\n\n" + sim.render(sim.table(sim_items))
-    for d in (int(x) for x in args.delays.split(",")):
+    delays_default = "1,5,10,30,60" if tf == "TICK" else "60,120,300"
+    delays = [int(x) for x in (args.delays or delays_default).split(",")]
+    sim_rows = sim.table(sim_items, delays=delays)
+    txt = ll.render() + "\n\n" + sim.render(sim_rows)
+    results = {}
+    for d in delays:
         ct = ClockTradeTest(delay_sec=d, p_min=args.p_min, slippage_atr=args.slippage, latency_sec=args.latency)
-        txt += "\n\n" + ct.render(ct.run(sim_items))
+        results[d] = ct.run(sim_items)
+        txt += "\n\n" + ct.render(results[d])
+    verdicts = asset_verdicts(results)
+    txt += "\n\n" + render_verdicts(verdicts, tf)
+    if args.edge_out:
+        save_reaction_edge(verdicts, args.edge_out, tf)
+        txt += f"\n   veredito salvo em {args.edge_out} (o `live --markets` e o `markets` leem este arquivo)"
     txt += "\n\nLIMITES: manchetes GDELT (volinfo) têm published_at no fim do dia — só releases (ALFRED/TE) têm hora exata para segundos; "
     txt += "custo = ask/bid reais dos ticks (ou spread típico no M1) + slippage + latência; liquidez fora do horário e gaps não modelados."
     print(txt)
@@ -10852,6 +11136,7 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--kill-switch-file", default="STOP_TRADING", help="se o arquivo existir, nenhuma entrada nova")
     lv.add_argument("-v", "--verbose", action="store_true")
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
+    lv.add_argument("--reaction-edge", default=os.path.join("dados", "reaction_edge.json"), help="veredito do REACTION EDGE por ativo ('' = ignorar)")
     lv.set_defaults(func=cmd_live)
 
     es = sub.add_parser("estimate", help="estimativa de lucro num período histórico (walk-forward OOS, custo, bootstrap)")
@@ -10900,6 +11185,11 @@ def main(argv: list[str] | None = None) -> int:
     hi = sub.add_parser("history", help="BANCO HISTÓRICO point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats | list | prices (M1/ticks do MT5)")
     hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list", "prices"])
     hi.add_argument("--tf", default="M1", help="prices: M1 | M5 | TICK (ticks bid/ask, blocos diários)")
+    hi.add_argument("--source", choices=["mt5", "dukascopy"], default="dukascopy", help="prices: dukascopy (ticks gratuitos, sem chave) | mt5 (terminal logado)")
+    hi.add_argument("--full", action="store_true", help="prices dukascopy: período inteiro (padrão: só horas ao redor dos eventos macro)")
+    hi.add_argument("--before", type=int, default=4, help="prices dukascopy: horas antes de cada evento")
+    hi.add_argument("--after", type=int, default=1, help="prices dukascopy: horas depois de cada evento")
+    hi.add_argument("--scale", type=float, default=None, help="prices dukascopy: escala de preço do instrumento (padrão por mercado)")
     hi.add_argument("--extra", default=None, help="prices: símbolos extras da corretora para líderes, ex.: USDX,USTNOTE")
     hi.add_argument("--out-dir", default="dados")
     hi.add_argument("--kind", default=None, help="list: cpi, core_cpi, nfp, unemployment, jobless_claims, gdp, ppi, retail_sales, earnings, core_pce…")
@@ -10938,7 +11228,8 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument("--lead-yield", default=None, help="learn M1/TICK: símbolo exportado do líder de juros (ex.: USTNOTE)")
     rc.add_argument("--slippage", type=float, default=0.02, help="trade sim: slippage em ATR por perna")
     rc.add_argument("--latency", type=float, default=0.5, help="trade sim: latência de execução em segundos")
-    rc.add_argument("--delays", default="5,30,120", help="prova do relógio: atrasos (s) após a reação do líder")
+    rc.add_argument("--delays", default=None, help="prova do relógio: atrasos (s) após a reação do líder (padrão TICK 1,5,10,30,60; M1 60,120,300)")
+    rc.add_argument("--edge-out", default=os.path.join("dados", "reaction_edge.json"), help="veredito por ativo para o Asset Selector ('' = não salvar)")
     rc.add_argument("--p-min", type=float, default=0.55, help="prova do relógio: P(alvo confirma | líder) mínima no histórico anterior")
     rc.add_argument("--out", default=None)
     rc.set_defaults(func=cmd_reaction)
@@ -10976,6 +11267,7 @@ def main(argv: list[str] | None = None) -> int:
 
     mk = sub.add_parser("markets", help="4.0: ranking de oportunidades agora (não opera) + histórico por mercado")
     mk.add_argument("--markets", default="EURUSD,US500,XAUUSD,USDJPY,WTI")
+    mk.add_argument("--reaction-edge", default=os.path.join("dados", "reaction_edge.json"), help="veredito do REACTION EDGE por ativo ('' = ignorar)")
     mk.add_argument("--db", default="gold_ai.db")
     mk.add_argument("--no-cot", action="store_true")
     mk.add_argument("--no-fred", action="store_true")

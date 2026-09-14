@@ -70,6 +70,40 @@ class HttpClient:
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
         raise DataError(f"falha ao buscar {url}: {last}")
 
+    def get_bytes(self, url: str, ttl: Optional[int] = None, allow_404: bool = False) -> bytes:
+        """Download binário (ex.: ticks .bi5 do Dukascopy). 404 com allow_404 → b'' (hora sem dados). Cache em disco por URL."""
+        ttl = self.ttl if ttl is None else ttl
+        p = self._cache_path(url)
+        if p:
+            pb = p + ".bin"
+            if os.path.exists(pb) and time.time() - os.path.getmtime(pb) < ttl:
+                with open(pb, "rb") as f:
+                    return f.read()
+        last: Optional[Exception] = None
+        for attempt in range(self.retries):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": self.user_agent, "Accept": "*/*"})
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
+                    data = resp.read()
+                if p:
+                    with open(p + ".bin", "wb") as f:
+                        f.write(data)
+                return data
+            except urllib.error.HTTPError as e:  # pragma: no cover - rede
+                if e.code == 404 and allow_404:
+                    if p:
+                        with open(p + ".bin", "wb") as f:
+                            f.write(b"")
+                    return b""
+                if e.code == 429:
+                    raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests") from e
+                last = e
+                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
+            except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
+                last = e
+                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
+        raise DataError(f"falha ao buscar {url}: {last}")
+
     def get_json(self, url: str, ttl: Optional[int] = None) -> Any:
         try:
             return json.loads(self.get_text(url, ttl))

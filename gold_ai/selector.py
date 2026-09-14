@@ -122,8 +122,14 @@ def execution_quality(spec: MarketSpec, snap: MarketSnapshot, spread: Optional[f
 
 
 class AssetSelector:
-    def __init__(self, weights: Optional[dict[str, float]] = None) -> None:
+    """`reaction_edge` (símbolo → 0..1, de reaction_edge.json): dimensão opcional "o relógio de reação tem edge provado neste
+    mercado". Só pesa quando o snapshot marca PRESSÃO LATENTE; fora disso é neutra (0,5). Não cria entradas: só ordena."""
+
+    REACTION_WEIGHT = 0.10
+
+    def __init__(self, weights: Optional[dict[str, float]] = None, reaction_edge: Optional[dict[str, float]] = None) -> None:
         self.weights = weights or dict(WEIGHTS)
+        self.reaction_edge = dict(reaction_edge or {})
         self.first_seen: dict[str, tuple[Direction, datetime]] = {}
 
     def score(self, c: Candidate, now: datetime, spread: Optional[float] = None) -> Candidate:
@@ -146,6 +152,10 @@ class AssetSelector:
             "data": c.data_quality,
         }
         raw = sum(self.weights[k] * v for k, v in comp.items()) * 100.0
+        if key in self.reaction_edge:
+            latent = getattr(c.snapshot, "reaction_status", "") == "PRESSÃO LATENTE"
+            comp["reaction"] = self.reaction_edge[key] if latent else 0.5
+            raw = raw * (1.0 - self.REACTION_WEIGHT) + comp["reaction"] * self.REACTION_WEIGHT * 100.0
         c.components = {k: round(v, 3) for k, v in comp.items()}
         c.opportunity_score = round(raw * (0.5 + 0.5 * c.decay), 1)
         c.status = "🟢" if c.opportunity_score >= 60 else "🟡" if c.opportunity_score >= 45 else "🟠"

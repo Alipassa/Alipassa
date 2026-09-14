@@ -134,13 +134,16 @@ python market_ai_engine_v4.py reaction clock --markets XAUUSD,US500            #
 No `live --markets` o relógio roda a cada ciclo, amostra USD/yields/alvo por evento e, ao fechar o horizonte, grava a reação no
 SQLite (`reactions`): o sistema aprende com os eventos que viveu. No backtest com `--events`, o relógio usa só o passado.
 
-**Segundos exigem ticks/M1.** Exporte do seu MT5 (a corretora guarda M1 por anos e ticks por semanas) e meça em alta resolução:
+**Segundos exigem ticks/M1.** Fonte padrão: **Dukascopy** (ticks bid/ask gratuitos, sem chave, sem MT5) — por padrão baixa só as
+horas ao redor de cada evento macro do banco (−4 h … +1 h), o que dá janeiro → setembro inteiro com poucos milhares de arquivos:
 
 ```bash
-python market_ai_engine_v4.py history prices --tf TICK --markets XAUUSD,US500 --extra USDX --start 2026-08-01   # dados/<SYM>_ticks.csv
-python market_ai_engine_v4.py history prices --tf M1 --markets XAUUSD,US500,EURUSD,USDJPY,WTI --extra USDX --start 2026-01-01
-python market_ai_engine_v4.py reaction learn --tf TICK --markets XAUUSD,US500 --lead-usd USDX --slippage 0.02 --latency 0.5 --out reacao_ticks.txt
+python market_ai_engine_v4.py history prices --markets XAUUSD,US500,EURUSD,USDJPY,WTI --extra USDX --start 2026-01-01   # dados/<SYM>_ticks.csv
+python market_ai_engine_v4.py reaction learn --tf TICK --markets XAUUSD,US500,EURUSD,USDJPY,WTI --lead-usd USDX --out prova_ticks.txt
+python market_ai_engine_v4.py history prices --source mt5 --tf M1 --markets XAUUSD --start 2026-01-01   # alternativa: MT5 logado
 ```
+Instrumentos Dukascopy: XAUUSD, EURUSD, USDJPY, USA500IDXUSD (US500), LIGHTCMDUSD (WTI), DOLLARIDXUSD (USDX). Confira o
+primeiro tick impresso (escala de preço) antes de confiar.
 
 Saída: movimento mediano a T+1s/5s/10s/30s/60s/300s, dois horizontes (SHORT-TERM REACTION 0–5 min e FOLLOW-THROUGH 5–60 min),
 **LEAD-LAG** ("quando o líder se move após este evento, P(alvo confirma), em quanto tempo, com que magnitude") e o
@@ -153,7 +156,12 @@ os eventos são percorridos em ordem; em cada um o relógio só conhece os anter
 ainda não, o histórico do tipo tem n ≥ 3 com P(alvo confirma | líder) ≥ `--p-min` e o tempo decorrido cabe em 2× a mediana do
 movimento pleno. Saídas: QUICK (take +0,40 ATR ou 5 min, stop −0,5) · EXTEND (aos 5 min, se ≥ +0,15 ATR, trailing 0,40 até
 60 min) · FOLLOW (stop/60 min). A coluna "ingênua" entra em toda reação do líder com a mesma saída: a diferença é o valor do
-filtro temporal. Walk-forward por construção; líquido de spread, slippage e latência.
+filtro temporal. Walk-forward por construção; líquido de spread, slippage e latência. Atrasos padrão: TICK 1,5,10,30,60 s; M1 60,120,300 s.
+
+**REACTION EDGE por ativo**: o relógio não funciona igual em todos os mercados. O relatório fecha com o veredito por ativo
+(🟢 forte · 🟡 moderado · 🔴 sem edge · ⚪ inconclusivo) na melhor combinação atraso × saída, e grava `dados/reaction_edge.json`.
+O `live --markets` e o `markets` leem esse arquivo: o Asset Selector ganha a dimensão "reaction" (10%), que só pesa quando o
+relógio marca PRESSÃO LATENTE naquele mercado — capital vai para as relações que demonstraram edge; nenhuma entrada é criada.
 
 ## 🗄️ BANCO HISTÓRICO DE NOTÍCIAS/EVENTOS — point-in-time para o backtest
 

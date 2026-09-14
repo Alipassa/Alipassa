@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from gold_ai import Direction
 from gold_ai.data.mt5 import MT5Client, MT5Config
 from gold_ai.models import Candle
 from gold_ai.reaction_hires import (BUCKETS_SEC, LeadLagStats, PricePath, Quote, ReactionTradeSim, load_ticks, measure_hires, save_candles,
@@ -193,3 +194,88 @@ class ClockTradeTestTests(unittest.TestCase):
         ct = ClockTradeTest(delay_sec=120, p_min=0.5, min_n=3)   # entra 2 min depois do líder: alvo já andou −0,3 ATR aos 60 s
         rows = ct.run(self._items())
         self.assertGreater(rows[0].skipped["alvo_já_reagiu"], 20)
+
+
+class VerdictTests(unittest.TestCase):
+    def test_asset_verdicts_and_selector_dimension(self):
+        from gold_ai.reaction_hires import ClockTestRow, asset_verdicts, load_reaction_edge, render_verdicts, save_reaction_edge
+        from gold_ai.selector import AssetSelector
+        row = lambda kind, tgt, n, q, e, naive: ClockTestRow(kind, tgt, n + 5, n + 2, n, {}, naive, q, e, q - 0.05, 0.6, 0.6, 0.07)  # noqa: E731
+        results = {5: [row("cpi", "XAUUSD", 30, 0.15, 0.22, 0.05), row("cpi", "US500", 25, 0.04, 0.03, 0.01), row("cpi", "WTI", 22, -0.05, -0.02, -0.03),
+                       row("cpi", "EURUSD", 8, 0.30, 0.30, 0.1)],
+                   30: [row("cpi", "XAUUSD", 28, 0.10, 0.12, 0.05)]}
+        vs = {v.symbol: v for v in asset_verdicts(results)}
+        self.assertEqual(vs["XAUUSD"].verdict, "🟢")
+        self.assertEqual((vs["XAUUSD"].delay_sec, vs["XAUUSD"].exit), (5, "EXTEND"))     # melhor combinação
+        self.assertEqual(vs["US500"].verdict, "🟡")
+        self.assertEqual(vs["WTI"].verdict, "🔴")
+        self.assertEqual(vs["EURUSD"].verdict, "⚪")                                        # n < 20, mesmo com líquido alto
+        txt = render_verdicts(asset_verdicts(results), "TICK")
+        self.assertIn("REACTION EDGE POR ATIVO", txt)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "reaction_edge.json")
+            save_reaction_edge(asset_verdicts(results), p, "TICK")
+            edge = load_reaction_edge(p)
+        self.assertEqual(set(edge), {"XAUUSD", "US500", "WTI"})                             # ⚪ não entra
+        self.assertGreater(edge["XAUUSD"], edge["US500"])
+        self.assertEqual(load_reaction_edge(os.path.join("nao", "existe.json")), {})
+        # selector: só pesa com PRESSÃO LATENTE; sem relógio fica neutro
+        from tests.test_market40 import build_snapset
+        from gold_ai.selector import Candidate, StatConfidence
+        from gold_ai.markets import get_market
+        from gold_ai import GoldAIEngine, EngineConfig
+        ss = build_snapset({"XAUUSD": "compra", "US500": "compra"})
+        sel_plain, sel_edge = AssetSelector(), AssetSelector(reaction_edge=edge)
+        cands = []
+        for sym in ("XAUUSD", "US500"):
+            spec = get_market(sym)
+            a, sig = GoldAIEngine(EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)).run_cycle(ss.by_symbol[sym])
+            if sig is None:
+                from gold_ai.models import Signal, SignalType
+                sig = Signal(SignalType.BUY, a.direction if a.direction != Direction.LATERAL else Direction.ALTA, a, [], "teste")
+            cands.append(Candidate(spec, a, sig, ss.by_symbol[sym], StatConfidence(30, 0.3, 0.3, "HIGH", 0.2, 0.25), 0.5, 1.0))
+        base = {c.spec.symbol: sel_plain.score(c, ss.time).opportunity_score for c in cands}
+        neutral = {c.spec.symbol: sel_edge.score(c, ss.time).opportunity_score for c in cands}
+        for sym in base:
+            self.assertAlmostEqual(neutral[sym], base[sym] * 0.9 + 5.0, delta=2.5)            # 0,5 neutro × 10% (× decay)
+        self.assertEqual(cands[0].components["reaction"], 0.5)
+        ss.by_symbol["XAUUSD"].reaction_status = "PRESSÃO LATENTE"
+        latent = {c.spec.symbol: sel_edge.score(c, ss.time).opportunity_score for c in cands}
+        self.assertGreater(latent["XAUUSD"], neutral["XAUUSD"])
+        self.assertAlmostEqual(latent["US500"], neutral["US500"], places=1)
+
+
+class DukascopyTests(unittest.TestCase):
+    def test_bi5_parse_and_around_events(self):
+        import lzma
+        import struct
+        from gold_ai.data.dukascopy import DukascopyImporter, hour_url, parse_bi5
+
+        def bi5(rows):
+            return lzma.compress(b"".join(struct.pack(">IIIff", ms, ask, bid, 1.0, 1.0) for ms, ask, bid in rows))
+        h = datetime(2026, 3, 11, 12, tzinfo=UTC)
+        self.assertEqual(hour_url("XAUUSD", h), "https://datafeed.dukascopy.com/datafeed/XAUUSD/2026/02/11/12h_ticks.bi5")   # mês 0-indexado
+        ticks = parse_bi5(bi5([(0, 2500300, 2500000), (1800000, 2500900, 2500600), (1800250, 0, 2500600)]), h, 1000.0)
+        self.assertEqual(len(ticks), 2)                                                     # tick com ask 0 descartado
+        self.assertEqual(ticks[1][0], h + timedelta(minutes=30))
+        self.assertAlmostEqual(ticks[1][1], 2500.6)
+        self.assertAlmostEqual(ticks[1][2], 2500.9)
+        self.assertEqual(parse_bi5(b"", h, 1000.0), [])
+
+        class Http:
+            def __init__(self):
+                self.calls = []
+
+            def get_bytes(self, url, ttl=None, allow_404=False):
+                self.calls.append(url)
+                if "/12h_" in url:
+                    return bi5([(5, 2500300, 2500000)])
+                return b""                                                                # 404 → vazio
+        http = Http()
+        imp = DukascopyImporter(http)
+        out = imp.around_events("XAUUSD", [h + timedelta(minutes=30), h + timedelta(minutes=45)], before_h=2, after_h=1)
+        self.assertEqual(len(http.calls), 4)                                               # 10h,11h,12h,13h (eventos na mesma hora não duplicam)
+        self.assertEqual(len(out), 1)
+        self.assertTrue(all("/XAUUSD/" in c for c in http.calls))
+        imp.hours("USDX", [h])
+        self.assertIn("/DOLLARIDXUSD/", http.calls[-1])

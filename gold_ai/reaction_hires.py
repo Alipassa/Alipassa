@@ -536,3 +536,97 @@ class ClockTradeTest:
         lines.append("   'ingênua' = toda reação do líder com a MESMA entrada e saída QUICK, sem relógio; a diferença para QUICK é o valor do filtro temporal")
         lines.append("   ⚪ < 20 entradas inconclusivo · 🟢 líquido > 0,02 ATR · 🔴 custo consome. Colunas de descarte: sem_hist / P_baixa / alvo_já_reagiu / fora_janela")
         return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- VEREDITO POR ATIVO → REACTION EDGE (consumível pelo Asset Selector)
+VERDICT_SCORE = {"🟢": 0.9, "🟡": 0.65, "🔴": 0.2, "⚪": 0.5}
+
+
+@dataclass
+class AssetVerdict:
+    symbol: str
+    verdict: str            # 🟢 forte | 🟡 moderado | 🔴 sem edge | ⚪ inconclusivo
+    n: int
+    net: float              # melhor expectancy líquida (ATR) entre atrasos × saídas
+    naive: float
+    delay_sec: int
+    exit: str
+    n_events: int
+    kinds: int
+
+    @property
+    def edge_score(self) -> float:
+        return VERDICT_SCORE[self.verdict]
+
+    def row(self) -> str:
+        label = {"🟢": "forte", "🟡": "moderado", "🔴": "sem edge", "⚪": "inconclusivo"}[self.verdict]
+        return (f"{self.symbol:<8}{self.verdict} {label:<13}{self.n_events:>6}{self.n:>7}{self.net:>+9.3f}{self.net / STOP_ATR:>+7.2f}R{self.naive:>+9.3f}"
+                f"{self.delay_sec:>7}s {self.exit:<7}{self.kinds:>6}")
+
+
+def asset_verdicts(results: dict[int, list[ClockTestRow]], min_n: int = 20) -> list[AssetVerdict]:
+    """`results`: atraso → linhas do ClockTradeTest. Por ativo, escolhe a melhor combinação atraso × saída (QUICK/EXTEND/FOLLOW)
+    ponderando por entradas; veredito só com n ≥ min_n."""
+    per_asset: dict[str, list[tuple[int, str, float, int, float, int, int]]] = {}
+    for delay, rows in results.items():
+        by_sym: dict[str, list[ClockTestRow]] = {}
+        for r in rows:
+            by_sym.setdefault(r.target, []).append(r)
+        for sym, rs in by_sym.items():
+            n = sum(r.n_entries for r in rs)
+            n_ev = sum(r.n_events for r in rs)
+            if n == 0:
+                per_asset.setdefault(sym, []).append((delay, "QUICK", 0.0, 0, 0.0, n_ev, len(rs)))
+                continue
+            naive_n = sum(r.n_lead for r in rs)
+            naive = sum(r.naive_net_quick * r.n_lead for r in rs) / naive_n if naive_n else 0.0
+            for ex, attr in (("QUICK", "net_quick"), ("EXTEND", "net_extend"), ("FOLLOW", "net_follow")):
+                net = sum(getattr(r, attr) * r.n_entries for r in rs) / n
+                per_asset.setdefault(sym, []).append((delay, ex, net, n, naive, n_ev, len(rs)))
+    out = []
+    for sym, combos in per_asset.items():
+        valid = [c for c in combos if c[3] >= min_n]
+        if not valid:
+            best = max(combos, key=lambda c: (c[3], c[2]))
+            out.append(AssetVerdict(sym, "⚪", best[3], best[2], best[4], best[0], best[1], best[5], best[6]))
+            continue
+        best = max(valid, key=lambda c: c[2])
+        delay, ex, net, n, naive, n_ev, kinds = best
+        if net >= 0.10 and net > naive:
+            v = "🟢"
+        elif net > 0.02:
+            v = "🟡"
+        else:
+            v = "🔴"
+        out.append(AssetVerdict(sym, v, n, net, naive, delay, ex, n_ev, kinds))
+    return sorted(out, key=lambda v: (-VERDICT_SCORE[v.verdict], -v.net))
+
+
+def render_verdicts(verdicts: Sequence[AssetVerdict], resolution: str) -> str:
+    head = f"{'ativo':<8}{'veredito':<16}{'evts':>6}{'entr':>7}{'líquido':>9}{'':>8}{'ingênua':>9}{'atraso':>8} {'saída':<7}{'tipos':>6}"
+    lines = [f"🏁 REACTION EDGE POR ATIVO ({resolution}) — o relógio não funciona igual em todos os mercados", head] + [v.row() for v in verdicts]
+    lines.append("   🟢 forte: n ≥ 20, líquido ≥ 0,10 ATR (0,2R) e acima da ingênua · 🟡 moderado: líquido > 0,02 ATR · 🔴 custo consome · ⚪ n < 20")
+    lines.append("   'melhor combinação' atraso × saída por ativo; o Asset Selector usa este veredito (reaction_edge.json) só quando o relógio marca PRESSÃO LATENTE")
+    return "\n".join(lines)
+
+
+def save_reaction_edge(verdicts: Sequence[AssetVerdict], path: str, resolution: str) -> None:
+    import json
+    import os
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    data = {v.symbol: {"verdict": v.verdict, "edge_score": v.edge_score, "n": v.n, "net_atr": round(v.net, 4), "naive_atr": round(v.naive, 4),
+                       "delay_sec": v.delay_sec, "exit": v.exit, "n_events": v.n_events, "resolution": resolution,
+                       "generated_at": datetime.now(timezone.utc).isoformat()} for v in verdicts}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False)
+
+
+def load_reaction_edge(path: str) -> dict[str, float]:
+    """symbol → edge_score (0..1) só para vereditos com amostra (🟢/🟡/🔴); ⚪ é ignorado (o selector fica neutro)."""
+    import json
+    import os
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return {sym: float(v["edge_score"]) for sym, v in data.items() if v.get("verdict") in ("🟢", "🟡", "🔴")}
