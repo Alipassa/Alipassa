@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from ..models import Candle, Direction, MarketSnapshot, Signal, SignalType
@@ -49,11 +49,12 @@ class MT5Error(RuntimeError):
     pass
 
 
-def rates_to_candles(rates: Any) -> list[Candle]:
-    """Converte o array de `copy_rates_from_pos` (time, open, high, low, close, tick_volume, spread, real_volume)."""
+def rates_to_candles(rates: Any, server_offset_hours: float = 0.0) -> list[Candle]:
+    """Converte o array de `copy_rates_from_pos` (time, open, high, low, close, tick_volume, spread, real_volume).
+    O MT5 carimba no horário do SERVIDOR da corretora (Pepperstone: GMT+2/+3): `server_offset_hours` converte para UTC."""
     out: list[Candle] = []
     for r in rates or []:
-        t = datetime.fromtimestamp(int(r["time"]), tz=timezone.utc)
+        t = datetime.fromtimestamp(int(r["time"]) - int(server_offset_hours * 3600), tz=timezone.utc)
         vol = float(r["real_volume"]) if _has(r, "real_volume") else 0.0
         if vol <= 0:
             vol = float(r["tick_volume"]) if _has(r, "tick_volume") else 0.0
@@ -102,6 +103,25 @@ class MT5Client:
         if not self.mt5.symbol_select(self.cfg.symbol, True):
             raise MT5Error(f"símbolo {self.cfg.symbol} indisponível: {self.mt5.last_error()}")
         self.connected = True
+        self.server_offset_hours = self._detect_server_offset()
+
+    def _detect_server_offset(self) -> float:
+        """Fuso do servidor da corretora: compara o carimbo do último tick com o relógio UTC local (arredondado à hora).
+        MT5_UTC_OFFSET_HOURS no .env força um valor. Sem tick recente (fim de semana), usa 0 e avisa."""
+        forced = os.environ.get("MT5_UTC_OFFSET_HOURS") or getattr(self.cfg, "utc_offset_hours", None)
+        if forced not in (None, ""):
+            return float(forced)
+        try:
+            t = self.mt5.symbol_info_tick(self.cfg.symbol)
+            ts = float(getattr(t, "time", 0) or 0)
+        except Exception:  # noqa: BLE001
+            ts = 0.0
+        if not ts:
+            return 0.0
+        now = datetime.now(timezone.utc).timestamp()
+        if abs(now - ts) > 3 * 86400:      # tick velho (mercado fechado há dias): não dá para inferir
+            return 0.0
+        return float(round((ts - now) / 3600.0))
 
     def close(self) -> None:
         if self.connected:
@@ -112,29 +132,33 @@ class MT5Client:
         rates = self.mt5.copy_rates_from_pos(self.cfg.symbol, getattr(self.mt5, TF_TO_MT5[tf]), 0, n or BARS[tf])
         if rates is None:
             raise MT5Error(f"copy_rates_from_pos({tf}) falhou: {self.mt5.last_error()}")
-        return rates_to_candles(rates)
+        return rates_to_candles(rates, getattr(self, "server_offset_hours", 0.0))
 
     def rates_range(self, symbol: str, tf: str, start: datetime, end: datetime) -> list[Candle]:
         """Histórico por intervalo (copy_rates_range) — M1 costuma existir por anos na corretora."""
         if not self.mt5.symbol_select(symbol, True):
             raise MT5Error(f"símbolo {symbol} indisponível: {self.mt5.last_error()}")
-        rates = self.mt5.copy_rates_range(symbol, getattr(self.mt5, TF_TO_MT5[tf]), start, end)
+        off = getattr(self, "server_offset_hours", 0.0)
+        shift = timedelta(hours=off)
+        rates = self.mt5.copy_rates_range(symbol, getattr(self.mt5, TF_TO_MT5[tf]), start + shift, end + shift)   # pedido em hora do servidor
         if rates is None:
             raise MT5Error(f"copy_rates_range({symbol},{tf}) falhou: {self.mt5.last_error()}")
-        return rates_to_candles(rates)
+        return rates_to_candles(rates, off)
 
     def ticks_range(self, symbol: str, start: datetime, end: datetime) -> list[tuple[datetime, float, float]]:
         """Ticks (time_msc, bid, ask) por intervalo (copy_ticks_range, COPY_TICKS_INFO) — a corretora guarda semanas/meses."""
         if not self.mt5.symbol_select(symbol, True):
             raise MT5Error(f"símbolo {symbol} indisponível: {self.mt5.last_error()}")
         flags = getattr(self.mt5, "COPY_TICKS_INFO", 1)
-        ticks = self.mt5.copy_ticks_range(symbol, start, end, flags)
+        off = getattr(self, "server_offset_hours", 0.0)
+        shift = timedelta(hours=off)
+        ticks = self.mt5.copy_ticks_range(symbol, start + shift, end + shift, flags)
         if ticks is None:
             raise MT5Error(f"copy_ticks_range({symbol}) falhou: {self.mt5.last_error()}")
         out = []
         last_bid = last_ask = None
         for r in ticks:
-            ms = int(r["time_msc"]) if _has(r, "time_msc") else int(r["time"]) * 1000
+            ms = (int(r["time_msc"]) if _has(r, "time_msc") else int(r["time"]) * 1000) - int(off * 3600 * 1000)
             bid = float(r["bid"]) if _has(r, "bid") and r["bid"] else last_bid
             ask = float(r["ask"]) if _has(r, "ask") and r["ask"] else last_ask
             if bid is None or ask is None:

@@ -328,3 +328,43 @@ class DeltaAndStabilityTests(unittest.TestCase):
         self.assertIn("XAUUSD", st)
         self.assertIn("ESTABILIDADE TICK × M1", st)
         self.assertTrue(("MUITO FORTE" in st) or ("forte com reserva" in st) or ("moderado" in st))
+
+
+class MT5ServerOffsetTests(unittest.TestCase):
+    def test_server_time_converted_to_utc(self):
+        import os
+        from types import SimpleNamespace
+        from tests.test_mt5 import FakeMT5
+        now = datetime.now(UTC)
+
+        class Fake(FakeMT5):
+            COPY_TICKS_INFO = 1
+            asked = {}
+
+            def symbol_info_tick(self, symbol):
+                return SimpleNamespace(bid=2699.8, ask=2700.2, time=int(now.timestamp()) + 3 * 3600)   # servidor GMT+3
+
+            def copy_rates_range(self, symbol, tf, start, end):
+                self.asked["rates"] = (start, end)
+                base = int(start.timestamp())
+                return [{"time": base, "open": 1, "high": 2, "low": 0, "close": 1, "tick_volume": 1, "spread": 1, "real_volume": 0}]
+
+            def copy_ticks_range(self, symbol, start, end, flags):
+                self.asked["ticks"] = (start, end)
+                return [{"time": int(start.timestamp()), "time_msc": int(start.timestamp()) * 1000, "bid": 1.0, "ask": 1.1}]
+        os.environ.pop("MT5_UTC_OFFSET_HOURS", None)
+        c = MT5Client(MT5Config(symbol="XAUUSD"), mt5=Fake())
+        c.connect()
+        self.assertEqual(c.server_offset_hours, 3.0)
+        cs = c.rates_range("XAUUSD", "M1", T0, T0 + timedelta(hours=1))
+        self.assertEqual(c.mt5.asked["rates"][0], T0 + timedelta(hours=3))       # pedido em hora do servidor
+        self.assertEqual(cs[0].time, T0)                                          # devolvido em UTC
+        tk = c.ticks_range("XAUUSD", T0, T0 + timedelta(minutes=1))
+        self.assertEqual(tk[0][0], T0)
+        os.environ["MT5_UTC_OFFSET_HOURS"] = "2"
+        try:
+            c2 = MT5Client(MT5Config(symbol="XAUUSD"), mt5=Fake())
+            c2.connect()
+            self.assertEqual(c2.server_offset_hours, 2.0)
+        finally:
+            os.environ.pop("MT5_UTC_OFFSET_HOURS", None)
