@@ -322,6 +322,7 @@ def cmd_history(args: argparse.Namespace) -> int:
             print(f"{sym} ({inst}, escala {args.scale or sc:g}): {n} ticks → {dest}{first}")
         if imp.failed:
             print(f"\n{len(imp.failed)} hora(s) falharam (timeout/503 do Dukascopy). Repita o mesmo comando: as horas já baixadas estão em cache e só as que faltam são pedidas.")
+            return 2      # código 2 = incompleto (o .bat repete até 0)
         return 0
     if args.action == "prices":
         # exportação de M1 / ticks do MT5 para CSV (a corretora guarda M1 por anos e ticks por semanas/meses)
