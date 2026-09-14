@@ -108,6 +108,35 @@ class ClockTests(unittest.TestCase):
         self.assertEqual(ra.status, "DIVERGÊNCIA")
         self.assertEqual(ra.pressure, 0.0)
 
+    def test_target_move_measured_since_event_from_past_candles_only(self):
+        from gold_ai.models import Candle
+        clock = ReactionClock(self._stats())
+        ev = self._event(90)
+        t_ev = ev[0].time
+        # candles H1: fechou 2500 no candle do evento; agora 2495 (−0,5 ATR na direção esperada ↓) embora a última hora tenha sido +0,1%
+        cs = [Candle(t_ev - timedelta(hours=2), 2500, 2500, 2500, 2500, 0), Candle(t_ev, 2500, 2500, 2500, 2500, 0), Candle(t_ev + timedelta(hours=1), 2498, 2498, 2490, 2495, 0)]
+        s = snap(+0.1, +0.15, +3.0, price=2495.0)
+        s.candles = {"H1": cs}
+        ra = clock.assess("XAUUSD", s, ev, T0)
+        self.assertEqual(ra.status, "REAGIU")                          # movimento desde o evento, não da última hora
+        self.assertIn("+0.50 ATR", ra.chain)                            # +0,50 ATR NA DIREÇÃO ESPERADA (queda)
+        future = [Candle(t_ev + timedelta(hours=3), 2400, 2400, 2400, 2400, 0)]   # candle futuro nunca é o p0
+        s.candles = {"H1": cs + future}
+        self.assertEqual(clock.assess("XAUUSD", s, ev, T0).status, "REAGIU")
+
+    def test_frame_stats_cache_resets_when_history_changes(self):
+        end = datetime(2026, 9, 14, 13, 0, tzinfo=UTC)
+        frame = HistoryFrame(xau=make_candles("H1", 700, 2500, 0.4, 6.0, end, seed=3))
+        t = frame.xau[300].time
+        h1 = EventHistory([HistoricalEvent(t, t, "A", "CPI MoM", forecast=0.2, actual=0.4, kind="cpi")])
+        h2 = EventHistory([HistoricalEvent(t, t, "A", "CPI MoM", forecast=0.2, actual=0.4, kind="cpi"), HistoricalEvent(t, t, "B", "NFP", forecast=100, actual=200, kind="nfp")])
+        frame.symbol, frame.events = "XAUUSD", h1
+        self.assertEqual(len(frame.reaction_stats().records), 1)
+        frame.events = h2
+        self.assertEqual(len(frame.reaction_stats().records), 2)
+        frame.events = None
+        self.assertEqual(len(frame.reaction_stats().records), 0)
+
     def test_without_history_uses_default_window_and_says_so(self):
         ra = ReactionClock(ReactionStats()).assess("XAUUSD", snap(0.0, +0.15, +3.0), self._event(8), T0)
         self.assertEqual(ra.status, "PRESSÃO LATENTE")
@@ -173,7 +202,7 @@ class LiveIntegrationTests(unittest.TestCase):
                 ss.base.us10y = 4.20 + 0.01 * k
                 for s in ss.by_symbol.values():
                     s.dxy_change_pct, s.us10y_change_bp, s.price_change_pct = 0.03 * k, 1.0 * k, 0.0
-                    s.candles.pop("M5", None)
+                    s.candles = {}                                    # sem candles: o relógio usa a variação da janela (0 = parado)
                 eng.run_cycle(ss)
                 if k == 2:
                     self.assertEqual(ss.by_symbol["XAUUSD"].reaction_status, "PRESSÃO LATENTE")

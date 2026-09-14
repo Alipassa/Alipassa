@@ -5481,8 +5481,17 @@ class ReactionClock:
                 lead[name] = "✓ reagiu"
             else:
                 lead[name] = "✗ contra"
-        # alvo
-        move_atr = ((s.price_change_pct or 0.0) / 100.0 * (s.price or 0.0) / s.atr) * sign if (s.atr and s.price) else 0.0
+        # alvo: movimento DESDE O EVENTO (preço no último candle ≤ instante do evento, só passado); sem candles, usa a variação da janela
+        move_atr = 0.0
+        if s.atr and s.price:
+            p0 = None
+            for tf in ("M5", "M15", "H1"):
+                cs = s.candles.get(tf) or []
+                past = [c for c in cs if c.time <= ev.time]
+                if past:
+                    p0 = past[-1].close
+                    break
+            move_atr = ((s.price - p0) / s.atr * sign) if p0 else ((s.price_change_pct or 0.0) / 100.0 * s.price / s.atr) * sign
         if move_atr >= CONFIRM_ATR:
             target = "confirmou"
         elif move_atr >= FIRST_ATR:
@@ -7240,8 +7249,9 @@ class HistoryFrame:
 
     def reaction_stats(self):
         """ReactionRecords de todos os eventos do banco, medidos nas séries H1 do frame (cada um só fica visível após known_at)."""
+        key = (id(self.events), self.symbol)
         cached = getattr(self, "_reaction_stats", None)
-        if cached is not None:
+        if cached is not None and getattr(self, "_reaction_key", None) == key:
             return cached
 
         series = [(c.time, c.close) for c in self.xau]
@@ -7254,7 +7264,7 @@ class HistoryFrame:
                 return 0.0
             return _atr(self.xau[max(0, j - 60): j + 1]) or 0.0
         recs = records_from_history(self.events, self.symbol, series, atr_at, leads, 240, 60) if self.events is not None else []
-        self._reaction_stats = ReactionStats(recs)
+        self._reaction_stats, self._reaction_key = ReactionStats(recs), key
         return self._reaction_stats
 
     def _attach_events(self, s: MarketSnapshot, t: datetime) -> None:

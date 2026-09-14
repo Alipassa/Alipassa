@@ -294,8 +294,9 @@ class HistoryFrame:
 
     def reaction_stats(self):
         """ReactionRecords de todos os eventos do banco, medidos nas séries H1 do frame (cada um só fica visível após known_at)."""
+        key = (id(self.events), self.symbol)
         cached = getattr(self, "_reaction_stats", None)
-        if cached is not None:
+        if cached is not None and getattr(self, "_reaction_key", None) == key:
             return cached
         from .reaction import ReactionStats, records_from_history
 
@@ -309,7 +310,7 @@ class HistoryFrame:
                 return 0.0
             return _atr(self.xau[max(0, j - 60): j + 1]) or 0.0
         recs = records_from_history(self.events, self.symbol, series, atr_at, leads, 240, 60) if self.events is not None else []
-        self._reaction_stats = ReactionStats(recs)
+        self._reaction_stats, self._reaction_key = ReactionStats(recs), key
         return self._reaction_stats
 
     def _attach_events(self, s: MarketSnapshot, t: datetime) -> None:

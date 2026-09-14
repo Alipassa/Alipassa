@@ -239,8 +239,17 @@ class ReactionClock:
                 lead[name] = "✓ reagiu"
             else:
                 lead[name] = "✗ contra"
-        # alvo
-        move_atr = ((s.price_change_pct or 0.0) / 100.0 * (s.price or 0.0) / s.atr) * sign if (s.atr and s.price) else 0.0
+        # alvo: movimento DESDE O EVENTO (preço no último candle ≤ instante do evento, só passado); sem candles, usa a variação da janela
+        move_atr = 0.0
+        if s.atr and s.price:
+            p0 = None
+            for tf in ("M5", "M15", "H1"):
+                cs = s.candles.get(tf) or []
+                past = [c for c in cs if c.time <= ev.time]
+                if past:
+                    p0 = past[-1].close
+                    break
+            move_atr = ((s.price - p0) / s.atr * sign) if p0 else ((s.price_change_pct or 0.0) / 100.0 * s.price / s.atr) * sign
         if move_atr >= CONFIRM_ATR:
             target = "confirmou"
         elif move_atr >= FIRST_ATR:
