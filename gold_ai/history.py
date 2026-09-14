@@ -256,7 +256,7 @@ def coverage(hist: "EventHistory", start: date, end: date) -> Coverage:
         if e.revised is not None:
             rev_n += 1
             continue
-        if e.category in MACRO_CATEGORIES:
+        if e.category in MACRO_CATEGORIES and not str(e.source).startswith("gdelt"):   # manchete sobre o Fed é NEWS, não release
             macro_n += 1
             macro_weeks.add(d.isocalendar()[:2])
         else:

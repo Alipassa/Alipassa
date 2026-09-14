@@ -110,16 +110,30 @@ class ALFREDImporter:
         from .http import DataError
         self.validate_key()
         hist = EventHistory()
+        # O FRED rejeita (400) realtime_end "no futuro" — e o dia dele é o de St. Louis (UTC−5/−6). Se a data UTC de hoje
+        # ainda não chegou lá, o pedido cai; nesse caso repete-se com o dia anterior.
+        rt_end = end
         for sid in series or list(ALFRED_SERIES):
             key = f"alfred:v3:{sid}:{start:%Y-%m-%d}:{end:%Y-%m-%d}"
             if progress is not None and progress.has(key):
                 continue
             obs_start = start - timedelta(days=400)     # trimestral (PIB) precisa do trimestre anterior; mensal ganha folga
             rt_start = start - timedelta(days=60)       # a 1ª vintage é recortada pelo FRED na data pedida: fica ANTES do período = só fundo
-            url = (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
-                   f"&realtime_start={rt_start:%Y-%m-%d}&realtime_end={end:%Y-%m-%d}")
+
+            def url_for(rte: date) -> str:
+                return (f"{FRED_API}?series_id={sid}&api_key={self.key}&file_type=json&observation_start={obs_start:%Y-%m-%d}"
+                        f"&realtime_start={rt_start:%Y-%m-%d}&realtime_end={rte:%Y-%m-%d}")
             try:
-                payload = self.http.get_json(url, ttl=24 * 3600)
+                try:
+                    payload = self.http.get_json(url_for(rt_end), ttl=24 * 3600)
+                except DataError as e:
+                    if "400" in str(e) and rt_end == end:
+                        rt_end = end - timedelta(days=1)
+                        if self._log:
+                            self._log(f"  ALFRED: {end} ainda é 'futuro' em St. Louis — repetindo com realtime_end={rt_end}")
+                        payload = self.http.get_json(url_for(rt_end), ttl=24 * 3600)
+                    else:
+                        raise
             except DataError as e:
                 msg = str(e)
                 reason = ("HTTP 400: chave rejeitada ou parâmetros inválidos (confira FRED_API_KEY)" if "400" in msg else

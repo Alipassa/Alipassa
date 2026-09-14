@@ -290,6 +290,22 @@ class ImporterTests(unittest.TestCase):
             GDELTImporter(http, sleep=lambda s: None).fetch(date(2026, 1, 1), date(2026, 3, 1), ["petroleo"], chunk_days=30, progress=prog2, mode="artlist")
             self.assertEqual(len(http.calls), 2)                   # nada refeito
 
+    def test_alfred_retries_with_previous_day_when_end_is_future_in_st_louis(self):
+        from gold_ai.data.http import DataError
+
+        class Http(FakeHttp):
+            def get_json(self, url, ttl=None):
+                self.calls.append(url)
+                if "realtime_end=2026-09-14" in url:
+                    raise DataError("falha ao buscar x: HTTP Error 400: Bad Request")
+                return {"observations": []}
+        http = Http({})
+        imp = ALFREDImporter(http, KEY, log=lambda m: None)
+        imp.fetch(date(2026, 1, 1), date(2026, 9, 14), ["CPIAUCSL", "UNRATE"])
+        self.assertEqual(imp.failed, [])
+        self.assertEqual(sum(1 for c in http.calls if "realtime_end=2026-09-13" in c), 2)     # as duas séries com o dia anterior
+        self.assertEqual(sum(1 for c in http.calls if "realtime_end=2026-09-14" in c), 1)     # só a 1ª tentou o dia 'futuro'
+
     def test_alfred_key_validation_and_400(self):
         from gold_ai.data.http import DataError
         with self.assertRaises(DataError) as ctx:
