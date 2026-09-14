@@ -292,6 +292,26 @@ class HistoryFrame:
         self._attach_events(s, t)
         return s
 
+    def reaction_stats(self):
+        """ReactionRecords de todos os eventos do banco, medidos nas séries H1 do frame (cada um só fica visível após known_at)."""
+        cached = getattr(self, "_reaction_stats", None)
+        if cached is not None:
+            return cached
+        from .reaction import ReactionStats, records_from_history
+
+        series = [(c.time, c.close) for c in self.xau]
+        leads = {"USD": [(c.time, c.close) for c in self.dxy], "YIELD": [(c.time, c.close) for c in self.us10y]}
+        closes = [c.close for c in self.xau]
+
+        def atr_at(t: datetime) -> float:
+            j = self._at(self.xau, t)
+            if j is None or j < 20:
+                return 0.0
+            return _atr(self.xau[max(0, j - 60): j + 1]) or 0.0
+        recs = records_from_history(self.events, self.symbol, series, atr_at, leads, 240, 60) if self.events is not None else []
+        self._reaction_stats = ReactionStats(recs)
+        return self._reaction_stats
+
     def _attach_events(self, s: MarketSnapshot, t: datetime) -> None:
         """BANCO HISTÓRICO point-in-time: só o que estava publicado em t. Modo none = preço somente;
         macro = calendário (releases/bancos centrais); full = calendário + manchetes/tom (GDELT)."""
@@ -306,6 +326,11 @@ class HistoryFrame:
         identified = EventIdentifier().identify(news, events, t)
         na = NewsEngine().assess(self.symbol, s, identified, t)
         s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
+        # REACTION ENGINE: relógio com estatística point-in-time (só eventos concluídos antes de t)
+        from .reaction import ReactionClock
+        ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t)
+        s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
+        s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         if self.news_mode == "full":
             tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
             if tones:

@@ -355,6 +355,13 @@ class MarketSnapshot:
     news_pressure: Optional[float] = None   # -1..+1
     news_status: str = "UNKNOWN"            # UNKNOWN | FAVORÁVEL | CONTRÁRIO | NEUTRO
     news_chain: str = ""
+    # REACTION ENGINE (4.0): relógio de reação do evento mais relevante (assimetria temporal líderes × alvo)
+    reaction_status: str = "SEM EVENTO"     # SEM EVENTO | AGUARDANDO | PRESSÃO LATENTE | REAGIU | DIVERGÊNCIA | EXPIRADO
+    reaction_pressure: float = 0.0          # −1..+1
+    reaction_probability: Optional[float] = None
+    reaction_latency_min: Optional[float] = None
+    reaction_expected_min: Optional[float] = None
+    reaction_chain: str = ""
     # COT: último dado válido conhecido + idade (semanal; o peso decai com a idade)
     cot_age_days: Optional[float] = None
     cot_report_date: Optional[str] = None
@@ -1195,6 +1202,15 @@ def analyze_premove(
     if s.open_interest_change_pct and s.open_interest_change_pct > 1.5:
         prob += 0.04
         notes.append("open interest crescendo")
+    # REACTION ENGINE: assimetria temporal (líderes reagiram, alvo ainda não) é evidência a favor; divergência reduz. Nunca veta.
+    if s.reaction_status == "PRESSÃO LATENTE" and (s.reaction_pressure > 0) == (direction == Direction.ALTA):
+        prob += 0.08
+        lat = f"{s.reaction_latency_min:.0f} min" if s.reaction_latency_min is not None else "n/d"
+        med = f" vs mediana {s.reaction_expected_min:.0f} min" if s.reaction_expected_min else ""
+        notes.append(f"relógio de reação: líderes já reagiram, preço ainda não (T+{lat}{med})")
+    elif s.reaction_status == "DIVERGÊNCIA":
+        prob -= 0.06
+        notes.append("relógio de reação: mercado diverge da notícia")
 
     if strong_move:
         stage = Stage.MOVIMENTO
@@ -1542,6 +1558,8 @@ def event_chain(a: Assessment, s: MarketSnapshot) -> str:
         lines.append(s.news_chain)
     elif s.news_status == "UNKNOWN":
         lines.append("NEWS: UNKNOWN — sem notícias/eventos identificados (peso reduzido, não negativo)")
+    if s.reaction_chain and s.reaction_status != "SEM EVENTO":
+        lines.append(s.reaction_chain)
     return "\n".join(lines)
 
 
@@ -1805,6 +1823,13 @@ CREATE TABLE IF NOT EXISTS account (
     capital REAL NOT NULL,
     pnl REAL,
     nota TEXT
+);
+CREATE TABLE IF NOT EXISTS reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evento_id TEXT, ativo TEXT, tipo TEXT, publicado TEXT, direcao_esperada REAL,
+    t_primeira REAL, t_confirmacao REAL, t_pleno REAL, mfe REAL, mae REAL, direcao_ok INTEGER,
+    lead_usd REAL, lead_yield REAL, horizonte INTEGER, resolucao INTEGER, conhecido_em TEXT,
+    UNIQUE(evento_id, ativo)
 );
 CREATE TABLE IF NOT EXISTS trade_monitor (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2171,6 +2196,29 @@ class PredictionMemory:
             recs.append({"type": r["sinal_tipo"] or "?", "results": results,
                          "profile": ExcursionProfile(r["max_r"] or 0.0, r["mae_r"] or 0.0, bool(r["estopada"]), False, 0)})
         return r_stats(recs)
+
+    # ------------------------------------------------------------------ 4.0: REACTION ENGINE
+    def save_reaction(self, rec) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO reactions (evento_id, ativo, tipo, publicado, direcao_esperada, t_primeira, t_confirmacao, t_pleno, mfe, mae, direcao_ok, "
+            "lead_usd, lead_yield, horizonte, resolucao, conhecido_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.event_id, rec.target, rec.kind, rec.published_at.isoformat(), rec.expected_dir, rec.time_to_first, rec.time_to_confirmation, rec.time_to_full_move,
+             rec.max_move_atr, rec.max_adverse_atr, None if rec.direction_correct is None else int(rec.direction_correct), rec.lead_times.get("USD"),
+             rec.lead_times.get("YIELD"), rec.horizon_min, rec.resolution_min, rec.known_at.isoformat()))
+        self.conn.commit()
+
+    def reaction_records(self, symbol: Optional[str] = None) -> list:
+        where, params = self._where_symbol(symbol)
+        out = []
+        for r in self.conn.execute(f"SELECT * FROM reactions {where} ORDER BY publicado", params).fetchall():
+            rec = ReactionRecord(r["evento_id"], r["tipo"], datetime.fromisoformat(r["publicado"]), r["ativo"], r["direcao_esperada"], r["t_primeira"],
+                                 r["t_confirmacao"], r["t_pleno"], r["mfe"] or 0.0, r["mae"] or 0.0, None if r["direcao_ok"] is None else bool(r["direcao_ok"]),
+                                 {"USD": r["lead_usd"], "YIELD": r["lead_yield"]}, r["horizonte"] or 240, r["resolucao"] or 5)
+            out.append(rec)
+        return out
+
+    def has_reaction(self, event_id: str, symbol: str) -> bool:
+        return self.conn.execute("SELECT 1 FROM reactions WHERE evento_id=? AND ativo=?", (event_id, symbol)).fetchone() is not None
 
     # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
     def record_decision(self, rec, symbol: str = "XAUUSD", stage: Optional[str] = None, is_raw: bool = False) -> int:
@@ -5196,6 +5244,324 @@ def render_feed_health(rows: Sequence[FeedHealth]) -> str:
 
 
 # ============================================================================
+# REACTION
+# ============================================================================
+
+"""REACTION ENGINE — EVENTO → REAÇÃO → TEMPO → PREVISÃO (MARKET AI 4.0).
+
+Quando uma informação sai, o cronômetro começa. O motor mede, por evento e por ativo:
+  TIME_TO_FIRST_REACTION · TIME_TO_CONFIRMATION · TIME_TO_FULL_MOVE · MAX_MOVE · MAX_ADVERSE_MOVE
+e, para os canais líderes (USD, YIELDS), quanto tempo demoraram a reagir. Com a estatística por tipo de evento
+("depois de CPI, o ouro leva em mediana X min para começar a reagir"), o RELÓGIO DE REAÇÃO detecta a assimetria
+temporal: líderes já reagiram, alvo ainda não, tempo decorrido dentro da janela histórica → PRESSÃO LATENTE.
+
+Regra: só aprende com eventos já CONCLUÍDOS antes do instante avaliado (known_at = published_at + horizonte).
+Nunca usa a reação do próprio evento para decidir sobre ele. Não toca no Prediction Engine: entrega evidência.
+"""
+
+
+from bisect import bisect_right
+
+
+FIRST_ATR = 0.15          # 1ª reação: movimento ≥ 0,15 ATR na direção esperada
+CONFIRM_ATR = 0.40        # confirmação: ≥ 0,40 ATR
+LEAD_THRESHOLDS = {"USD": 0.08, "YIELD": 1.5}   # DXY em %, US10Y em bp
+MIN_N = 3                 # amostra mínima para usar a mediana de um tipo de evento
+
+
+@dataclass
+class ReactionRecord:
+    event_id: str
+    kind: str
+    published_at: datetime
+    target: str
+    expected_dir: float                       # +1 / −1
+    time_to_first: Optional[float] = None     # minutos; None = não reagiu no horizonte
+    time_to_confirmation: Optional[float] = None
+    time_to_full_move: Optional[float] = None
+    max_move_atr: float = 0.0
+    max_adverse_atr: float = 0.0
+    direction_correct: Optional[bool] = None
+    lead_times: dict[str, Optional[float]] = field(default_factory=dict)   # USD / YIELD → minutos
+    horizon_min: int = 240
+    resolution_min: int = 60                  # resolução da série usada (60 = H1; 5 = M5)
+
+    @property
+    def known_at(self) -> datetime:
+        return self.published_at + timedelta(minutes=self.horizon_min)
+
+
+def _at_or_before(series: Sequence[tuple[datetime, float]], t: datetime) -> Optional[float]:
+    best = None
+    for ts, v in series:
+        if ts <= t:
+            best = v
+        else:
+            break
+    return best
+
+
+def measure_reaction(event_id: str, kind: str, published_at: datetime, target: str, expected_dir: float,
+                     target_series: Sequence[tuple[datetime, float]], atr: float,
+                     leads: Optional[dict[str, Sequence[tuple[datetime, float]]]] = None, lead_dirs: Optional[dict[str, float]] = None,
+                     horizon_min: int = 240, resolution_min: int = 60) -> Optional[ReactionRecord]:
+    """Cronômetro do evento: a partir de published_at, quando o alvo (em ATR, na direção esperada) e os líderes reagiram."""
+    if expected_dir == 0 or not atr or atr <= 0:
+        return None
+    p0 = _at_or_before(target_series, published_at)
+    if p0 is None:
+        return None
+    end = published_at + timedelta(minutes=horizon_min)
+    rec = ReactionRecord(event_id, kind, published_at, target, 1.0 if expected_dir > 0 else -1.0, horizon_min=horizon_min, resolution_min=resolution_min)
+    sign = rec.expected_dir
+    mfe, mae, t_full = 0.0, 0.0, None
+    for ts, p in target_series:
+        if ts <= published_at:
+            continue
+        if ts > end:
+            break
+        move = sign * (p - p0) / atr
+        minutes = (ts - published_at).total_seconds() / 60
+        if move > mfe:
+            mfe, t_full = move, minutes
+        if -move > mae:
+            mae = -move
+        if rec.time_to_first is None and move >= FIRST_ATR:
+            rec.time_to_first = minutes
+        if rec.time_to_confirmation is None and move >= CONFIRM_ATR:
+            rec.time_to_confirmation = minutes
+    rec.max_move_atr, rec.max_adverse_atr = round(mfe, 2), round(mae, 2)
+    rec.time_to_full_move = t_full if mfe >= FIRST_ATR else None
+    rec.direction_correct = (mfe >= CONFIRM_ATR and mfe > mae) if (mfe or mae) else None
+    for name, series in (leads or {}).items():
+        d = (lead_dirs or {}).get(name, 0.0)
+        thr = LEAD_THRESHOLDS.get(name, 0.0)
+        rec.lead_times[name] = None
+        if d == 0 or not series:
+            continue
+        v0 = _at_or_before(series, published_at)
+        if v0 is None:
+            continue
+        for ts, v in series:
+            if ts <= published_at:
+                continue
+            if ts > end:
+                break
+            delta = (v / v0 - 1) * 100 if name == "USD" else (v - v0) * 100   # DXY em %, US10Y (em %) → bp
+            if (1.0 if d > 0 else -1.0) * delta >= thr:
+                rec.lead_times[name] = (ts - published_at).total_seconds() / 60
+                break
+    return rec
+
+
+@dataclass
+class KindStats:
+    kind: str
+    target: str
+    n: int
+    median_first: Optional[float]
+    median_confirmation: Optional[float]
+    median_full: Optional[float]
+    p_first: float                 # fração que teve 1ª reação
+    p_correct: float               # fração com direção confirmada
+    median_mfe: float
+    median_mae: float
+    median_lead: dict[str, Optional[float]]
+    resolution_min: int
+
+    def row(self) -> str:
+        f = lambda v: "  n/d" if v is None else f"{v:>5.0f}"  # noqa: E731
+        leads = " ".join(f"{k} {f(v).strip()}" for k, v in self.median_lead.items())
+        return (f"{self.kind:<22}{self.target:<8}{self.n:>4}{f(self.median_first):>8}{f(self.median_confirmation):>8}{f(self.median_full):>8}"
+                f"{self.p_first:>8.0%}{self.p_correct:>8.0%}{self.median_mfe:>7.2f}{self.median_mae:>7.2f}  {leads}")
+
+
+class ReactionStats:
+    """Estatística point-in-time: `at(t)` só usa registros com known_at ≤ t."""
+
+    def __init__(self, records: Sequence[ReactionRecord] = ()) -> None:
+        self.records = sorted(records, key=lambda r: r.known_at)
+        self._known = [r.known_at for r in self.records]
+        self._cache: dict[int, dict[tuple[str, str], KindStats]] = {}
+
+    def add(self, rec: ReactionRecord) -> None:
+        self.records.append(rec)
+        self.records.sort(key=lambda r: r.known_at)
+        self._known = [r.known_at for r in self.records]
+        self._cache.clear()
+
+    @staticmethod
+    def _aggregate(recs: Sequence[ReactionRecord]) -> dict[tuple[str, str], KindStats]:
+        groups: dict[tuple[str, str], list[ReactionRecord]] = {}
+        for r in recs:
+            groups.setdefault((r.kind, r.target), []).append(r)
+        out = {}
+        for key, rs in groups.items():
+            med = lambda xs: (statistics.median(xs) if xs else None)  # noqa: E731
+            firsts = [r.time_to_first for r in rs if r.time_to_first is not None]
+            confs = [r.time_to_confirmation for r in rs if r.time_to_confirmation is not None]
+            fulls = [r.time_to_full_move for r in rs if r.time_to_full_move is not None]
+            leads: dict[str, Optional[float]] = {}
+            for name in sorted({k for r in rs for k in r.lead_times}):
+                xs = [r.lead_times[name] for r in rs if r.lead_times.get(name) is not None]
+                leads[name] = med(xs)
+            out[key] = KindStats(key[0], key[1], len(rs), med(firsts), med(confs), med(fulls), len(firsts) / len(rs),
+                                 sum(1 for r in rs if r.direction_correct) / len(rs), statistics.median([r.max_move_atr for r in rs]),
+                                 statistics.median([r.max_adverse_atr for r in rs]), leads, max(r.resolution_min for r in rs))
+        return out
+
+    def at(self, t: datetime) -> dict[tuple[str, str], KindStats]:
+        n = bisect_right(self._known, t)
+        if n not in self._cache:
+            self._cache[n] = self._aggregate(self.records[:n])
+        return self._cache[n]
+
+    def get(self, kind: str, target: str, t: datetime) -> Optional[KindStats]:
+        return self.at(t).get((kind, target))
+
+    def render(self, t: Optional[datetime] = None, title: str = "⏱️ REACTION ENGINE — tempo de reação por tipo de evento (medianas, minutos)") -> str:
+        table = self.at(t) if t else self._aggregate(self.records)
+        if not table:
+            return f"{title}\n  sem eventos concluídos ainda"
+        head = f"{'evento':<22}{'alvo':<8}{'n':>4}{'1ªreaç':>8}{'confirm':>8}{'pleno':>8}{'P(reag)':>8}{'P(dir)':>8}{'MFE':>7}{'MAE':>7}  líderes (min)"
+        rows = [v.row() for _, v in sorted(table.items(), key=lambda kv: (-kv[1].n, kv[0]))]
+        res = max(v.resolution_min for v in table.values())
+        note = f"  resolução {res} min: tempos são múltiplos do candle usado (H1 = horas; para minutos use histórico M5/M1 ou o live)"
+        return "\n".join([title, head] + rows + [note, "  MFE/MAE em ATR no horizonte; P(dir) = fração com confirmação ≥ 0,40 ATR na direção esperada"])
+
+
+@dataclass
+class ReactionAssessment:
+    market: str
+    status: str                          # SEM EVENTO | AGUARDANDO | PRESSÃO LATENTE | REAGIU | DIVERGÊNCIA | EXPIRADO | SEM HISTÓRICO
+    pressure: float = 0.0                # −1..+1
+    probability: Optional[float] = None  # prob. estimada de o alvo confirmar a direção esperada
+    latency_min: Optional[float] = None  # tempo decorrido desde o evento
+    expected_min: Optional[float] = None # mediana histórica da 1ª reação do alvo
+    full_move_min: Optional[float] = None
+    lead: dict[str, str] = field(default_factory=dict)
+    target_reaction: str = ""
+    event: str = ""
+    n_history: int = 0
+    chain: str = ""
+
+
+class ReactionClock:
+    def __init__(self, stats: Optional[ReactionStats] = None) -> None:
+        self.stats = stats or ReactionStats()
+
+    def assess(self, market: str, s: MarketSnapshot, events: Sequence[IdentifiedEvent], now: datetime) -> ReactionAssessment:
+        cands = []
+        for ev in events:
+            exp, chans = expected_direction(ev, market)
+            if exp == 0.0:
+                continue
+            cands.append((ev, exp, chans))
+        if not cands:
+            return ReactionAssessment(market, "SEM EVENTO", chain="REACTION: sem evento com direção esperada na janela")
+        ev, exp, chans = max(cands, key=lambda c: (c[0].importance * (1 if c[0].surprise_sigma is None else min(2.0, abs(c[0].surprise_sigma))), c[0].time))
+        sign = 1.0 if exp > 0 else -1.0
+        elapsed = ev.age_min(now)
+        ks = self.stats.get(ev.kind, market, now)
+        n_hist = ks.n if ks else 0
+        expected_min = ks.median_first if ks and ks.n >= MIN_N else None
+        full_min = ks.median_full if ks and ks.n >= MIN_N else None
+        window = (2.0 * full_min) if full_min else 240.0
+        # líderes: canais dollar/yields esperados × observados
+        lead: dict[str, str] = {}
+        exp_usd, exp_y = chans.get("dollar", 0.0), chans.get("yields", 0.0)
+        for name, e, obs, thr in (("USD", exp_usd, s.dxy_change_pct, LEAD_THRESHOLDS["USD"]), ("YIELD", exp_y, s.us10y_change_bp, LEAD_THRESHOLDS["YIELD"])):
+            if e == 0.0:
+                continue
+            if obs is None:
+                lead[name] = "n/d"
+            elif abs(obs) < thr:
+                lead[name] = "ainda não"
+            elif (obs > 0) == (e > 0):
+                lead[name] = "✓ reagiu"
+            else:
+                lead[name] = "✗ contra"
+        # alvo
+        move_atr = ((s.price_change_pct or 0.0) / 100.0 * (s.price or 0.0) / s.atr) * sign if (s.atr and s.price) else 0.0
+        if move_atr >= CONFIRM_ATR:
+            target = "confirmou"
+        elif move_atr >= FIRST_ATR:
+            target = "iniciou"
+        elif move_atr <= -FIRST_ATR:
+            target = "contra"
+        else:
+            target = "ainda não"
+        leads_ok = sum(1 for v in lead.values() if v == "✓ reagiu")
+        leads_against = sum(1 for v in lead.values() if v == "✗ contra")
+        # estado
+        if target == "confirmou":
+            status, strength = "REAGIU", 0.3
+        elif target == "contra" or (leads_against and not leads_ok):
+            status, strength = "DIVERGÊNCIA", 0.0
+        elif leads_ok and elapsed <= window:
+            status, strength = "PRESSÃO LATENTE", 1.0 if target == "ainda não" else 0.8
+        elif leads_ok:
+            status, strength = "EXPIRADO", 0.0
+        elif elapsed <= window:
+            status, strength = "AGUARDANDO", 0.4
+        else:
+            status, strength = "EXPIRADO", 0.0
+        if not ks or ks.n < MIN_N:
+            hist_note = f"sem histórico suficiente para {ev.kind}→{market} (n={n_hist}; mínimo {MIN_N}) — janela padrão 240 min"
+        else:
+            hist_note = f"histórico {ev.kind}→{market}: 1ª reação mediana {ks.median_first:.0f} min, pleno {ks.median_full:.0f} min, P(dir) {ks.p_correct:.0%} (n={ks.n})" \
+                if ks.median_first is not None and ks.median_full is not None else f"histórico {ev.kind}→{market}: n={ks.n}, P(reação) {ks.p_first:.0%}, P(dir) {ks.p_correct:.0%}"
+        # probabilidade estimada: base histórica ajustada pela evidência atual (nunca inventada: sem histórico, 0,5 ± evidência)
+        base = ks.p_correct if ks and ks.n >= MIN_N else 0.5
+        prob = base + 0.08 * leads_ok - 0.15 * leads_against + (0.05 if status == "PRESSÃO LATENTE" else 0.0) - (0.25 if target == "contra" else 0.0)
+        if status == "EXPIRADO":
+            prob = min(prob, 0.45)
+        prob = max(0.05, min(0.95, prob))
+        pressure = round(sign * strength * (0.6 + 0.4 * (prob if prob else 0.5)), 3) if strength else 0.0
+        icon = {"PRESSÃO LATENTE": "🔥", "AGUARDANDO": "⏳", "REAGIU": "✅", "DIVERGÊNCIA": "⚠️", "EXPIRADO": "⌛"}.get(status, "")
+        sp = f" surpresa {ev.surprise_sigma:+.1f}σ" if ev.surprise_sigma is not None else ""
+        lines = [f"REACTION CLOCK → {market}: {icon} {status} · T+{elapsed:.0f} min · {ev.name[:50]}{sp} → {market} {'↑' if sign > 0 else '↓'}",
+                 "  líderes: " + (" · ".join(f"{k} {v}" for k, v in lead.items()) or "sem canal líder") + f" · alvo {market}: {target} ({move_atr:+.2f} ATR)",
+                 f"  {hist_note}"]
+        if status == "PRESSÃO LATENTE":
+            lines.append(f"  assimetria temporal: líderes reagiram, {market} não; decorrido {elapsed:.0f} min" +
+                         (f" vs mediana {expected_min:.0f} min" if expected_min else "") + f" · prob. estimada {prob:.0%}")
+        return ReactionAssessment(market, status, pressure, round(prob, 2), round(elapsed, 1), expected_min, full_min, lead, target, ev.name, n_hist, "\n".join(lines))
+
+
+# --------------------------------------------------------------------------- aprendizado a partir do banco histórico
+def records_from_history(hist, symbol: str, target_series: Sequence[tuple[datetime, float]], atr_at, leads: Optional[dict] = None,
+                         horizon_min: int = 240, resolution_min: int = 60) -> list[ReactionRecord]:
+    """Um ReactionRecord por evento do banco com direção esperada para `symbol` (regra macro). `atr_at(t)` → ATR do alvo em t."""
+
+    out = []
+    for e in hist.events:
+        if e.revised is not None:
+            continue
+        sign, sigma = 0.0, None
+        if e.surprise is not None:
+            sign = 1.0 if e.surprise > 0 else -1.0 if e.surprise < 0 else 0.0
+            typ = TYPICAL.get(e.kind, max(abs(e.forecast or e.previous or 1.0) * 0.1, 0.1))
+            sigma = e.surprise / typ if typ else None
+        elif e.kind in TRANSMISSION and e.actual is None:
+            sign = 1.0
+        if sign == 0.0:
+            continue
+        exp = rule_direction(e.kind, sign, sigma, symbol)
+        if exp == 0.0:
+            continue
+        chans = TRANSMISSION.get(e.kind) or EXTRA_TRANSMISSION.get(e.kind) or {}
+        lead_dirs = {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}
+        atr = atr_at(e.published_at)
+        if not atr:
+            continue
+        rec = measure_reaction(e.event_id, e.kind, e.published_at, symbol, exp, target_series, atr, leads, lead_dirs, horizon_min, resolution_min)
+        if rec:
+            out.append(rec)
+    return out
+
+
+# ============================================================================
 # HISTORY
 # ============================================================================
 
@@ -6872,6 +7238,25 @@ class HistoryFrame:
         self._attach_events(s, t)
         return s
 
+    def reaction_stats(self):
+        """ReactionRecords de todos os eventos do banco, medidos nas séries H1 do frame (cada um só fica visível após known_at)."""
+        cached = getattr(self, "_reaction_stats", None)
+        if cached is not None:
+            return cached
+
+        series = [(c.time, c.close) for c in self.xau]
+        leads = {"USD": [(c.time, c.close) for c in self.dxy], "YIELD": [(c.time, c.close) for c in self.us10y]}
+        closes = [c.close for c in self.xau]
+
+        def atr_at(t: datetime) -> float:
+            j = self._at(self.xau, t)
+            if j is None or j < 20:
+                return 0.0
+            return _atr(self.xau[max(0, j - 60): j + 1]) or 0.0
+        recs = records_from_history(self.events, self.symbol, series, atr_at, leads, 240, 60) if self.events is not None else []
+        self._reaction_stats = ReactionStats(recs)
+        return self._reaction_stats
+
     def _attach_events(self, s: MarketSnapshot, t: datetime) -> None:
         """BANCO HISTÓRICO point-in-time: só o que estava publicado em t. Modo none = preço somente;
         macro = calendário (releases/bancos centrais); full = calendário + manchetes/tom (GDELT)."""
@@ -6885,6 +7270,10 @@ class HistoryFrame:
         identified = EventIdentifier().identify(news, events, t)
         na = NewsEngine().assess(self.symbol, s, identified, t)
         s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
+        # REACTION ENGINE: relógio com estatística point-in-time (só eventos concluídos antes de t)
+        ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t)
+        s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
+        s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         if self.news_mode == "full":
             tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
             if tones:
@@ -8619,6 +9008,7 @@ class MarketSnapshotSet:
     by_symbol: dict[str, MarketSnapshot] = field(default_factory=dict)
     status: dict[str, str] = field(default_factory=dict)
     data_quality: dict[str, float] = field(default_factory=dict)
+    identified: list = field(default_factory=list)     # eventos identificados pelo NEWS ENGINE neste ciclo
 
 
 MACRO_FIELDS = ("dxy", "dxy_change_pct", "us2y", "us10y", "us10y_change_bp", "real_yield_10y", "real_yield_change_bp", "breakeven_10y_change_bp",
@@ -8725,6 +9115,7 @@ class MultiMarketData:
         out = MarketSnapshotSet(now, base)
         identified = EventIdentifier().identify(base.news, base.events, now)
         self.identified = identified
+        out.identified = identified
         for spec in self.specs:
             try:
                 candles = base.candles if spec.symbol == "XAUUSD" and base.candles else self.market_candles(spec)
@@ -8819,6 +9210,64 @@ class MarketAIEngine:
                                                     horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)
         self.history: dict[str, StatConfidence] = {}
         self.refresh_history()
+        # REACTION ENGINE (live): estatística do que foi vivido + cronômetros dos eventos em curso
+        self.reaction_stats = ReactionStats(mem.reaction_records())
+        self.pending_reactions: dict[str, dict] = {}     # event_id → {ev, exp/lead_dirs por ativo, série do alvo, séries líderes}
+        self.reaction_horizon = min(horizon_min, 240)
+
+    # ------------------------------------------------------------------ REACTION ENGINE (live)
+    def _reaction_clock(self, snaps: MarketSnapshotSet) -> None:
+        """A cada ciclo: relógio por mercado (evidência para o pré-movimento) + amostragem dos eventos em curso; ao fechar o
+        horizonte, mede a reação (alvo e líderes) e grava — o sistema aprende com os eventos que viveu, nunca com o futuro."""
+
+        now = snaps.time
+        clock = ReactionClock(self.reaction_stats)
+        for sym, snap in snaps.by_symbol.items():
+            ra = clock.assess(sym, snap, snaps.identified, now)
+            snap.reaction_status, snap.reaction_pressure, snap.reaction_probability = ra.status, ra.pressure, ra.probability
+            snap.reaction_latency_min, snap.reaction_expected_min, snap.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
+        base = snaps.base
+        for ev in snaps.identified:
+            key = f"{ev.kind}:{ev.time:%Y%m%d%H%M}:{ev.name[:30]}"
+            if key not in self.pending_reactions:
+                if any(self.mem.has_reaction(key, sym) for sym in self.specs):
+                    continue
+                chans = TRANSMISSION.get(ev.kind) or EXTRA_TRANSMISSION.get(ev.kind) or {}
+                sign = ev.direction_sign or 1.0
+                self.pending_reactions[key] = {"ev": ev, "leads": {"USD": [], "YIELD": []}, "targets": {},
+                                               "lead_dirs": {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}}
+                for sym, snap in snaps.by_symbol.items():
+                    exp, _ = expected_direction(ev, sym)
+                    if exp != 0.0 and snap.price:
+                        self.pending_reactions[key]["targets"][sym] = {"exp": exp, "atr": snap.atr or 0.0, "series": []}
+            pr = self.pending_reactions[key]
+            if base.dxy is not None:
+                pr["leads"]["USD"].append((now, base.dxy))
+            if base.us10y is not None:
+                pr["leads"]["YIELD"].append((now, base.us10y))
+            for sym, tg in pr["targets"].items():
+                snap = snaps.by_symbol.get(sym)
+                if snap is not None and snap.price:
+                    tg["series"].append((now, snap.price))
+        for key in list(self.pending_reactions):
+            pr = self.pending_reactions[key]
+            ev = pr["ev"]
+            if ev.age_min(now) < self.reaction_horizon:
+                continue
+            for sym, tg in pr["targets"].items():
+                fine = snaps.by_symbol[sym].candles.get("M5") if sym in snaps.by_symbol else None
+                series = [(c.time, c.close) for c in fine if c.time >= ev.time - timedelta(minutes=10)] if fine else tg["series"]
+                first_price = next((p for t, p in tg["series"] if t <= ev.time), None)
+                if first_price is not None and (not series or series[0][0] > ev.time):
+                    series = [(ev.time, first_price)] + list(series)
+                rec = measure_reaction(key, ev.kind, ev.time, sym, tg["exp"], series, tg["atr"], pr["leads"], pr["lead_dirs"], self.reaction_horizon,
+                                       5 if fine else 1)
+                if rec:
+                    self.mem.save_reaction(rec)
+                    self.reaction_stats.add(rec)
+                    self.log(f"⏱️ REACTION registrada: {ev.name[:40]} → {sym}: 1ª reação {rec.time_to_first or 'não'} min · confirmação "
+                             f"{rec.time_to_confirmation or 'não'} min · MFE {rec.max_move_atr:.2f} ATR · líderes {rec.lead_times}")
+            del self.pending_reactions[key]
 
     # ------------------------------------------------------------------ histórico por mercado
     def refresh_history(self) -> None:
@@ -8848,6 +9297,8 @@ class MarketAIEngine:
         first.commands = self.commands
         if self.commands is not None and any(c.startswith("/EDGE") for c in getattr(self.commands, "last_cmds", [])):
             self.daily_edge(snaps.time, pc, force=True)
+        # 0) REACTION ENGINE: relógio de reação por mercado + aprendizado dos eventos concluídos
+        self._reaction_clock(snaps)
         # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
         for sym, eng in self.engines.items():
             snap = snaps.by_symbol.get(sym)
@@ -9248,6 +9699,48 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(f"salvo em {path}")
         return 0
     print(f"ação desconhecida: {args.action}")
+    return 1
+
+
+def cmd_reaction(args: argparse.Namespace) -> int:
+    """REACTION ENGINE: learn (banco histórico × preço → tempo de reação por evento e ativo) · stats (o que o live viveu) · clock (agora)."""
+
+    if args.action == "learn":
+        if not os.path.exists(args.events):
+            print(f"banco histórico não encontrado: {args.events}")
+            return 1
+        hist = load_history(args.events)
+        frames = _frames_for_markets(args, args.markets)
+        all_recs = []
+        for sym, frame in frames.items():
+            frame.symbol, frame.events = sym, hist
+            st = frame.reaction_stats()
+            all_recs += st.records
+            print(f"{sym}: {len(st.records)} eventos medidos (H1)")
+        st = ReactionStats(all_recs)
+        txt = st.render()
+        print(txt)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as f:
+                f.write(txt)
+        return 0
+    if args.action == "stats":
+        mem = PredictionMemory(args.db)
+        st = ReactionStats(mem.reaction_records())
+        print(st.render(title="⏱️ REACTION ENGINE — o que o live viveu (resolução por ciclo/M5)"))
+        mem.close()
+        return 0
+    if args.action == "clock":
+        symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+        mem = PredictionMemory(args.db)
+        data = MultiMarketData(symbols, DataEngineConfig(enable_cot=False, enable_fred=not args.no_fred, enable_news=True))
+        snaps = data.collect()
+        clock = ReactionClock(ReactionStats(mem.reaction_records()))
+        print(data.coverage())
+        for sym, snap in snaps.by_symbol.items():
+            print(clock.assess(sym, snap, snaps.identified, snaps.time).chain)
+        mem.close()
+        return 0
     return 1
 
 
@@ -9722,6 +10215,18 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--csv-dir", default=None)
     hi.add_argument("--no-fred", action="store_true")
     hi.set_defaults(func=cmd_history)
+
+    rc = sub.add_parser("reaction", help="REACTION ENGINE: learn (tempo de reação por evento/ativo no histórico) | stats (vivido) | clock (agora)")
+    rc.add_argument("action", choices=["learn", "stats", "clock"])
+    rc.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    rc.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    rc.add_argument("--start", default="2026-01-01")
+    rc.add_argument("--end", default=None)
+    rc.add_argument("--db", default="gold_ai.db")
+    rc.add_argument("--csv-dir", default=None)
+    rc.add_argument("--no-fred", action="store_true")
+    rc.add_argument("--out", default=None)
+    rc.set_defaults(func=cmd_reaction)
 
     cn = sub.add_parser("compare-news", help="TESTE A/B: Preço somente × Preço + Macro (A) × Preço + Macro + News (B), walk-forward OOS, mesmo piso")
     cn.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))

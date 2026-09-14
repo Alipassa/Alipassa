@@ -158,6 +158,13 @@ class MarketSnapshot:
     news_pressure: Optional[float] = None   # -1..+1
     news_status: str = "UNKNOWN"            # UNKNOWN | FAVORÁVEL | CONTRÁRIO | NEUTRO
     news_chain: str = ""
+    # REACTION ENGINE (4.0): relógio de reação do evento mais relevante (assimetria temporal líderes × alvo)
+    reaction_status: str = "SEM EVENTO"     # SEM EVENTO | AGUARDANDO | PRESSÃO LATENTE | REAGIU | DIVERGÊNCIA | EXPIRADO
+    reaction_pressure: float = 0.0          # −1..+1
+    reaction_probability: Optional[float] = None
+    reaction_latency_min: Optional[float] = None
+    reaction_expected_min: Optional[float] = None
+    reaction_chain: str = ""
     # COT: último dado válido conhecido + idade (semanal; o peso decai com a idade)
     cot_age_days: Optional[float] = None
     cot_report_date: Optional[str] = None

@@ -449,3 +449,8 @@ Regras:
     apenas o que estava publicado (`published_at ≤ t`). TESTE A (Preço + Macro) e TESTE B (Preço + Macro +
     News) contra Preço somente, no mesmo walk-forward. Se a informação cria entradas com expectancy ≥ referência,
     ela fica; os efeitos por ativo nascem das regras macro e são substituídos pelos empíricos, nunca inventados.
+
+11. **REACTION ENGINE** `[reaction]`: a informação tem velocidade de transmissão. Por evento e ativo mede-se quanto tempo
+    o alvo e os líderes (USD, yields) levam para reagir; a mediana por tipo de evento, aprendida só com eventos já
+    concluídos, permite detectar a assimetria temporal (líderes reagiram, alvo ainda não, tempo dentro da janela histórica)
+    = PRESSÃO LATENTE, evidência para o pré-movimento. Nunca usa a reação do próprio evento para decidir sobre ele.

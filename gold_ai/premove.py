@@ -66,6 +66,15 @@ def analyze_premove(
     if s.open_interest_change_pct and s.open_interest_change_pct > 1.5:
         prob += 0.04
         notes.append("open interest crescendo")
+    # REACTION ENGINE: assimetria temporal (líderes reagiram, alvo ainda não) é evidência a favor; divergência reduz. Nunca veta.
+    if s.reaction_status == "PRESSÃO LATENTE" and (s.reaction_pressure > 0) == (direction == Direction.ALTA):
+        prob += 0.08
+        lat = f"{s.reaction_latency_min:.0f} min" if s.reaction_latency_min is not None else "n/d"
+        med = f" vs mediana {s.reaction_expected_min:.0f} min" if s.reaction_expected_min else ""
+        notes.append(f"relógio de reação: líderes já reagiram, preço ainda não (T+{lat}{med})")
+    elif s.reaction_status == "DIVERGÊNCIA":
+        prob -= 0.06
+        notes.append("relógio de reação: mercado diverge da notícia")
 
     if strong_move:
         stage = Stage.MOVIMENTO

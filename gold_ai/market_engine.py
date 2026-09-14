@@ -13,7 +13,7 @@ e de PRIORIDADE (um ciclo, uma entrada: a melhor).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from .config import EngineConfig
@@ -78,6 +78,68 @@ class MarketAIEngine:
                                                     horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)
         self.history: dict[str, StatConfidence] = {}
         self.refresh_history()
+        # REACTION ENGINE (live): estatística do que foi vivido + cronômetros dos eventos em curso
+        from .reaction import ReactionStats
+        self.reaction_stats = ReactionStats(mem.reaction_records())
+        self.pending_reactions: dict[str, dict] = {}     # event_id → {ev, exp/lead_dirs por ativo, série do alvo, séries líderes}
+        self.reaction_horizon = min(horizon_min, 240)
+
+    # ------------------------------------------------------------------ REACTION ENGINE (live)
+    def _reaction_clock(self, snaps: MarketSnapshotSet) -> None:
+        """A cada ciclo: relógio por mercado (evidência para o pré-movimento) + amostragem dos eventos em curso; ao fechar o
+        horizonte, mede a reação (alvo e líderes) e grava — o sistema aprende com os eventos que viveu, nunca com o futuro."""
+        from .news_engine import TRANSMISSION, expected_direction
+        from .reaction import ReactionClock, measure_reaction
+        from .history import EXTRA_TRANSMISSION
+
+        now = snaps.time
+        clock = ReactionClock(self.reaction_stats)
+        for sym, snap in snaps.by_symbol.items():
+            ra = clock.assess(sym, snap, snaps.identified, now)
+            snap.reaction_status, snap.reaction_pressure, snap.reaction_probability = ra.status, ra.pressure, ra.probability
+            snap.reaction_latency_min, snap.reaction_expected_min, snap.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
+        base = snaps.base
+        for ev in snaps.identified:
+            key = f"{ev.kind}:{ev.time:%Y%m%d%H%M}:{ev.name[:30]}"
+            if key not in self.pending_reactions:
+                if any(self.mem.has_reaction(key, sym) for sym in self.specs):
+                    continue
+                chans = TRANSMISSION.get(ev.kind) or EXTRA_TRANSMISSION.get(ev.kind) or {}
+                sign = ev.direction_sign or 1.0
+                self.pending_reactions[key] = {"ev": ev, "leads": {"USD": [], "YIELD": []}, "targets": {},
+                                               "lead_dirs": {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}}
+                for sym, snap in snaps.by_symbol.items():
+                    exp, _ = expected_direction(ev, sym)
+                    if exp != 0.0 and snap.price:
+                        self.pending_reactions[key]["targets"][sym] = {"exp": exp, "atr": snap.atr or 0.0, "series": []}
+            pr = self.pending_reactions[key]
+            if base.dxy is not None:
+                pr["leads"]["USD"].append((now, base.dxy))
+            if base.us10y is not None:
+                pr["leads"]["YIELD"].append((now, base.us10y))
+            for sym, tg in pr["targets"].items():
+                snap = snaps.by_symbol.get(sym)
+                if snap is not None and snap.price:
+                    tg["series"].append((now, snap.price))
+        for key in list(self.pending_reactions):
+            pr = self.pending_reactions[key]
+            ev = pr["ev"]
+            if ev.age_min(now) < self.reaction_horizon:
+                continue
+            for sym, tg in pr["targets"].items():
+                fine = snaps.by_symbol[sym].candles.get("M5") if sym in snaps.by_symbol else None
+                series = [(c.time, c.close) for c in fine if c.time >= ev.time - timedelta(minutes=10)] if fine else tg["series"]
+                first_price = next((p for t, p in tg["series"] if t <= ev.time), None)
+                if first_price is not None and (not series or series[0][0] > ev.time):
+                    series = [(ev.time, first_price)] + list(series)
+                rec = measure_reaction(key, ev.kind, ev.time, sym, tg["exp"], series, tg["atr"], pr["leads"], pr["lead_dirs"], self.reaction_horizon,
+                                       5 if fine else 1)
+                if rec:
+                    self.mem.save_reaction(rec)
+                    self.reaction_stats.add(rec)
+                    self.log(f"⏱️ REACTION registrada: {ev.name[:40]} → {sym}: 1ª reação {rec.time_to_first or 'não'} min · confirmação "
+                             f"{rec.time_to_confirmation or 'não'} min · MFE {rec.max_move_atr:.2f} ATR · líderes {rec.lead_times}")
+            del self.pending_reactions[key]
 
     # ------------------------------------------------------------------ histórico por mercado
     def refresh_history(self) -> None:
@@ -107,6 +169,8 @@ class MarketAIEngine:
         first.commands = self.commands
         if self.commands is not None and any(c.startswith("/EDGE") for c in getattr(self.commands, "last_cmds", [])):
             self.daily_edge(snaps.time, pc, force=True)
+        # 0) REACTION ENGINE: relógio de reação por mercado + aprendizado dos eventos concluídos
+        self._reaction_clock(snaps)
         # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
         for sym, eng in self.engines.items():
             snap = snaps.by_symbol.get(sym)

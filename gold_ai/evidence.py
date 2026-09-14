@@ -102,4 +102,6 @@ def event_chain(a: Assessment, s: MarketSnapshot) -> str:
         lines.append(s.news_chain)
     elif s.news_status == "UNKNOWN":
         lines.append("NEWS: UNKNOWN — sem notícias/eventos identificados (peso reduzido, não negativo)")
+    if s.reaction_chain and s.reaction_status != "SEM EVENTO":
+        lines.append(s.reaction_chain)
     return "\n".join(lines)

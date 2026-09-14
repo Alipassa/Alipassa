@@ -27,6 +27,7 @@ class MarketSnapshotSet:
     by_symbol: dict[str, MarketSnapshot] = field(default_factory=dict)
     status: dict[str, str] = field(default_factory=dict)
     data_quality: dict[str, float] = field(default_factory=dict)
+    identified: list = field(default_factory=list)     # eventos identificados pelo NEWS ENGINE neste ciclo
 
 
 MACRO_FIELDS = ("dxy", "dxy_change_pct", "us2y", "us10y", "us10y_change_bp", "real_yield_10y", "real_yield_change_bp", "breakeven_10y_change_bp",
@@ -136,6 +137,7 @@ class MultiMarketData:
         from ..news_engine import EventIdentifier
         identified = EventIdentifier().identify(base.news, base.events, now)
         self.identified = identified
+        out.identified = identified
         for spec in self.specs:
             try:
                 candles = base.candles if spec.symbol == "XAUUSD" and base.candles else self.market_candles(spec)

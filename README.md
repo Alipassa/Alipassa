@@ -110,6 +110,30 @@ NEWS → EVENT IDENTIFIER → IMPORTÂNCIA → EXPECTATIVA → SURPRESA → DIRE
 - **COT** é semanal: usa o último dado válido conhecido com a idade em dias; o peso decai após 10 dias e some após 35, sem
   derrubar o score inteiro quando a CFTC está fora do ar.
 
+## ⏱️ REACTION ENGINE — EVENTO → REAÇÃO → TEMPO → PREVISÃO
+
+Quando a informação sai, o cronômetro começa. Por evento e ativo o motor mede `TIME_TO_FIRST_REACTION` (≥ 0,15 ATR na
+direção esperada), `TIME_TO_CONFIRMATION` (≥ 0,40 ATR), `TIME_TO_FULL_MOVE`, `MAX_MOVE`, `MAX_ADVERSE_MOVE` e o tempo de
+reação dos líderes (USD via DXY, YIELDS via US10Y). A estatística por tipo de evento ("depois de CPI o ouro leva em
+mediana X min para reagir") é **point-in-time**: só entram eventos já concluídos antes do instante avaliado.
+
+```text
+T+0 CPI surpresa +2σ → T+5 nada → T+10 USD ✓ → T+15 YIELD ✓ → XAUUSD ainda não · mediana histórica 20 min
+→ 🔥 PRESSÃO LATENTE (assimetria temporal: líderes reagiram, alvo não) → evidência para o PRE-MOVE (nunca veto)
+```
+
+Estados: `AGUARDANDO` · `PRESSÃO LATENTE` · `REAGIU` · `DIVERGÊNCIA` · `EXPIRADO`. A probabilidade estimada parte da
+P(direção) histórica do tipo de evento e é ajustada pela evidência atual; sem histórico (n < 3) o relógio diz isso.
+
+```bash
+python market_ai_engine_v4.py reaction learn --markets XAUUSD,US500,USDJPY   # banco histórico × preço H1 (tempos em múltiplos de 60 min)
+python market_ai_engine_v4.py reaction stats                                   # o que o live viveu (resolução por ciclo/M5)
+python market_ai_engine_v4.py reaction clock --markets XAUUSD,US500            # relógio agora
+```
+
+No `live --markets` o relógio roda a cada ciclo, amostra USD/yields/alvo por evento e, ao fechar o horizonte, grava a reação no
+SQLite (`reactions`): o sistema aprende com os eventos que viveu. No backtest com `--events`, o relógio usa só o passado.
+
 ## 🗄️ BANCO HISTÓRICO DE NOTÍCIAS/EVENTOS — point-in-time para o backtest
 
 O histórico H1 gratuito não tem notícias nem calendário; por isso o backtest via menos evidência do que o `live`. O banco

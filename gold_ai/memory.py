@@ -110,6 +110,13 @@ CREATE TABLE IF NOT EXISTS account (
     pnl REAL,
     nota TEXT
 );
+CREATE TABLE IF NOT EXISTS reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evento_id TEXT, ativo TEXT, tipo TEXT, publicado TEXT, direcao_esperada REAL,
+    t_primeira REAL, t_confirmacao REAL, t_pleno REAL, mfe REAL, mae REAL, direcao_ok INTEGER,
+    lead_usd REAL, lead_yield REAL, horizonte INTEGER, resolucao INTEGER, conhecido_em TEXT,
+    UNIQUE(evento_id, ativo)
+);
 CREATE TABLE IF NOT EXISTS trade_monitor (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_id INTEGER NOT NULL,
@@ -484,6 +491,30 @@ class PredictionMemory:
             recs.append({"type": r["sinal_tipo"] or "?", "results": results,
                          "profile": ExcursionProfile(r["max_r"] or 0.0, r["mae_r"] or 0.0, bool(r["estopada"]), False, 0)})
         return r_stats(recs)
+
+    # ------------------------------------------------------------------ 4.0: REACTION ENGINE
+    def save_reaction(self, rec) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO reactions (evento_id, ativo, tipo, publicado, direcao_esperada, t_primeira, t_confirmacao, t_pleno, mfe, mae, direcao_ok, "
+            "lead_usd, lead_yield, horizonte, resolucao, conhecido_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.event_id, rec.target, rec.kind, rec.published_at.isoformat(), rec.expected_dir, rec.time_to_first, rec.time_to_confirmation, rec.time_to_full_move,
+             rec.max_move_atr, rec.max_adverse_atr, None if rec.direction_correct is None else int(rec.direction_correct), rec.lead_times.get("USD"),
+             rec.lead_times.get("YIELD"), rec.horizon_min, rec.resolution_min, rec.known_at.isoformat()))
+        self.conn.commit()
+
+    def reaction_records(self, symbol: Optional[str] = None) -> list:
+        from .reaction import ReactionRecord
+        where, params = self._where_symbol(symbol)
+        out = []
+        for r in self.conn.execute(f"SELECT * FROM reactions {where} ORDER BY publicado", params).fetchall():
+            rec = ReactionRecord(r["evento_id"], r["tipo"], datetime.fromisoformat(r["publicado"]), r["ativo"], r["direcao_esperada"], r["t_primeira"],
+                                 r["t_confirmacao"], r["t_pleno"], r["mfe"] or 0.0, r["mae"] or 0.0, None if r["direcao_ok"] is None else bool(r["direcao_ok"]),
+                                 {"USD": r["lead_usd"], "YIELD": r["lead_yield"]}, r["horizonte"] or 240, r["resolucao"] or 5)
+            out.append(rec)
+        return out
+
+    def has_reaction(self, event_id: str, symbol: str) -> bool:
+        return self.conn.execute("SELECT 1 FROM reactions WHERE evento_id=? AND ativo=?", (event_id, symbol)).fetchone() is not None
 
     # ------------------------------------------------------------------ 3.0: OPPORTUNITY ENGINE
     def record_decision(self, rec, symbol: str = "XAUUSD", stage: Optional[str] = None, is_raw: bool = False) -> int:

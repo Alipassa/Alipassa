@@ -78,6 +78,7 @@ maximizing risk-adjusted profitability and minimizing unnecessary missed opportu
 | Vários mercados, atenção ao melhor risco-retorno | `markets`, `selector.AssetSelector`, `market_engine` |
 | Limiar dinâmico e validado fora da amostra, nunca fixo arbitrariamente | `sweep` (piso escolhido no treino de cada fold), `validation` |
 | Notícia como camada transversal: expectativa, surpresa, reação, divergência, pressão latente | `news_engine`, `history` (point-in-time), `compare-news` |
+| Velocidade de transmissão da informação: tempo de reação por evento/ativo, assimetria líderes × alvo | `reaction` (REACTION ENGINE), `reaction learn/stats/clock` |
 | Reavaliação contínua da posição (manter/proteger/reduzir/estender/encerrar) | `monitor.TradeMonitor`, ADAPTIVE EXIT |
 | Lote por capital × risco % × distância do stop; risco % nunca sobe para recuperar | `trading.size_lots`, `guard.PerformanceEngine` |
 | Backtest, walk-forward, OOS, bootstrap, MFE/MAE, lead time, funil, calibração, live edge | `evaluation`, `estimate`, `opportunity`, `edge_report`, `edge` |

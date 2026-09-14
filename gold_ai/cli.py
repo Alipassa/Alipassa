@@ -382,6 +382,53 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_reaction(args: argparse.Namespace) -> int:
+    """REACTION ENGINE: learn (banco histórico × preço → tempo de reação por evento e ativo) · stats (o que o live viveu) · clock (agora)."""
+    from .reaction import ReactionStats
+
+    if args.action == "learn":
+        from .history import load_history
+        if not os.path.exists(args.events):
+            print(f"banco histórico não encontrado: {args.events}")
+            return 1
+        hist = load_history(args.events)
+        frames = _frames_for_markets(args, args.markets)
+        all_recs = []
+        for sym, frame in frames.items():
+            frame.symbol, frame.events = sym, hist
+            st = frame.reaction_stats()
+            all_recs += st.records
+            print(f"{sym}: {len(st.records)} eventos medidos (H1)")
+        st = ReactionStats(all_recs)
+        txt = st.render()
+        print(txt)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as f:
+                f.write(txt)
+        return 0
+    if args.action == "stats":
+        mem = PredictionMemory(args.db)
+        st = ReactionStats(mem.reaction_records())
+        print(st.render(title="⏱️ REACTION ENGINE — o que o live viveu (resolução por ciclo/M5)"))
+        mem.close()
+        return 0
+    if args.action == "clock":
+        from .data import DataEngineConfig
+        from .data.multi import MultiMarketData
+        from .reaction import ReactionClock
+        symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+        mem = PredictionMemory(args.db)
+        data = MultiMarketData(symbols, DataEngineConfig(enable_cot=False, enable_fred=not args.no_fred, enable_news=True))
+        snaps = data.collect()
+        clock = ReactionClock(ReactionStats(mem.reaction_records()))
+        print(data.coverage())
+        for sym, snap in snaps.by_symbol.items():
+            print(clock.assess(sym, snap, snaps.identified, snaps.time).chain)
+        mem.close()
+        return 0
+    return 1
+
+
 def cmd_compare_news(args: argparse.Namespace) -> int:
     """TESTE A/B: Preço somente × Preço + Macro (A) × Preço + Macro + News (B) — mesma janela, mesmo piso, walk-forward OOS."""
     from .ablation import compare_information
@@ -880,6 +927,18 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--csv-dir", default=None)
     hi.add_argument("--no-fred", action="store_true")
     hi.set_defaults(func=cmd_history)
+
+    rc = sub.add_parser("reaction", help="REACTION ENGINE: learn (tempo de reação por evento/ativo no histórico) | stats (vivido) | clock (agora)")
+    rc.add_argument("action", choices=["learn", "stats", "clock"])
+    rc.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    rc.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    rc.add_argument("--start", default="2026-01-01")
+    rc.add_argument("--end", default=None)
+    rc.add_argument("--db", default="gold_ai.db")
+    rc.add_argument("--csv-dir", default=None)
+    rc.add_argument("--no-fred", action="store_true")
+    rc.add_argument("--out", default=None)
+    rc.set_defaults(func=cmd_reaction)
 
     cn = sub.add_parser("compare-news", help="TESTE A/B: Preço somente × Preço + Macro (A) × Preço + Macro + News (B), walk-forward OOS, mesmo piso")
     cn.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
