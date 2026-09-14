@@ -292,7 +292,7 @@ class DeltaAndStabilityTests(unittest.TestCase):
         rows = delta_table(results)
         self.assertEqual([(r.symbol, r.delay_sec) for r in rows], [("XAUUSD", 5), ("XAUUSD", 30)])
         r5 = rows[0]
-        self.assertEqual(r5.n, 26)
+        self.assertEqual(r5.n, 21)                                    # P histórica só passa de 55% no 10º evento (5/9)
         self.assertEqual(r5.n_naive, 30)
         self.assertGreater(r5.clock_r, r5.naive_r)                    # a ingênua paga os 4 contra; o relógio os evita → Δ > 0
         self.assertIsNotNone(r5.pf_quick)
