@@ -144,3 +144,52 @@ class MT5ExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClockTradeTestTests(unittest.TestCase):
+    def _items(self, n=40, good=32, contra_first=False):
+        from gold_ai.reaction_hires import measure_hires
+        items = []
+        for k in range(n):
+            follow = (k >= (n - good)) if contra_first else (k < good)
+            moves = {0: 0.0, 20: 0.0, 60: (-0.3 if follow else 0.15), 300: (-0.8 if follow else 0.3), 1800: (-1.3 if follow else 0.2), 3600: (-1.0 if follow else 0.2)}
+            t0 = T0 + timedelta(days=k)
+            path = PricePath.from_ticks([(t + timedelta(days=k), b, a) for t, b, a in ticks(moves)])
+            usd = PricePath.from_ticks([(t + timedelta(days=k), b, a) for t, b, a in ticks({0: 0.0, 10: 0.0, 15: 1.0, 60: 1.5}, p0=104.0, spread=0.01, atr_range=0.1)])
+            rec = measure_hires(f"CPI{k}", "cpi", t0, "XAUUSD", -1.0, path, 10.0, {"USD": usd}, {"USD": +1.0})
+            items.append((rec, path, 10.0))
+        return items
+
+    def test_clock_learns_only_from_prior_events_and_exits(self):
+        from gold_ai.reaction_hires import ClockTradeTest
+        ct = ClockTradeTest(delay_sec=5, p_min=0.55, min_n=3)
+        rows = ct.run(self._items())
+        r = rows[0]
+        self.assertEqual((r.n_events, r.n_lead), (40, 40))
+        self.assertEqual(r.skipped["sem_hist"], 3)                 # os 3 primeiros não têm histórico → não opera
+        self.assertEqual(r.n_entries, 37)
+        self.assertGreater(r.net_quick, 0.2)
+        self.assertGreater(r.net_extend, r.net_quick)              # extensão captura a continuação (−1,3 aos 30 min)
+        self.assertGreater(r.cost, 0.05)
+        self.assertTrue(all(t.n_hist >= 3 for t in ct.trades))
+        self.assertTrue(all(t.p_hist <= 1.0 for t in ct.trades))
+        txt = ct.render(rows)
+        self.assertIn("PROVA", txt)
+        self.assertIn("TOTAL 37 entradas", txt)
+
+    def test_clock_refuses_when_history_says_no(self):
+        from gold_ai.reaction_hires import ClockTradeTest
+        # os 8 primeiros eventos andam CONTRA → P histórica < 55% → o relógio recusa até o histórico virar
+        ct = ClockTradeTest(delay_sec=5, p_min=0.55, min_n=3)
+        rows = ct.run(self._items(n=40, good=32, contra_first=True))
+        r = rows[0]
+        self.assertGreater(r.skipped["P_baixa"], 0)
+        self.assertLess(r.n_entries, 37)
+        # o ingênuo entra em tudo; o relógio evita as primeiras contra
+        self.assertGreater(r.net_quick, r.naive_net_quick)
+
+    def test_clock_skips_target_already_reacted(self):
+        from gold_ai.reaction_hires import ClockTradeTest
+        ct = ClockTradeTest(delay_sec=120, p_min=0.5, min_n=3)   # entra 2 min depois do líder: alvo já andou −0,3 ATR aos 60 s
+        rows = ct.run(self._items())
+        self.assertGreater(rows[0].skipped["alvo_já_reagiu"], 20)

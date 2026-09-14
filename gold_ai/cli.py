@@ -427,7 +427,7 @@ def _reaction_learn_hires(args: argparse.Namespace) -> int:
     from .history import EXTRA_TRANSMISSION, TYPICAL, load_history, rule_direction
     from .markets import get_market
     from .news_engine import TRANSMISSION
-    from .reaction_hires import LeadLagStats, PricePath, ReactionTradeSim, load_ticks, measure_hires
+    from .reaction_hires import ClockTradeTest, LeadLagStats, PricePath, ReactionTradeSim, load_ticks, measure_hires
 
     if not os.path.exists(args.events):
         print(f"banco histórico não encontrado: {args.events}")
@@ -507,6 +507,9 @@ def _reaction_learn_hires(args: argparse.Namespace) -> int:
     ll = LeadLagStats(all_recs)
     sim = ReactionTradeSim(slippage_atr=args.slippage, latency_sec=args.latency)
     txt = ll.render() + "\n\n" + sim.render(sim.table(sim_items))
+    for d in (int(x) for x in args.delays.split(",")):
+        ct = ClockTradeTest(delay_sec=d, p_min=args.p_min, slippage_atr=args.slippage, latency_sec=args.latency)
+        txt += "\n\n" + ct.render(ct.run(sim_items))
     txt += "\n\nLIMITES: manchetes GDELT (volinfo) têm published_at no fim do dia — só releases (ALFRED/TE) têm hora exata para segundos; "
     txt += "custo = ask/bid reais dos ticks (ou spread típico no M1) + slippage + latência; liquidez fora do horário e gaps não modelados."
     print(txt)
@@ -1081,6 +1084,8 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument("--lead-yield", default=None, help="learn M1/TICK: símbolo exportado do líder de juros (ex.: USTNOTE)")
     rc.add_argument("--slippage", type=float, default=0.02, help="trade sim: slippage em ATR por perna")
     rc.add_argument("--latency", type=float, default=0.5, help="trade sim: latência de execução em segundos")
+    rc.add_argument("--delays", default="5,30,120", help="prova do relógio: atrasos (s) após a reação do líder")
+    rc.add_argument("--p-min", type=float, default=0.55, help="prova do relógio: P(alvo confirma | líder) mínima no histórico anterior")
     rc.add_argument("--out", default=None)
     rc.set_defaults(func=cmd_reaction)
 

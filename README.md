@@ -148,6 +148,13 @@ Saída: movimento mediano a T+1s/5s/10s/30s/60s/300s, dois horizontes (SHORT-TER
 expectancy líquida por atraso. Só configurações 🟢 com n ≥ 20 são candidatas; uma vantagem de 5 s some se o custo for maior que o
 movimento capturado. Nada disto entra no motor de decisão antes de sobreviver a esse teste.
 
+**PROVA da cadeia** `EVENTO → LÍDER → ATRASO → REACTION CLOCK → ENTRADA → SAÍDA RÁPIDA OU EXTENSÃO` (mesmo relatório, `--delays 5,30,120`):
+os eventos são percorridos em ordem; em cada um o relógio só conhece os anteriores já concluídos. Entra se o líder reagiu, o alvo
+ainda não, o histórico do tipo tem n ≥ 3 com P(alvo confirma | líder) ≥ `--p-min` e o tempo decorrido cabe em 2× a mediana do
+movimento pleno. Saídas: QUICK (take +0,40 ATR ou 5 min, stop −0,5) · EXTEND (aos 5 min, se ≥ +0,15 ATR, trailing 0,40 até
+60 min) · FOLLOW (stop/60 min). A coluna "ingênua" entra em toda reação do líder com a mesma saída: a diferença é o valor do
+filtro temporal. Walk-forward por construção; líquido de spread, slippage e latência.
+
 ## 🗄️ BANCO HISTÓRICO DE NOTÍCIAS/EVENTOS — point-in-time para o backtest
 
 O histórico H1 gratuito não tem notícias nem calendário; por isso o backtest via menos evidência do que o `live`. O banco

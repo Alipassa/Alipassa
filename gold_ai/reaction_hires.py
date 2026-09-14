@@ -343,3 +343,196 @@ def save_candles(candles: Sequence[Candle], path: str) -> int:
         for c in candles:
             w.writerow([c.time.isoformat(), c.open, c.high, c.low, c.close, c.volume])
     return len(candles)
+
+
+# --------------------------------------------------------------------------- PROVA: EVENTO → LÍDER → ATRASO → REACTION CLOCK → ENTRADA → SAÍDA RÁPIDA OU EXTENSÃO
+QUICK_TAKE_ATR = 0.40      # saída rápida: alvo andou a confirmação a favor
+EXTEND_CONFIRM_ATR = 0.15  # aos 5 min, se já anda a favor ≥ 0,15 ATR, estende com trailing
+TRAIL_ATR = 0.40
+
+
+@dataclass
+class ClockTrade:
+    event_id: str
+    kind: str
+    target: str
+    published_at: datetime
+    entry_sec: float
+    elapsed_lead_sec: float
+    p_hist: float
+    n_hist: int
+    net_quick: float
+    net_extend: float
+    net_follow: float
+    cost: float
+
+
+@dataclass
+class ClockTestRow:
+    kind: str
+    target: str
+    n_events: int
+    n_lead: int
+    n_entries: int
+    skipped: dict[str, int]
+    naive_net_quick: float
+    net_quick: float
+    net_extend: float
+    net_follow: float
+    win_quick: float
+    win_extend: float
+    cost: float
+
+    def row(self) -> str:
+        tag = "⚪" if self.n_entries < 20 else ("🟢" if max(self.net_quick, self.net_extend, self.net_follow) > 0.02 else "🔴")
+        sk = " ".join(f"{k}:{v}" for k, v in self.skipped.items() if v)
+        return (f"{self.kind:<18}{self.target:<8}{self.n_events:>5}{self.n_lead:>5}{self.n_entries:>5}{self.naive_net_quick:>+9.3f}{self.net_quick:>+9.3f}"
+                f"{self.net_extend:>+9.3f}{self.net_follow:>+9.3f}{self.win_quick:>6.0%}{self.win_extend:>6.0%}{self.cost:>7.3f}  {tag}  {sk}")
+
+
+class ClockTradeTest:
+    """Percorre os eventos em ordem cronológica. Em cada um, o relógio só conhece os eventos anteriores já concluídos.
+    ENTRADA (T_líder + atraso + latência) exige: líder reagiu; alvo ainda não (|mov| < 0,15 ATR); histórico do tipo com
+    n ≥ MIN_N e P(alvo confirma | líder) ≥ p_min; tempo decorrido ≤ 2 × mediana do movimento pleno.
+    SAÍDA: QUICK (take +0,40 ATR ou 5 min; stop −0,5) · EXTEND (aos 5 min, se ≥ +0,15 ATR, trailing 0,40 até 60 min) · FOLLOW (stop/60 min).
+    Compara com a entrada INGÊNUA (toda reação do líder, saída em 5 min) para isolar o valor do relógio."""
+
+    def __init__(self, delay_sec: int = 5, p_min: float = 0.55, min_n: int = 3, slippage_atr: float = 0.02, latency_sec: float = 0.5) -> None:
+        self.delay_sec, self.p_min, self.min_n = delay_sec, p_min, min_n
+        self.sim = ReactionTradeSim(slippage_atr, latency_sec)
+        self.trades: list[ClockTrade] = []
+        self.skipped: dict[tuple[str, str], dict[str, int]] = {}
+        self.naive: dict[tuple[str, str], list[float]] = {}
+
+    def _exits(self, rec: HiResRecord, path: PricePath, atr: float, t_in: datetime, entry: float, sign: float) -> tuple[float, float, float]:
+        slip = self.sim.slippage_atr * atr
+        t5 = t_in + timedelta(seconds=SHORT_SEC)
+        end = rec.base.published_at + timedelta(seconds=FOLLOW_SEC)
+        stop = entry - sign * STOP_ATR * atr
+        take = entry + sign * QUICK_TAKE_ATR * atr
+
+        def px(q: Quote) -> float:
+            return (q.bid if sign > 0 else q.ask) - sign * slip
+
+        quick = None
+        for q in path.between(t_in, t5):
+            if (sign > 0 and q.bid <= stop) or (sign < 0 and q.ask >= stop):
+                quick = stop - sign * slip
+                break
+            if (sign > 0 and q.bid >= take) or (sign < 0 and q.ask <= take):
+                quick = take - sign * slip
+                break
+        q5 = path.at_or_before(t5)
+        if quick is None:
+            quick = px(q5) if q5 else entry
+        # EXTEND
+        move5 = sign * (q5.mid - entry) / atr if q5 else 0.0
+        stopped5 = any((sign > 0 and q.bid <= stop) or (sign < 0 and q.ask >= stop) for q in path.between(t_in, t5))
+        if stopped5:
+            extend = stop - sign * slip
+        elif move5 < EXTEND_CONFIRM_ATR:
+            extend = px(q5) if q5 else entry
+        else:
+            peak = max((sign * (q.mid - entry) for q in path.between(t_in, t5)), default=move5 * atr)
+            trail = max(stop, entry + sign * (peak - TRAIL_ATR * atr)) if sign > 0 else min(stop, entry + sign * (peak - TRAIL_ATR * atr))
+            extend = None
+            for q in path.between(t5, end):
+                mv = sign * (q.mid - entry)
+                if mv > peak:
+                    peak = mv
+                    trail = entry + sign * (peak - TRAIL_ATR * atr)
+                    if sign > 0:
+                        trail = max(trail, stop)
+                    else:
+                        trail = min(trail, stop)
+                if (sign > 0 and q.bid <= trail) or (sign < 0 and q.ask >= trail):
+                    extend = trail - sign * slip
+                    break
+            if extend is None:
+                qe = path.at_or_before(end)
+                extend = px(qe) if qe else entry
+        # FOLLOW
+        follow = None
+        for q in path.between(t_in, end):
+            if (sign > 0 and q.bid <= stop) or (sign < 0 and q.ask >= stop):
+                follow = stop - sign * slip
+                break
+        if follow is None:
+            qe = path.at_or_before(end)
+            follow = px(qe) if qe else entry
+        return (sign * (quick - entry) / atr, sign * (extend - entry) / atr, sign * (follow - entry) / atr)
+
+    def run(self, items: Sequence[tuple[HiResRecord, PricePath, float]]) -> list[ClockTestRow]:
+        items = sorted(items, key=lambda x: x[0].base.published_at)
+        history: dict[tuple[str, str], list[HiResRecord]] = {}
+        counts: dict[tuple[str, str], dict[str, int]] = {}
+        for rec, path, atr in items:
+            key = (rec.kind, rec.target)
+            c = counts.setdefault(key, {"eventos": 0, "líder": 0, "entradas": 0})
+            sk = self.skipped.setdefault(key, {"sem_hist": 0, "P_baixa": 0, "alvo_já_reagiu": 0, "fora_janela": 0, "sem_preço": 0})
+            c["eventos"] += 1
+            # estatística point-in-time: só eventos do mesmo tipo/alvo concluídos antes deste
+            prior = [r for r in history.get(key, []) if r.base.published_at + timedelta(seconds=FOLLOW_SEC) <= rec.base.published_at]
+            history.setdefault(key, []).append(rec)
+            if rec.lead_first_sec is None:
+                continue
+            c["líder"] += 1
+            # baseline INGÊNUA: mesma entrada e mesma saída QUICK, mas em TODA reação do líder (sem relógio)
+            t_naive = rec.base.published_at + timedelta(seconds=rec.lead_first_sec + self.delay_sec + self.sim.latency_sec)
+            q_n = path.at_or_before(t_naive)
+            if q_n is not None and q_n.time > rec.base.published_at:
+                sgn = rec.base.expected_dir
+                e_n = (q_n.ask if sgn > 0 else q_n.bid) + sgn * self.sim.slippage_atr * atr
+                self.naive.setdefault(key, []).append(self._exits(rec, path, atr, t_naive, e_n, sgn)[0])
+            with_lead = [r for r in prior if r.lead_first_sec is not None]
+            if len(with_lead) < self.min_n:
+                sk["sem_hist"] += 1
+                continue
+            p_hist = sum(1 for r in with_lead if r.base.direction_correct) / len(with_lead)
+            if p_hist < self.p_min:
+                sk["P_baixa"] += 1
+                continue
+            fulls = [r.base.time_to_full_move for r in with_lead if r.base.time_to_full_move is not None]
+            window_sec = (2 * statistics.median(fulls) * 60) if fulls else float(FOLLOW_SEC)
+            t_in = rec.base.published_at + timedelta(seconds=rec.lead_first_sec + self.delay_sec + self.sim.latency_sec)
+            elapsed = (t_in - rec.base.published_at).total_seconds()
+            if elapsed > window_sec:
+                sk["fora_janela"] += 1
+                continue
+            q_in, q0 = path.at_or_before(t_in), path.at_or_before(rec.base.published_at)
+            if q_in is None or q0 is None or q_in.time <= rec.base.published_at:
+                sk["sem_preço"] += 1
+                continue
+            sign = rec.base.expected_dir
+            if sign * (q_in.mid - q0.mid) / atr >= FIRST_ATR:
+                sk["alvo_já_reagiu"] += 1
+                continue
+            entry = (q_in.ask if sign > 0 else q_in.bid) + sign * self.sim.slippage_atr * atr
+            nq, ne, nf = self._exits(rec, path, atr, t_in, entry, sign)
+            gross_q = sign * ((path.at_or_before(t_in + timedelta(seconds=SHORT_SEC)) or q_in).mid - q_in.mid) / atr
+            self.trades.append(ClockTrade(rec.base.event_id, rec.kind, rec.target, rec.base.published_at, elapsed, rec.lead_first_sec, p_hist, len(with_lead),
+                                          nq, ne, nf, max(0.0, gross_q - nq)))
+            c["entradas"] += 1
+        rows = []
+        for key, c in sorted(counts.items(), key=lambda kv: (-kv[1]["eventos"], kv[0])):
+            tr = [t for t in self.trades if (t.kind, t.target) == key]
+            m = lambda xs: statistics.fmean(xs) if xs else 0.0  # noqa: E731
+            rows.append(ClockTestRow(key[0], key[1], c["eventos"], c["líder"], c["entradas"], self.skipped[key], m(self.naive.get(key, [])),
+                                     m([t.net_quick for t in tr]), m([t.net_extend for t in tr]), m([t.net_follow for t in tr]),
+                                     (sum(1 for t in tr if t.net_quick > 0) / len(tr)) if tr else 0.0, (sum(1 for t in tr if t.net_extend > 0) / len(tr)) if tr else 0.0,
+                                     m([t.cost for t in tr])))
+        return rows
+
+    def render(self, rows: Sequence[ClockTestRow]) -> str:
+        head = (f"{'evento':<18}{'alvo':<8}{'evts':>5}{'líd':>5}{'entr':>5}{'ingênua':>9}{'QUICK':>9}{'EXTEND':>9}{'FOLLOW':>9}{'winQ':>6}{'winE':>6}{'custo':>7}")
+        lines = [f"🧪 PROVA — EVENTO → LÍDER → ATRASO {self.delay_sec}s → REACTION CLOCK → ENTRADA → SAÍDA RÁPIDA OU EXTENSÃO (líquido em ATR, walk-forward por construção)",
+                 f"   relógio exige: líder reagiu · alvo ainda não · histórico n ≥ {self.min_n} com P(alvo|líder) ≥ {self.p_min:.0%} · dentro de 2× mediana do movimento pleno",
+                 head] + [r.row() for r in rows]
+        tr = self.trades
+        if tr:
+            tot = lambda k: sum(getattr(t, k) for t in tr)  # noqa: E731
+            lines.append(f"   TOTAL {len(tr)} entradas · QUICK {tot('net_quick'):+.2f} ATR ({tot('net_quick') / STOP_ATR:+.1f}R) · EXTEND {tot('net_extend'):+.2f} ATR "
+                         f"({tot('net_extend') / STOP_ATR:+.1f}R) · FOLLOW {tot('net_follow'):+.2f} ATR ({tot('net_follow') / STOP_ATR:+.1f}R)")
+        lines.append("   'ingênua' = toda reação do líder com a MESMA entrada e saída QUICK, sem relógio; a diferença para QUICK é o valor do filtro temporal")
+        lines.append("   ⚪ < 20 entradas inconclusivo · 🟢 líquido > 0,02 ATR · 🔴 custo consome. Colunas de descarte: sem_hist / P_baixa / alvo_já_reagiu / fora_janela")
+        return "\n".join(lines)
