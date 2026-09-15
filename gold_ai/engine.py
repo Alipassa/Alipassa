@@ -191,6 +191,10 @@ class GoldAIEngine:
             confidence=conf, trend=trend, horizon=horizon, premove=premove, reversal=reversal, systemic_risk=systemic,
             sentiment_label=sentiment_label(s.sentiment), dominant_pressure=dominant, next_event=event, technical=readings,
             conclusion="", confirmations=[], zone=zone, regime=regime,
+            news_status=str(getattr(s, "news_status", "UNKNOWN") or "UNKNOWN"), reaction_status=str(getattr(s, "reaction_status", "SEM EVENTO") or "SEM EVENTO"),
+            reaction_pressure=float(getattr(s, "reaction_pressure", 0.0) or 0.0), flow_status=str(getattr(s, "flow_status", "SEM ANOMALIA") or "SEM ANOMALIA"),
+            flow_score=int(getattr(s, "flow_score", 0) or 0), flow_origin=str(getattr(s, "flow_origin", "—") or "—"),
+            anomalous_regime=bool(getattr(s, "anomalous_regime", False)),
         )
         a.confirmations = confirmations(a, a.direction if a.direction != Direction.LATERAL else premove.direction, self.cfg)
         a.evidence_level = evidence_level(a, s)

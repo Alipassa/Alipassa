@@ -292,6 +292,14 @@ class Assessment:
     has_edge: bool = False
     chain: str = ""                # raciocínio em cadeia do evento (9 passos)
     regime: str = "INDEFINIDO"     # BULLISH | BEARISH | RANGE | VOLATILE
+    # 5.2: estados do snapshot que o nível/contexto (Edge Bank) precisam ver — copiados pelo cérebro em analyze()
+    news_status: str = "UNKNOWN"
+    reaction_status: str = "SEM EVENTO"
+    reaction_pressure: float = 0.0
+    flow_status: str = "SEM ANOMALIA"
+    flow_score: int = 0
+    flow_origin: str = "—"
+    anomalous_regime: bool = False
 
     @property
     def direction(self) -> Direction:

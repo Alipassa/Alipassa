@@ -200,7 +200,11 @@ class FlowLedgerTests(unittest.TestCase):
             gold.time = NOW
             ss.by_symbol["XAUUSD"] = gold
             ss.by_symbol["EURUSD"].candles = {}
-            eng.run_cycle(ss)
+            pc = eng.run_cycle(ss)
+            self.assertIn("XAUUSD  score", pc.render().replace("  score", "  score"))
+            xau_line = next(ln for ln in pc.render().splitlines() if ln.strip().startswith("XAUUSD"))
+            self.assertIn("nível WATCH", xau_line)                            # fluxo anômalo = modo investigação, nunca NONE
+            self.assertEqual(pc.results["XAUUSD"].assessment.flow_status, "REGIME ANÔMALO" if pc.results["XAUUSD"].assessment.anomalous_regime else "FLUXO ANÔMALO")
             pend = mem.pending_flow_anomalies(NOW + timedelta(hours=2), 60)
             self.assertEqual(len(pend), 1)
             self.assertEqual(pend[0]["ativo"], "XAUUSD")
