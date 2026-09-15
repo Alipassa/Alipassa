@@ -11429,7 +11429,7 @@ def resample_h1(candles: Sequence[Candle]) -> list[Candle]:
 
 
 @dataclass
-class LeadLagRow:
+class EpisodeRow:
     symbol: str
     atr_h1: float
     p0: float
@@ -11447,8 +11447,8 @@ class LeadLagRow:
 
 
 def lead_lag(candles_by_symbol: dict[str, Sequence[Candle]], t0: datetime, leader: str, threshold_atr: float = 0.5,
-             window_min: int = 90) -> list[LeadLagRow]:
-    rows: list[LeadLagRow] = []
+             window_min: int = 90) -> list[EpisodeRow]:
+    rows: list[EpisodeRow] = []
     for sym, cs in candles_by_symbol.items():
         cs = sorted(cs, key=lambda c: c.time)
         before = [c for c in cs if t0 - timedelta(hours=24) <= c.time < t0]
@@ -11469,7 +11469,7 @@ def lead_lag(candles_by_symbol: dict[str, Sequence[Candle]], t0: datetime, leade
             mx = max(mx, d)
             if cross is None and abs((c.close - p0) / a) >= threshold_atr:
                 cross = (c.time + timedelta(minutes=1) - t0).total_seconds() / 60.0   # barra conta no fechamento
-        rows.append(LeadLagRow(sym, a, p0, direction, cross, round(mx, 2), round(end, 2)))
+        rows.append(EpisodeRow(sym, a, p0, direction, cross, round(mx, 2), round(end, 2)))
     lead = next((r for r in rows if r.symbol == leader), None)
     if lead is not None and lead.cross_min is not None:
         for r in rows:
@@ -11478,7 +11478,7 @@ def lead_lag(candles_by_symbol: dict[str, Sequence[Candle]], t0: datetime, leade
     return rows
 
 
-def render_lead_lag(rows: Sequence[LeadLagRow], t0: datetime, leader: str, threshold_atr: float, window_min: int) -> str:
+def render_lead_lag(rows: Sequence[EpisodeRow], t0: datetime, leader: str, threshold_atr: float, window_min: int) -> str:
     lines = [f"⏱️ LEAD-LAG do episódio · t0 {t0:%Y-%m-%d %H:%M} UTC · cruzamento = |Δ| ≥ {threshold_atr:g} ATR horário · horizonte {window_min} min",
              f"  {'ativo':<8}{'dir':^4}{'cruzou em':>14}{'vs líder':>10}{'máx':>13}{'fim':>13}"]
     lines += [r.row(t0) for r in rows]
@@ -11495,7 +11495,7 @@ def render_lead_lag(rows: Sequence[LeadLagRow], t0: datetime, leader: str, thres
     return "\n".join(lines)
 
 
-def records_from_episode(rows: Sequence[LeadLagRow], t0: datetime, leader: str, window_min: int) -> list:
+def records_from_episode(rows: Sequence[EpisodeRow], t0: datetime, leader: str, window_min: int) -> list:
     """Registros de reação para a memória: evento implícito flow_<líder>_<up|down> → cada seguidor (ponto no tempo: conhecido em t0 + horizonte)."""
     lead = next((r for r in rows if r.symbol == leader), None)
     if lead is None or lead.direction == 0:
