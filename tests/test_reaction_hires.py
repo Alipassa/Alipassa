@@ -425,3 +425,48 @@ class DukascopyM1Tests(unittest.TestCase):
             rows = cli._read_candles_csv(dest)
             self.assertEqual(len(rows), 4)
             self.assertEqual([c for c in rows if c.time.day == 9 and c.time.month == 2][0].open, 9.0)
+
+
+class LeadLagEpisodeTests(unittest.TestCase):
+    """'o ouro caiu, o euro demorou, todos seguiram o ouro' — medido no M1."""
+
+    def _m1(self, t0, base, atr_h1, drop_at_min, magnitude_atr, n_before=26 * 60, n_after=90):
+        from gold_ai.models import Candle
+        import math
+        out, p = [], base
+        step = atr_h1 / math.sqrt(60) / 2.0                     # ruído pequeno; ATR horário ≈ atr_h1
+        for i in range(-n_before, n_after + 1):
+            t = t0 + timedelta(minutes=i)
+            wiggle = step * (1 if i % 2 else -1)
+            o = p
+            c = p + wiggle
+            if drop_at_min is not None and 0 <= i - drop_at_min < 10:
+                c = p - magnitude_atr * atr_h1 / 10.0             # queda distribuída em 10 min
+            hi, lo = max(o, c) + step, min(o, c) - step
+            if i < 0 and i % 60 == 0:                              # garante amplitude horária ≈ atr_h1 no passado
+                hi, lo = o + atr_h1 / 2, o - atr_h1 / 2
+            out.append(Candle(t, o, hi, lo, c, 1.0))
+            p = c
+        return out
+
+    def test_leader_and_lags_are_measured(self):
+        from gold_ai.leadlag import lead_lag, records_from_episode, render_lead_lag
+        t0 = datetime(2026, 9, 15, 14, 0, tzinfo=UTC)
+        data = {"XAUUSD": self._m1(t0, 4300.0, 10.0, 5, 1.5), "EURUSD": self._m1(t0, 1.15, 0.002, 17, 1.2),
+                "US500": self._m1(t0, 7600.0, 20.0, 9, 1.0), "USDJPY": self._m1(t0, 155.0, 0.3, None, 0.0)}
+        rows = lead_lag(data, t0, "XAUUSD", 0.5, 90)
+        order = [r.symbol for r in rows]
+        self.assertEqual(order[:3], ["XAUUSD", "US500", "EURUSD"])
+        by = {r.symbol: r for r in rows}
+        self.assertEqual(by["XAUUSD"].lag_min, 0.0)
+        self.assertGreater(by["EURUSD"].lag_min, by["US500"].lag_min)
+        self.assertTrue(all(by[s].direction == -1.0 for s in ("XAUUSD", "EURUSD", "US500")))
+        self.assertIsNone(by["USDJPY"].cross_min)
+        txt = render_lead_lag(rows, t0, "XAUUSD", 0.5, 90)
+        self.assertIn("XAUUSD cruzou primeiro", txt)
+        self.assertIn("EURUSD +", txt)
+        recs = records_from_episode(rows, t0, "XAUUSD", 90)
+        self.assertEqual({r.target for r in recs}, {"EURUSD", "US500", "USDJPY"})
+        self.assertTrue(all(r.kind == "flow_XAUUSD_down" for r in recs))
+        self.assertTrue(next(r for r in recs if r.target == "EURUSD").direction_correct)
+        self.assertIsNone(next(r for r in recs if r.target == "USDJPY").time_to_first)

@@ -18,7 +18,7 @@ VERSION = "5.0.0"
 
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "data/dukascopy", "trading", "monitor",
-         "markets", "news_engine", "reaction", "reaction_hires", "flow_anomaly", "history", "data/history_sources", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "ablation", "doctor", "lifecycle", "exit_lab", "edge_bank", "live_engine", "data/multi", "market_engine", "cli"]
+         "markets", "news_engine", "reaction", "reaction_hires", "flow_anomaly", "history", "data/history_sources", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "ablation", "doctor", "lifecycle", "exit_lab", "edge_bank", "leadlag", "live_engine", "data/multi", "market_engine", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
 """MARKET AI ENGINE 5.0 — informação explícita (news/macro) + informação IMPLÍCITA (fluxo anômalo) · reação temporal · propagação entre ativos.

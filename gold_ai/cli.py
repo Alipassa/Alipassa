@@ -768,10 +768,74 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if bad else 0
 
 
+def _reaction_leadlag(args: argparse.Namespace) -> int:
+    """quem se moveu primeiro? M1 do broker (ou dados/<SYM>_m1.csv) em torno de --at; --record grava o episódio como histórico do relógio."""
+    from .leadlag import lead_lag, records_from_episode, render_lead_lag
+    from .markets import MARKETS, get_market
+    from .telegram import load_env_file
+
+    if not args.at:
+        print("informe --at 'AAAA-MM-DD HH:MM' (hora UTC; use --tz server para hora do terminal, ou --tz -3 para hora local)")
+        return 1
+    t_raw = datetime.fromisoformat(args.at.replace(" ", "T"))
+    symbols = [x.strip().upper() for x in args.markets.split(",") if x.strip()]
+    if args.leader.upper() not in symbols:
+        symbols.insert(0, args.leader.upper())
+    env = load_env_file()
+    candles: dict = {}
+    if args.source == "mt5":
+        from .data.mt5 import MT5Client, MT5Config, MT5Error
+        from .data.multi import MultiMarketData
+        try:
+            client = MT5Client(MT5Config.from_env(env))
+            client.connect()
+        except MT5Error as e:
+            print(f"MT5 indisponível: {e} — use --source csv com dados/<SYM>_m1.csv")
+            return 1
+        off = float(client.server_offset_hours)
+        tz = args.tz.lower()
+        shift = off if tz == "server" else (0.0 if tz == "utc" else float(tz))
+        t0 = (t_raw - timedelta(hours=shift)).replace(tzinfo=timezone.utc)
+        symbol_map = MultiMarketData.symbol_map_from_env({**env, **os.environ})
+        for sym in symbols:
+            broker = symbol_map.get(sym) or (get_market(sym).mt5 if sym in MARKETS else sym)
+            try:
+                candles[sym] = client.rates_range(broker, "M1", t0 - timedelta(hours=25), t0 + timedelta(minutes=args.window + 5))
+            except MT5Error as e:
+                print(f"{sym} ({broker}): {e}")
+        client.close()
+        print(f"fuso do servidor UTC{off:+.0f}h · t0 = {t0:%Y-%m-%d %H:%M} UTC")
+    else:
+        tz = args.tz.lower()
+        shift = 0.0 if tz in ("utc", "server") else float(tz)
+        t0 = (t_raw - timedelta(hours=shift)).replace(tzinfo=timezone.utc)
+        for sym in symbols:
+            path = os.path.join(args.csv_dir or "dados", f"{sym}_m1.csv")
+            if os.path.exists(path):
+                candles[sym] = [c for c in _read_candles_csv(path) if t0 - timedelta(hours=25) <= c.time <= t0 + timedelta(minutes=args.window + 5)]
+            else:
+                print(f"{sym}: {path} não existe")
+    rows = lead_lag(candles, t0, args.leader.upper(), args.threshold, args.window)
+    if not rows:
+        print("sem M1 suficiente em torno do horário (precisa de 24 h antes e o horizonte depois)")
+        return 1
+    print(render_lead_lag(rows, t0, args.leader.upper(), args.threshold, args.window))
+    if args.record:
+        mem = PredictionMemory(args.db)
+        recs = records_from_episode(rows, t0, args.leader.upper(), args.window)
+        for rec in recs:
+            mem.save_reaction(rec)
+        mem.close()
+        print(f"{len(recs)} registro(s) gravados como {recs[0].kind if recs else '—'} (histórico do relógio; ≥ 5 casos para virar estatística)")
+    return 0
+
+
 def cmd_reaction(args: argparse.Namespace) -> int:
     """REACTION ENGINE: learn (banco histórico × preço → tempo de reação por evento e ativo) · stats (o que o live viveu) · clock (agora)."""
     from .reaction import ReactionStats
 
+    if args.action == "leadlag":
+        return _reaction_leadlag(args)
     if args.action == "learn" and args.tf.upper() == "BOTH":
         from .reaction_hires import render_stability
         outs = {}
@@ -1511,7 +1575,14 @@ def _main(argv: list[str]) -> int:
     dc.set_defaults(func=cmd_doctor)
 
     rc = sub.add_parser("reaction", help="REACTION ENGINE: learn (tempo de reação por evento/ativo no histórico) | stats (vivido) | clock (agora)")
-    rc.add_argument("action", choices=["learn", "stats", "clock"])
+    rc.add_argument("action", choices=["learn", "stats", "clock", "leadlag"])
+    rc.add_argument("--at", default=None, help="leadlag: horário do episódio, ex.: '2026-09-15 17:05'")
+    rc.add_argument("--tz", default="utc", help="leadlag: fuso do --at: utc | server (hora do terminal MT5) | -3 (hora local)")
+    rc.add_argument("--leader", default="XAUUSD", help="leadlag: líder declarado (o M1 diz quem cruzou primeiro de fato)")
+    rc.add_argument("--window", type=int, default=90, help="leadlag: horizonte em minutos após t0")
+    rc.add_argument("--threshold", type=float, default=0.5, help="leadlag: cruzamento = |Δ| ≥ limiar × ATR horário")
+    rc.add_argument("--source", choices=["mt5", "csv"], default="mt5", help="leadlag: M1 do terminal ou dados/<SYM>_m1.csv")
+    rc.add_argument("--record", action="store_true", help="leadlag: grava o episódio como flow_<líder>_<up|down> na memória do relógio")
     rc.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
     rc.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
     rc.add_argument("--start", default="2026-01-01")
