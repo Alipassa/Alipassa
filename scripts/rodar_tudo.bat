@@ -27,8 +27,8 @@ set "NOME=1/8 ALFRED - macro point-in-time"
 set "CMD=%PY% %ENGINE% history fetch-alfred --start %INICIO%"
 call :passo
 
-set "NOME=2/8 GDELT - manchetes, ate 10 min por rodada, continua de onde parou"
-set "CMD=%PY% %ENGINE% history fetch-gdelt --start %INICIO% --pace 12 --max-minutes 10"
+set "NOME=2/8 GDELT - manchetes, pula se ja cobre 80%, senao ate 10 min"
+set "CMD=%PY% %ENGINE% history fetch-gdelt --start %INICIO% --pace 12 --max-minutes 10 --skip-if-covered 0.8"
 call :passo
 
 set "NOME=3/8 MT5 ticks desde junho"

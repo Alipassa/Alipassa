@@ -11651,6 +11651,11 @@ def cmd_history(args: argparse.Namespace) -> int:
             if imp.failed:
                 print(f"séries com falha ({len(imp.failed)}): " + "; ".join(f"{sid}: {r}" for sid, r in imp.failed))
         else:
+            if args.skip_if_covered and exists:
+                cov_now = coverage(hist, start, end)
+                if cov_now.news_pct >= args.skip_if_covered:
+                    print(f"GDELT: manchetes já cobrem {cov_now.news_pct:.0%} dos dias (≥ {args.skip_if_covered:.0%}) — nada a buscar; use --skip-if-covered 0 para forçar")
+                    return 0
             topics = [t.strip() for t in args.topics.split(",")] if args.topics else None
 
             def checkpoint(partial):   # salva o parcial a cada janela: um 429 ou queda de rede não perde o que já veio
@@ -12433,6 +12438,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="volinfo (padrão): manchetes mais relevantes de CADA DIA + volume, 1 chamada/janela; artlist: as mais recentes com hora exata")
     hi.add_argument("--pace", type=float, default=8.0, help="GDELT: segundos entre chamadas (aumente se receber 429 repetidos)")
     hi.add_argument("--max-minutes", type=float, default=None, help="GDELT: orçamento de tempo; ao esgotar, salva o que veio e devolve código 2 (incompleto)")
+    hi.add_argument("--skip-if-covered", type=float, default=0.0, help="GDELT: se as manchetes já cobrirem esta fração dos dias do período, não busca (ex.: 0.8)")
     hi.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="learn: mercados cujo preço define o efeito empírico")
     hi.add_argument("--horizon", type=int, default=60, help="learn: minutos após o evento para medir a direção")
     hi.add_argument("--min-n", type=int, default=8, help="learn: amostra mínima por tipo/sinal/mercado")
