@@ -407,7 +407,13 @@ def cmd_history(args: argparse.Namespace) -> int:
                             seen.add(c.time)
                             uniq.append(c)
                     n = save_candles(uniq, os.path.join(out_dir, f"{sym}_{args.tf.lower()}.csv"))
-                    print(f"{sym} ({broker}): {n} candles {args.tf.upper()} → {out_dir}/{sym}_{args.tf.lower()}.csv")
+                    first = min((c.time for c in uniq), default=None)
+                    span = f" · de {first:%d/%m/%Y}" if first else ""
+                    print(f"{sym} ({broker}): {n} candles {args.tf.upper()}{span} → {out_dir}/{sym}_{args.tf.lower()}.csv")
+                    if first is not None and first > t0 + timedelta(days=7):
+                        print(f"  ⚠️ histórico começa em {first:%d/%m/%Y}, não em {t0:%d/%m/%Y}: o terminal limita as barras que guarda. No MT5: "
+                              "Ferramentas → Opções → Gráficos → 'Máximo de barras no gráfico' = Unlimited (ou 1 000 000), reinicie o terminal, "
+                              "abra um gráfico M1 do símbolo e repita este comando.")
             except MT5Error as e:
                 print(f"{sym} ({broker}): FALHOU — {e}")
         client.close()
