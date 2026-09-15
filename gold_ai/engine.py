@@ -226,7 +226,7 @@ class GoldAIEngine:
     def evaluate_signal(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
         sig = self.gate.evaluate(a, new_event_key)
         if sig is not None:
-            sig.text = format_signal(sig)
+            sig.text = format_signal(sig, getattr(self.cfg, "symbol", "XAUUSD"))
         return sig
 
     def _session_start(self) -> tuple[int, int]:

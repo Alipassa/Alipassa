@@ -47,14 +47,20 @@ def _zone(a: Assessment) -> list[str]:
     return lines
 
 
-def format_signal(sig: Signal) -> str:
+MARKET_LABEL = {"XAUUSD": ("GOLD", "XAU/USD"), "US500": ("US500", "S&P 500 (US500)"), "EURUSD": ("EURUSD", "EUR/USD"),
+                "USDJPY": ("USDJPY", "USD/JPY"), "WTI": ("WTI", "Petróleo WTI"), "NAS100": ("NAS100", "Nasdaq 100"), "XAGUSD": ("SILVER", "XAG/USD")}
+
+
+def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
     a = sig.assessment
     d = sig.direction
     prob = a.prob_up if d == Direction.ALTA else a.prob_down if d == Direction.BAIXA else a.prob_flat
-    price = f"Preço: {a.price:.2f}"
+    name, pair = MARKET_LABEL.get(symbol.upper(), (symbol.upper(), symbol.upper()))
+    digits = 5 if a.price < 10 else 3 if a.price < 1000 else 2
+    price = f"Preço: {a.price:.{digits}f}"
 
     if sig.type == SignalType.WATCH:
-        lines = ["⚠️ GOLD WATCH", "XAU/USD", price, "",
+        lines = [f"⚠️ {name} WATCH", pair, price, "",
                  f"Possível movimento de {'ALTA' if d == Direction.ALTA else 'BAIXA'}.", "",
                  f"Probabilidade: {_pct(prob)}", f"Confiança: {a.confidence:.0f}/100", f"Evidência: {a.evidence_level.label}",
                  f"Horizonte: {a.horizon}", "", "Fatores em observação:", *[f"• {r}" for r in sig.reasons[:4]], "",
@@ -63,7 +69,7 @@ def format_signal(sig: Signal) -> str:
 
     if sig.type == SignalType.PRE_MOVE:
         emoji = "🟢 ALTA" if d == Direction.ALTA else "🔴 BAIXA"
-        lines = [f"⚠️ GOLD PRE-MOVE — POSSÍVEL {'ALTA' if d == Direction.ALTA else 'BAIXA'}", "XAU/USD", price, "",
+        lines = [f"⚠️ {name} PRE-MOVE — POSSÍVEL {'ALTA' if d == Direction.ALTA else 'BAIXA'}", pair, price, "",
                  "A IA detectou mudança em:", *[f"• {r}" for r in sig.reasons], "",
                  "mas o preço ainda não confirmou.", "",
                  f"Probabilidade de movimento: {_pct(a.premove.probability)}", f"Direção: {emoji}",
@@ -75,7 +81,7 @@ def format_signal(sig: Signal) -> str:
 
     if sig.type == SignalType.REVERSAL:
         trend = a.reversal.current_trend.value
-        lines = ["🔄 GOLD REVERSAL ALERT", "XAU/USD", price, "",
+        lines = [f"🔄 {name} REVERSAL ALERT", pair, price, "",
                  f"Ouro está em tendência de {trend}, porém foram detectados sinais de {'distribuição' if trend == 'ALTA' else 'acumulação'}.", "",
                  "Indicadores:", *[f"• {e}" for e in a.reversal.evidence], "",
                  f"Resultado: 🔴 RISCO DE REVERSÃO ({a.reversal.risk:.0f}/100)", f"Score atual: {a.score:+.0f}", f"Horizonte: {a.horizon}"]
@@ -85,7 +91,7 @@ def format_signal(sig: Signal) -> str:
         return "\n".join(lines)
 
     if sig.type == SignalType.RISK:
-        lines = ["🚨 GOLD SYSTEMIC RISK", "XAU/USD", price, "",
+        lines = [f"🚨 {name} SYSTEMIC RISK", pair, price, "",
                  f"RISCO SISTÊMICO: {a.systemic_risk:.0f}/100", "",
                  "Sinais de stress detectados (VIX, spreads, bolsas, bancos).",
                  "Reação do ouro pode ser não-linear: liquidação inicial (venda forçada) seguida de fluxo de proteção.", "",
@@ -94,11 +100,11 @@ def format_signal(sig: Signal) -> str:
 
     buy = sig.type in (SignalType.BUY, SignalType.STRONG_BUY)
     confirmed = sig.trigger == "confirmação de movimento"
-    head = ("🟢 GOLD SIGNAL" if buy else "🔴 GOLD SIGNAL") if confirmed else ("🚨 GOLD AI ALERT" if buy else "🔴 GOLD AI ALERT")
+    head = (f"🟢 {name} SIGNAL" if buy else f"🔴 {name} SIGNAL") if confirmed else (f"🚨 {name} AI ALERT" if buy else f"🔴 {name} AI ALERT")
     bias = "🟢 COMPRA" if buy else "🔴 VENDA"
     if sig.type in (SignalType.STRONG_BUY, SignalType.STRONG_SELL):
         bias += " (FORTE)"
-    lines = [head, "XAU/USD", price, "", bias, *(["PRE-MOVE CONFIRMADO"] if confirmed else []),
+    lines = [head, pair, price, "", bias, *(["PRE-MOVE CONFIRMADO"] if confirmed else []),
              f"Score: {a.score:+.0f}", f"Probabilidade: {_pct(prob)}",
              f"Confiança: {a.confidence:.0f}/100", f"Evidência: {a.evidence_level.label}", f"Horizonte: {a.horizon}", "",
              "Motivos", *[f"• {r}" for r in sig.reasons], "",

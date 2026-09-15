@@ -232,3 +232,21 @@ class FlowLedgerTests(unittest.TestCase):
             self.assertTrue(any("ANOMALIA MEDIDA" in m for m in logs))
             self.assertIn("FLOW ANOMALY — o que aconteceu DEPOIS", eng.status_text())
             mem.close()
+
+
+class SignalLabelTests(unittest.TestCase):
+    def test_signal_text_uses_market_name_and_price_digits(self):
+        from types import SimpleNamespace
+        from gold_ai.models import Direction, SignalType
+        from gold_ai.telegram import format_signal
+        a = SimpleNamespace(prob_up=0.69, prob_down=0.2, prob_flat=0.11, price=105.7, confidence=55.0, horizon="5–30 min",
+                            evidence_level=SimpleNamespace(label="NÍVEL 3 — SINAL"), score=40.0)
+        sig = SimpleNamespace(assessment=a, direction=Direction.ALTA, type=SignalType.WATCH, reasons=["fluxo comprador"], trigger="")
+        txt = format_signal(sig, "WTI")
+        self.assertIn("WTI WATCH", txt)
+        self.assertIn("Petróleo WTI", txt)
+        self.assertIn("Preço: 105.700", txt)
+        self.assertNotIn("XAU/USD", txt)
+        self.assertIn("GOLD WATCH", format_signal(sig, "XAUUSD"))
+        a.price = 1.15422
+        self.assertIn("Preço: 1.15422", format_signal(sig, "EURUSD"))

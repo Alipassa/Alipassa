@@ -112,12 +112,16 @@ class MarketAIEngine:
             if ev is not None and sym not in self.active_flows:
                 self.active_flows[sym] = ev
                 self.log(fa.chain)
-                # 5.2 — LEDGER: registrar a anomalia (1 por episódio de 60 min) para medir 5/15/30/60 min depois
-                if not self.mem.recent_flow_anomaly(sym, now - timedelta(minutes=60)):
+                # 5.2 — LEDGER: registrar a anomalia (1 por episódio de 60 min) para medir 5/15/30/60 min depois;
+                # o mesmo episódio não é anunciado de novo após um reinício (o ledger é a memória, não o processo)
+                already = self.mem.recent_flow_anomaly(sym, now - timedelta(minutes=60))
+                if not already:
                     prev = getattr(getattr(self, "last_cycle", None), "results", {}).get(sym)
                     regime = str(getattr(getattr(prev, "assessment", None), "regime", "") or "")
                     self.mem.open_flow_anomaly(fa.ledger_record(now, snap, regime))
                 hist = f"histórico n={fa.history_n}: continuação {fa.continuation_p:.0%}" if fa.continuation_p is not None else "histórico: ainda sem 5 casos medidos"
+                if already:
+                    continue
                 self.sender.send(f"🟣 FLUXO ANÔMALO — {sym} {'↑' if fa.direction > 0 else '↓'} {fa.move_atr:+.2f} ATR · FLOW SCORE {fa.score} · origem NÃO identificada "
                                  f"(assinatura {fa.signature})\n{fa.chain.splitlines()[1] if len(fa.chain.splitlines()) > 1 else ''}\n"
                                  f"MODO INVESTIGAÇÃO (WATCH): relógio aberto nos demais mercados, procurando continuação e quem está atrasado · {hist}.")
