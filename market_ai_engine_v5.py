@@ -2091,15 +2091,27 @@ class PredictionMemory:
         r = self.conn.execute("SELECT capital FROM account ORDER BY id DESC LIMIT 1").fetchone()
         return float(r["capital"]) if r else None
 
-    def account_rows(self) -> list[tuple[datetime, float, Optional[float]]]:
+    def account_rows(self) -> list[tuple[datetime, float, Optional[float], str]]:
         out = []
-        for r in self.conn.execute("SELECT hora, capital, pnl FROM account ORDER BY id").fetchall():
+        for r in self.conn.execute("SELECT hora, capital, pnl, nota FROM account ORDER BY id").fetchall():
             try:
                 t = datetime.fromisoformat(r["hora"])
                 t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
-            out.append((t, float(r["capital"]), r["pnl"]))
+            out.append((t, float(r["capital"]), r["pnl"], r["nota"] or ""))
+
+    def neutralize_baseline_syncs(self, min_fraction: float = 0.25) -> int:
+        """Reparo de registros antigos: um 'sync broker' que muda ≥ 25% do capital num único ciclo não é resultado de operação —
+        é a diferença entre o --equity de partida e o saldo real da conta (versões anteriores gravavam isso como lucro do dia).
+        Marca como linha de base (pnl NULL) para não travar a meta diária nem a perda diária após reinício."""
+        rows = self.conn.execute("SELECT id, capital, pnl, nota FROM account WHERE nota = 'sync broker' AND pnl IS NOT NULL").fetchall()
+        ids = [r["id"] for r in rows if r["capital"] and abs(float(r["pnl"])) >= min_fraction * float(r["capital"])]
+        for i in ids:
+            self.conn.execute("UPDATE account SET pnl = NULL, nota = 'linha de base do broker (reparado)' WHERE id = ?", (i,))
+        if ids:
+            self.conn.commit()
+        return len(ids)
         return out
 
     def equity_curve(self) -> list[tuple[datetime, float]]:
@@ -8137,14 +8149,15 @@ class PerformanceEngine:
     def equity_start_of_day(self) -> float:
         return self.equity - self.daily_pnl
 
-    def restore(self, rows: list[tuple[datetime, float, Optional[float]]], now: datetime) -> None:
-        """Após reinício: reconstrói pico, resultado do dia e as travas (perda diária / meta) a partir da tabela `account`."""
+    def restore(self, rows: list, now: datetime) -> None:
+        """Após reinício: reconstrói pico, resultado do dia e as travas (perda diária / meta) a partir da tabela `account`.
+        Linhas (hora, capital, pnl[, nota]); linhas de base do broker têm pnl None e não contam."""
         if not rows:
             return
-        self.peak_equity = max(self.peak_equity, max(cap for _, cap, _ in rows))
+        self.peak_equity = max(self.peak_equity, max(r[1] for r in rows))
         self.roll_day(now)
         day = now.strftime("%Y-%m-%d")
-        self.daily_pnl = round(sum((p or 0.0) for t, _, p in rows if (t.strftime("%Y-%m-%d") if t else "") == day), 2)
+        self.daily_pnl = round(sum((r[2] or 0.0) for r in rows if (r[0].strftime("%Y-%m-%d") if r[0] else "") == day), 2)
         self.blocks(now)
 
     def sync_equity(self, broker_equity: float, t: datetime) -> None:
@@ -10690,9 +10703,11 @@ class LiveExecutionEngine:
         if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
             eq = self.executor.account_equity()
             if eq:
-                before = self.perf.equity
+                before, first = self.perf.equity, not self.perf.synced
                 self.perf.sync_equity(eq, now)
-                if abs(eq - before) > 0.005:
+                if first:
+                    self.mem.record_equity(now, eq, None, "linha de base do broker")    # capital real da conta: NÃO é resultado do dia
+                elif abs(eq - before) > 0.005:
                     self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
         # resolve previsões e operações simuladas pendentes; atualiza histórico
         for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):
@@ -11175,6 +11190,9 @@ class MarketAIEngine:
         if mem.last_equity() is None:
             mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
         else:
+            fixed = mem.neutralize_baseline_syncs()
+            if fixed:
+                log(f"[conta] {fixed} registro(s) antigo(s) de 'sync broker' reclassificados como linha de base (não eram resultado do dia)")
             self.perf.restore(mem.account_rows(), datetime.now(timezone.utc))   # reinício não apaga perda do dia, meta nem pico
         self.engines: dict[str, LiveExecutionEngine] = {}
         for sym, spec in self.specs.items():

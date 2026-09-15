@@ -343,15 +343,27 @@ class PredictionMemory:
         r = self.conn.execute("SELECT capital FROM account ORDER BY id DESC LIMIT 1").fetchone()
         return float(r["capital"]) if r else None
 
-    def account_rows(self) -> list[tuple[datetime, float, Optional[float]]]:
+    def account_rows(self) -> list[tuple[datetime, float, Optional[float], str]]:
         out = []
-        for r in self.conn.execute("SELECT hora, capital, pnl FROM account ORDER BY id").fetchall():
+        for r in self.conn.execute("SELECT hora, capital, pnl, nota FROM account ORDER BY id").fetchall():
             try:
                 t = datetime.fromisoformat(r["hora"])
                 t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
-            out.append((t, float(r["capital"]), r["pnl"]))
+            out.append((t, float(r["capital"]), r["pnl"], r["nota"] or ""))
+
+    def neutralize_baseline_syncs(self, min_fraction: float = 0.25) -> int:
+        """Reparo de registros antigos: um 'sync broker' que muda ≥ 25% do capital num único ciclo não é resultado de operação —
+        é a diferença entre o --equity de partida e o saldo real da conta (versões anteriores gravavam isso como lucro do dia).
+        Marca como linha de base (pnl NULL) para não travar a meta diária nem a perda diária após reinício."""
+        rows = self.conn.execute("SELECT id, capital, pnl, nota FROM account WHERE nota = 'sync broker' AND pnl IS NOT NULL").fetchall()
+        ids = [r["id"] for r in rows if r["capital"] and abs(float(r["pnl"])) >= min_fraction * float(r["capital"])]
+        for i in ids:
+            self.conn.execute("UPDATE account SET pnl = NULL, nota = 'linha de base do broker (reparado)' WHERE id = ?", (i,))
+        if ids:
+            self.conn.commit()
+        return len(ids)
         return out
 
     def equity_curve(self) -> list[tuple[datetime, float]]:

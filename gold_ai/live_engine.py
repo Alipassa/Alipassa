@@ -125,9 +125,11 @@ class LiveExecutionEngine:
         if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
             eq = self.executor.account_equity()
             if eq:
-                before = self.perf.equity
+                before, first = self.perf.equity, not self.perf.synced
                 self.perf.sync_equity(eq, now)
-                if abs(eq - before) > 0.005:
+                if first:
+                    self.mem.record_equity(now, eq, None, "linha de base do broker")    # capital real da conta: NÃO é resultado do dia
+                elif abs(eq - before) > 0.005:
                     self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
         # resolve previsões e operações simuladas pendentes; atualiza histórico
         for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):

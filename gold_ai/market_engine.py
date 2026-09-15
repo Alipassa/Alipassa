@@ -71,6 +71,9 @@ class MarketAIEngine:
         if mem.last_equity() is None:
             mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
         else:
+            fixed = mem.neutralize_baseline_syncs()
+            if fixed:
+                log(f"[conta] {fixed} registro(s) antigo(s) de 'sync broker' reclassificados como linha de base (não eram resultado do dia)")
             self.perf.restore(mem.account_rows(), datetime.now(timezone.utc))   # reinício não apaga perda do dia, meta nem pico
         self.engines: dict[str, LiveExecutionEngine] = {}
         for sym, spec in self.specs.items():

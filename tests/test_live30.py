@@ -382,3 +382,20 @@ class BrokerSyncBaselineTests(unittest.TestCase):
         self.assertAlmostEqual(perf.risk_usd, 1500.0)
         perf.sync_equity(50250.0, now)          # a partir da segunda leitura, a variação é resultado do dia
         self.assertEqual(perf.daily_pnl, 250.0)
+
+
+class RestoreBaselineTests(unittest.TestCase):
+    def test_legacy_baseline_sync_does_not_lock_target(self):
+        from datetime import datetime, timezone
+        from gold_ai.guard import GuardLimits, PerformanceEngine
+        from gold_ai.memory import PredictionMemory
+        mem = PredictionMemory(":memory:")
+        now = datetime(2026, 9, 15, 10, 45, tzinfo=timezone.utc)
+        mem.record_equity(now, 50000.0, 40000.0, "sync broker")          # versão antiga: diferença 10 000 → 50 000 gravada como lucro
+        mem.record_equity(now, 50120.0, 120.0, "sync broker")            # resultado real de operação
+        self.assertEqual(mem.neutralize_baseline_syncs(), 1)
+        perf = PerformanceEngine(GuardLimits(daily_target_pct=10.0), 50000.0)
+        perf.restore(mem.account_rows(), now)
+        self.assertEqual(perf.daily_pnl, 120.0)
+        self.assertFalse(perf.target_reached)
+        mem.close()

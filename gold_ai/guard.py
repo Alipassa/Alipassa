@@ -131,14 +131,15 @@ class PerformanceEngine:
     def equity_start_of_day(self) -> float:
         return self.equity - self.daily_pnl
 
-    def restore(self, rows: list[tuple[datetime, float, Optional[float]]], now: datetime) -> None:
-        """Após reinício: reconstrói pico, resultado do dia e as travas (perda diária / meta) a partir da tabela `account`."""
+    def restore(self, rows: list, now: datetime) -> None:
+        """Após reinício: reconstrói pico, resultado do dia e as travas (perda diária / meta) a partir da tabela `account`.
+        Linhas (hora, capital, pnl[, nota]); linhas de base do broker têm pnl None e não contam."""
         if not rows:
             return
-        self.peak_equity = max(self.peak_equity, max(cap for _, cap, _ in rows))
+        self.peak_equity = max(self.peak_equity, max(r[1] for r in rows))
         self.roll_day(now)
         day = now.strftime("%Y-%m-%d")
-        self.daily_pnl = round(sum((p or 0.0) for t, _, p in rows if (t.strftime("%Y-%m-%d") if t else "") == day), 2)
+        self.daily_pnl = round(sum((r[2] or 0.0) for r in rows if (r[0].strftime("%Y-%m-%d") if r[0] else "") == day), 2)
         self.blocks(now)
 
     def sync_equity(self, broker_equity: float, t: datetime) -> None:
