@@ -212,6 +212,22 @@ ao atingir +10% no dia o Risk Guard bloqueia novas entradas até o dia seguinte 
 o monitor. Sem edge, não opera — a meta não cria entradas. Com 3% por operação, +10% = +3,33R líquidos no dia (+1R = +3%).
 O painel de capital mostra a meta em USD, o % do dia e quantos R faltam.
 
+## 🧬 Ciclo de vida dos parâmetros — amostra + sequência, nunca apagar
+
+Um parâmetro (o setup de cada mercado, e qualquer regra que queira virar operacional) nasce e morre por **amostra OOS + sequência**:
+
+| amostra OOS | estado | sequência de perdas | ação |
+|---|---|---|---|
+| < 10 | 🔴 não é parâmetro | 3 seguidas | ⚠️ alerta: confiança ×0,85 no Asset Selector, parâmetro mantido |
+| 10–19 | 🟡 observação | 4 seguidas | 🟠 proteção: sem novas entradas até reavaliar |
+| 20 | 🟢 candidato | 5 seguidas | 🔴 suspensão + **revalidação** (últimos 30 · últimos 50 · total) |
+| 30 | 🟢 operacional provisório | edge positivo | ♻️ reativa (5 perdas com N=50 e +0,35R não matam o parâmetro) |
+| 50+ | 🟢 validado | expectancy ≤ 0 / PF ≤ 1 / deterioração por blocos | ⛔ quebrado → **SOMBRA**: o mercado continua avaliado em PAPER até provar edge de novo |
+| 100+ | 🟢 alta confiança | | nunca é apagado |
+
+A deterioração (expectancy por blocos de 10 caindo até ≤ 0) quebra antes de qualquer sequência. Estado por mercado no `/STATUS`
+e no `status_text`; avisos no Telegram a cada mudança. Funil: etapa `PARAMETRO`.
+
 ## 🔧 5.1 — estabilização (pente-fino: 4 revisores + auditoria do usuário)
 
 Corrigido antes de qualquer ajuste de limiar:

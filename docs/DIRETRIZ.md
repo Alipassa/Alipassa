@@ -473,3 +473,7 @@ Explícito (news/macro/Fed) + implícito (fluxo/preço/volume) → EVENT & FLOW 
 evidência; (4) assinatura C com score ≥ 70 = ANOMALOUS FLOW REGIME: o modelo normal do ativo é suspenso e entradas contra o fluxo
 são adiadas; (5) o evento implícito entra no Reaction Engine como qualquer evento: a propagação é aprendida, não assumida; (6) o
 núcleo 4.0 (risco, MT5, monitor, Telegram, OOS, walk-forward, funil, selector) permanece intacto.
+
+13. **CICLO DE VIDA DE PARÂMETROS** `[lifecycle]`: nada vira parâmetro com menos de 20 casos fora da amostra (30 operacional,
+    50 validado); 3 perdas seguidas alertam, 4 protegem, 5 suspendem e obrigam a revalidar nos últimos 30/50/total; só a
+    deterioração do edge quebra; o parâmetro quebrado vai para sombra (PAPER) e nunca é apagado.

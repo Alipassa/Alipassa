@@ -2230,6 +2230,11 @@ class PredictionMemory:
             self.conn.commit()
         return done
 
+    def results_chrono(self, symbol: str, include_shadow: bool = True) -> list[float]:
+        """R por operação fechada, em ordem de fechamento (inclui SOMBRA/PAPER quando pedido)."""
+        rows = self.conn.execute("SELECT resultado_r, modo FROM trades WHERE ativo=? AND resultado_r IS NOT NULL ORDER BY COALESCE(fechada_em, aberta_em), id", (symbol,)).fetchall()
+        return [float(r["resultado_r"]) for r in rows if include_shadow or r["modo"] != "SHADOW"]
+
     def r_stats(self, symbol: Optional[str] = None):
 
         w, args = self._where_symbol(symbol, "AND")
@@ -9312,6 +9317,7 @@ FUNNEL_STAGES: tuple[tuple[str, str], ...] = (
     ("POSICAO_ABERTA", "Posição já aberta no ativo"),
     ("CORRELACAO", "Correlação / exposição de carteira"),
     ("PRIORIDADE", "Prioridade (outro mercado foi melhor)"),
+    ("PARAMETRO", "Parâmetro em proteção/suspenso (ciclo de vida)"),
     ("AUTORIZACAO", "Aguardando autorização"),
     ("OUTROS", "Outros filtros"),
 )
@@ -9361,6 +9367,8 @@ def funnel_stage(a, sig, gate_reason: str, decision: str, cfg, raw_min_score: fl
         return True, "POSICAO_ABERTA"
     if "prioridade" in d:
         return True, "PRIORIDADE"
+    if "CICLO DE VIDA" in decision_text or "PARÂMETRO" in decision_text:
+        return True, "PARAMETRO"
     if "lote" in d or "stop" in d:
         return True, "STOP_LOTE"
     if "analisado" in d:
@@ -9394,7 +9402,7 @@ class Funnel:
     @property
     def qualified(self) -> int:
         """Passaram por todas as regras do motor (vantagem + sinal + regras de operação); só faltou carteira/prioridade/autorização."""
-        portfolio = ("KILL_SWITCH", "TRADING_STOP", "POSICAO_ABERTA", "CORRELACAO", "PRIORIDADE", "AUTORIZACAO")
+        portfolio = ("KILL_SWITCH", "TRADING_STOP", "POSICAO_ABERTA", "CORRELACAO", "PRIORIDADE", "AUTORIZACAO", "PARAMETRO")
         return self.entries + sum(v for k, v in self.drops.items() if k in portfolio)
 
     def render(self, title: str = "FUNIL DE ENTRADA") -> str:
@@ -9568,6 +9576,7 @@ class AssetSelector:
             comp["reaction"] = self.reaction_edge[key] if latent else 0.5
             raw = raw * (1.0 - self.REACTION_WEIGHT) + comp["reaction"] * self.REACTION_WEIGHT * 100.0
         c.components = {k: round(v, 3) for k, v in comp.items()}
+        raw *= getattr(c, "lifecycle_multiplier", 1.0)      # ALERTA (3 perdas seguidas) reduz confiança, não quebra o parâmetro
         c.opportunity_score = round(raw * (0.5 + 0.5 * c.decay), 1)
         c.status = "🟢" if c.opportunity_score >= 60 else "🟡" if c.opportunity_score >= 45 else "🟠"
         return c
@@ -10418,6 +10427,148 @@ def run_doctor(env: dict, db_path: str = "gold_ai.db", events_path: str = os.pat
 
 
 # ============================================================================
+# LIFECYCLE
+# ============================================================================
+
+"""CICLO DE VIDA DE PARÂMETROS — governança estatística (MARKET AI 5.1).
+
+Um parâmetro (aqui: o "setup" de cada mercado, e qualquer regra que queira virar operacional) nasce e morre por AMOSTRA + SEQUÊNCIA,
+nunca por uma sequência isolada:
+
+  amostra OOS   < 10 → 🔴 não vira parâmetro · 10–19 → 🟡 observação · 20 → 🟢 candidato · 30 → operacional provisório
+                50+ → validado · 100+ → alta confiança
+  sequência     3 perdas → ⚠️ alerta (reduz confiança) · 4 → 🟠 proteção (sem novas entradas até reavaliar) · 5 → 🔴 suspensão + revalidação
+  revalidação   últimos 30 + últimos 50 + total: edge continua positivo (expectancy > 0, PF > 1, sem deterioração)? SIM → reativa;
+                NÃO → QUEBRADO: fica em SOMBRA (continua avaliado em PAPER) até provar edge de novo. NUNCA é apagado.
+  deterioração  expectancy em janelas sucessivas caindo até ≤ 0 é evidência mais forte que 5 perdas seguidas.
+"""
+
+
+
+TIERS = ((100, "alta confiança"), (50, "validado"), (30, "operacional"), (20, "candidato"), (10, "observação"))
+ALERT_STREAK, PROTECT_STREAK, SUSPEND_STREAK = 3, 4, 5
+
+
+def tier(n: int) -> str:
+    for k, label in TIERS:
+        if n >= k:
+            return label
+    return "sem amostra"
+
+
+def tier_icon(n: int) -> str:
+    return "🟢" if n >= 20 else "🟡" if n >= 10 else "🔴"
+
+
+def profit_factor(xs: Sequence[float]) -> Optional[float]:
+    wins, losses = sum(x for x in xs if x > 0), -sum(x for x in xs if x < 0)
+    if not xs:
+        return None
+    return (wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
+
+
+def consecutive_losses(xs: Sequence[float]) -> int:
+    k = 0
+    for x in reversed(xs):
+        if x < 0:
+            k += 1
+        else:
+            break
+    return k
+
+
+@dataclass
+class Window:
+    label: str
+    n: int
+    expectancy: float
+    pf: Optional[float]
+    win_rate: float
+
+    @property
+    def positive(self) -> bool:
+        return self.n > 0 and self.expectancy > 0 and (self.pf or 0.0) > 1.0
+
+
+@dataclass
+class ParameterState:
+    name: str
+    n: int
+    tier: str
+    streak: int
+    action: str                     # NORMAL | ALERTA | PROTEÇÃO | SUSPENSO | QUEBRADO | REATIVADO
+    windows: list[Window] = field(default_factory=list)
+    deteriorating: bool = False
+    trend: list[float] = field(default_factory=list)      # expectancy por bloco de 10 (do mais antigo ao mais recente)
+    note: str = ""
+
+    @property
+    def allows_entries(self) -> bool:
+        return self.action in ("NORMAL", "ALERTA", "REATIVADO")
+
+    @property
+    def operational(self) -> bool:
+        """Parâmetro com amostra suficiente para operar dinheiro (≥ 30 OOS) — abaixo disso é candidato/observação."""
+        return self.n >= 30
+
+    @property
+    def confidence_multiplier(self) -> float:
+        return 0.85 if self.action == "ALERTA" else 1.0
+
+    def render(self) -> str:
+        icon = {"NORMAL": "🟢", "ALERTA": "⚠️", "PROTEÇÃO": "🟠", "SUSPENSO": "🔴", "QUEBRADO": "⛔", "REATIVADO": "♻️"}[self.action]
+        w = " · ".join(f"{x.label} n={x.n} {x.expectancy:+.2f}R PF {('∞' if x.pf == float('inf') else f'{x.pf:.2f}') if x.pf is not None else 'n/d'}" for x in self.windows)
+        tr = " → ".join(f"{v:+.2f}" for v in self.trend[-5:]) if self.trend else "—"
+        return (f"{icon} {self.name:<7} {self.action:<10} amostra {self.n} ({tier_icon(self.n)} {self.tier}) · sequência de perdas {self.streak} · {w} · "
+                f"tendência {tr}" + (" · DETERIORAÇÃO" if self.deteriorating else "") + (f" · {self.note}" if self.note else ""))
+
+
+def _window(label: str, xs: Sequence[float]) -> Window:
+    return Window(label, len(xs), statistics.fmean(xs) if xs else 0.0, profit_factor(xs), (sum(1 for x in xs if x > 0) / len(xs)) if xs else 0.0)
+
+
+def evaluate(name: str, results: Sequence[float], previous_action: str = "NORMAL") -> ParameterState:
+    """`results`: R por operação FECHADA, em ordem cronológica (fora da amostra por construção no live).
+    `previous_action`: estado anterior (SUSPENSO/QUEBRADO persistem até a revalidação passar)."""
+    xs = list(results)
+    n = len(xs)
+    windows = [_window("últimos 30", xs[-30:]), _window("últimos 50", xs[-50:]), _window("total", xs)]
+    blocks = [statistics.fmean(xs[i:i + 10]) for i in range(0, n - n % 10, 10)] if n >= 20 else []
+    deteriorating = len(blocks) >= 3 and blocks[-1] <= 0 and blocks[-2] < blocks[-3]
+    streak = consecutive_losses(xs)
+    edge_ok = all(w.positive for w in windows if w.n >= 10) and not deteriorating and any(w.n >= 10 for w in windows)
+    if n < 10:
+        action, note = "NORMAL", "amostra < 10: ainda não é parâmetro (opera em PAPER/observação)"
+    elif previous_action in ("SUSPENSO", "QUEBRADO"):
+        # revalidação: só reativa se o edge continua positivo nas janelas
+        if edge_ok and streak < SUSPEND_STREAK:
+            action, note = "REATIVADO", "revalidação: edge positivo nos últimos 30/50/total → reativado"
+        else:
+            action, note = "QUEBRADO", "revalidação negativa: continua em SOMBRA (PAPER) até provar edge de novo — nunca apagado"
+    elif deteriorating:
+        action, note = "QUEBRADO", f"deterioração: expectancy por blocos {' → '.join(f'{b:+.2f}' for b in blocks[-3:])} — sombra (PAPER) até revalidar"
+    elif streak >= SUSPEND_STREAK:
+        # 5 perdas: suspende e revalida imediatamente pela amostra — sequência normal não mata parâmetro com edge
+        action, note = ("REATIVADO", f"{streak} perdas seguidas, mas edge positivo nos últimos 30/50/total → mantido (revalidado)") if edge_ok else \
+                       ("SUSPENSO", f"{streak} perdas seguidas e edge não confirmado → suspenso; revalidação a cada ciclo")
+    elif streak >= PROTECT_STREAK:
+        action, note = "PROTEÇÃO", f"{streak} perdas seguidas: sem novas entradas até a próxima reavaliação"
+    elif streak >= ALERT_STREAK:
+        action, note = "ALERTA", f"{streak} perdas seguidas: confiança reduzida (×0,85), parâmetro mantido"
+    else:
+        action, note = "NORMAL", ""
+    return ParameterState(name, n, tier(n), streak, action, windows, deteriorating, blocks, note)
+
+
+def render_table(states: Sequence[ParameterState]) -> str:
+    lines = ["🧬 CICLO DE VIDA DOS PARÂMETROS — amostra OOS + sequência (nunca apaga; suspende e revalida)"]
+    lines += ["  " + s.render() for s in states]
+    lines.append("  níveis: <10 não é parâmetro · 10–19 observação · 20 candidato · 30 operacional · 50 validado · 100 alta confiança")
+    lines.append("  sequência: 3 alerta · 4 proteção · 5 suspensão + revalidação (últimos 30 / 50 / total); deterioração por blocos quebra antes")
+    return "\n".join(lines)
+
+
+# ============================================================================
 # LIVE_ENGINE
 # ============================================================================
 
@@ -11186,13 +11337,30 @@ class MarketAIEngine:
 
     # ------------------------------------------------------------------ histórico por mercado
     def refresh_history(self) -> None:
+        if not hasattr(self, "lifecycle"):
+            self.lifecycle = {}
+            self._real_mode = {sym: eng.mode for sym, eng in self.engines.items()}
         for sym in self.specs:
             rs = self.mem.r_stats(sym)
-            results = []
-            for row in self.mem.conn.execute("SELECT resultado_r FROM trades WHERE ativo=? AND resultado_r IS NOT NULL", (sym,)).fetchall():
-                results.append(row["resultado_r"])
+            results = self.mem.results_chrono(sym)
             self.history[sym] = statistical_confidence(results)
             self.engines[sym].mpe.history = self.engines[sym].monitor.history = rs
+            # CICLO DE VIDA: estado por mercado (amostra OOS + sequência); SOMBRA = motor do mercado cai para PAPER até revalidar
+            prev = self.lifecycle[sym].action if sym in self.lifecycle else "NORMAL"
+            st = lifecycle_evaluate(sym, results, prev)
+            changed = sym in self.lifecycle and st.action != prev
+            self.lifecycle[sym] = st
+            eng = self.engines[sym]
+            real_mode = self._real_mode.get(sym, eng.mode)
+            if st.action == "QUEBRADO" and real_mode != TradingMode.PAPER:
+                if eng.mode != TradingMode.PAPER:
+                    eng.mode = TradingMode.PAPER
+                    self.sender.send(f"⛔ {sym}: parâmetro QUEBRADO — {st.note}. Mercado segue em SOMBRA (PAPER) até revalidar.")
+            elif eng.mode == TradingMode.PAPER and real_mode != TradingMode.PAPER and st.action in ("REATIVADO", "NORMAL"):
+                eng.mode = real_mode
+                self.sender.send(f"♻️ {sym}: parâmetro revalidado — volta ao modo {real_mode.value}.")
+            if changed and st.action in ("ALERTA", "PROTEÇÃO", "SUSPENSO", "REATIVADO"):
+                self.sender.send({"ALERTA": "⚠️", "PROTEÇÃO": "🟠", "SUSPENSO": "🔴", "REATIVADO": "♻️"}[st.action] + f" {sym}: {st.note}")
 
     def open_exposures(self) -> list[OpenExposure]:
         out = []
@@ -11229,7 +11397,10 @@ class MarketAIEngine:
             if a is None or sig is None or sig.type not in LiveExecutionEngine.EXECUTABLE or sig.direction == Direction.LATERAL or not a.has_edge:
                 continue
             opp = self.mem.opportunity_report(symbol=sym)
-            cands.append(Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0)))
+            c = Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0))
+            lc = getattr(self, "lifecycle", {}).get(sym)
+            c.lifecycle_multiplier = lc.confidence_multiplier if lc is not None else 1.0
+            cands.append(c)
         for sym in self.specs:
             if sym not in {c.spec.symbol for c in cands}:
                 self.selector.forget(sym)
@@ -11244,6 +11415,10 @@ class MarketAIEngine:
                 self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — {pc.chosen} foi a melhor oportunidade do ciclo (OPP {pc.ranked[0].opportunity_score:.1f} vs {c.opportunity_score:.1f})")
                 continue
             snap_c = snaps.by_symbol[sym]
+            lc = getattr(self, "lifecycle", {}).get(sym)
+            if lc is not None and not lc.allows_entries and lc.action != "QUEBRADO":
+                self.engines[sym].enter(r, snap_c, veto=f"CICLO DE VIDA — {sym} em {lc.action}: {lc.note}")
+                continue
             if snap_c.anomalous_regime and snap_c.flow_direction != 0 and ((c.direction == Direction.ALTA) != (snap_c.flow_direction > 0)):
                 self.engines[sym].enter(r, snap_c, veto=f"REGIME ANÔMALO em {sym} — entrada contra o fluxo anômalo adiada (FLOW {snap_c.flow_score})")
                 continue
@@ -11286,6 +11461,8 @@ class MarketAIEngine:
                  self.portfolio.render(self.open_exposures(), self.perf.equity), "Histórico por mercado:"]
         for sym, h in self.history.items():
             lines.append(f"  {sym:<7} {h.render()}")
+        if getattr(self, "lifecycle", None):
+            lines.append(render_table(list(self.lifecycle.values())))
         return "\n".join(lines)
 
 

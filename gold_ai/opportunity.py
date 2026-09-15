@@ -190,6 +190,7 @@ FUNNEL_STAGES: tuple[tuple[str, str], ...] = (
     ("POSICAO_ABERTA", "Posição já aberta no ativo"),
     ("CORRELACAO", "Correlação / exposição de carteira"),
     ("PRIORIDADE", "Prioridade (outro mercado foi melhor)"),
+    ("PARAMETRO", "Parâmetro em proteção/suspenso (ciclo de vida)"),
     ("AUTORIZACAO", "Aguardando autorização"),
     ("OUTROS", "Outros filtros"),
 )
@@ -240,6 +241,8 @@ def funnel_stage(a, sig, gate_reason: str, decision: str, cfg, raw_min_score: fl
         return True, "POSICAO_ABERTA"
     if "prioridade" in d:
         return True, "PRIORIDADE"
+    if "CICLO DE VIDA" in decision_text or "PARÂMETRO" in decision_text:
+        return True, "PARAMETRO"
     if "lote" in d or "stop" in d:
         return True, "STOP_LOTE"
     if "analisado" in d:
@@ -273,7 +276,7 @@ class Funnel:
     @property
     def qualified(self) -> int:
         """Passaram por todas as regras do motor (vantagem + sinal + regras de operação); só faltou carteira/prioridade/autorização."""
-        portfolio = ("KILL_SWITCH", "TRADING_STOP", "POSICAO_ABERTA", "CORRELACAO", "PRIORIDADE", "AUTORIZACAO")
+        portfolio = ("KILL_SWITCH", "TRADING_STOP", "POSICAO_ABERTA", "CORRELACAO", "PRIORIDADE", "AUTORIZACAO", "PARAMETRO")
         return self.entries + sum(v for k, v in self.drops.items() if k in portfolio)
 
     def render(self, title: str = "FUNIL DE ENTRADA") -> str:

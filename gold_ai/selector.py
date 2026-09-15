@@ -157,6 +157,7 @@ class AssetSelector:
             comp["reaction"] = self.reaction_edge[key] if latent else 0.5
             raw = raw * (1.0 - self.REACTION_WEIGHT) + comp["reaction"] * self.REACTION_WEIGHT * 100.0
         c.components = {k: round(v, 3) for k, v in comp.items()}
+        raw *= getattr(c, "lifecycle_multiplier", 1.0)      # ALERTA (3 perdas seguidas) reduz confiança, não quebra o parâmetro
         c.opportunity_score = round(raw * (0.5 + 0.5 * c.decay), 1)
         c.status = "🟢" if c.opportunity_score >= 60 else "🟡" if c.opportunity_score >= 45 else "🟠"
         return c

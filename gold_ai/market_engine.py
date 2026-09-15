@@ -244,13 +244,31 @@ class MarketAIEngine:
 
     # ------------------------------------------------------------------ histórico por mercado
     def refresh_history(self) -> None:
+        from .lifecycle import evaluate as lifecycle_evaluate
+        if not hasattr(self, "lifecycle"):
+            self.lifecycle = {}
+            self._real_mode = {sym: eng.mode for sym, eng in self.engines.items()}
         for sym in self.specs:
             rs = self.mem.r_stats(sym)
-            results = []
-            for row in self.mem.conn.execute("SELECT resultado_r FROM trades WHERE ativo=? AND resultado_r IS NOT NULL", (sym,)).fetchall():
-                results.append(row["resultado_r"])
+            results = self.mem.results_chrono(sym)
             self.history[sym] = statistical_confidence(results)
             self.engines[sym].mpe.history = self.engines[sym].monitor.history = rs
+            # CICLO DE VIDA: estado por mercado (amostra OOS + sequência); SOMBRA = motor do mercado cai para PAPER até revalidar
+            prev = self.lifecycle[sym].action if sym in self.lifecycle else "NORMAL"
+            st = lifecycle_evaluate(sym, results, prev)
+            changed = sym in self.lifecycle and st.action != prev
+            self.lifecycle[sym] = st
+            eng = self.engines[sym]
+            real_mode = self._real_mode.get(sym, eng.mode)
+            if st.action == "QUEBRADO" and real_mode != TradingMode.PAPER:
+                if eng.mode != TradingMode.PAPER:
+                    eng.mode = TradingMode.PAPER
+                    self.sender.send(f"⛔ {sym}: parâmetro QUEBRADO — {st.note}. Mercado segue em SOMBRA (PAPER) até revalidar.")
+            elif eng.mode == TradingMode.PAPER and real_mode != TradingMode.PAPER and st.action in ("REATIVADO", "NORMAL"):
+                eng.mode = real_mode
+                self.sender.send(f"♻️ {sym}: parâmetro revalidado — volta ao modo {real_mode.value}.")
+            if changed and st.action in ("ALERTA", "PROTEÇÃO", "SUSPENSO", "REATIVADO"):
+                self.sender.send({"ALERTA": "⚠️", "PROTEÇÃO": "🟠", "SUSPENSO": "🔴", "REATIVADO": "♻️"}[st.action] + f" {sym}: {st.note}")
 
     def open_exposures(self) -> list[OpenExposure]:
         out = []
@@ -287,7 +305,10 @@ class MarketAIEngine:
             if a is None or sig is None or sig.type not in LiveExecutionEngine.EXECUTABLE or sig.direction == Direction.LATERAL or not a.has_edge:
                 continue
             opp = self.mem.opportunity_report(symbol=sym)
-            cands.append(Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0)))
+            c = Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0))
+            lc = getattr(self, "lifecycle", {}).get(sym)
+            c.lifecycle_multiplier = lc.confidence_multiplier if lc is not None else 1.0
+            cands.append(c)
         for sym in self.specs:
             if sym not in {c.spec.symbol for c in cands}:
                 self.selector.forget(sym)
@@ -302,6 +323,10 @@ class MarketAIEngine:
                 self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — {pc.chosen} foi a melhor oportunidade do ciclo (OPP {pc.ranked[0].opportunity_score:.1f} vs {c.opportunity_score:.1f})")
                 continue
             snap_c = snaps.by_symbol[sym]
+            lc = getattr(self, "lifecycle", {}).get(sym)
+            if lc is not None and not lc.allows_entries and lc.action != "QUEBRADO":
+                self.engines[sym].enter(r, snap_c, veto=f"CICLO DE VIDA — {sym} em {lc.action}: {lc.note}")
+                continue
             if snap_c.anomalous_regime and snap_c.flow_direction != 0 and ((c.direction == Direction.ALTA) != (snap_c.flow_direction > 0)):
                 self.engines[sym].enter(r, snap_c, veto=f"REGIME ANÔMALO em {sym} — entrada contra o fluxo anômalo adiada (FLOW {snap_c.flow_score})")
                 continue
@@ -345,4 +370,7 @@ class MarketAIEngine:
                  self.portfolio.render(self.open_exposures(), self.perf.equity), "Histórico por mercado:"]
         for sym, h in self.history.items():
             lines.append(f"  {sym:<7} {h.render()}")
+        if getattr(self, "lifecycle", None):
+            from .lifecycle import render_table
+            lines.append(render_table(list(self.lifecycle.values())))
         return "\n".join(lines)

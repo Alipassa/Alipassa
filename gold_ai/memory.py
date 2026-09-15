@@ -489,6 +489,11 @@ class PredictionMemory:
             self.conn.commit()
         return done
 
+    def results_chrono(self, symbol: str, include_shadow: bool = True) -> list[float]:
+        """R por operação fechada, em ordem de fechamento (inclui SOMBRA/PAPER quando pedido)."""
+        rows = self.conn.execute("SELECT resultado_r, modo FROM trades WHERE ativo=? AND resultado_r IS NOT NULL ORDER BY COALESCE(fechada_em, aberta_em), id", (symbol,)).fetchall()
+        return [float(r["resultado_r"]) for r in rows if include_shadow or r["modo"] != "SHADOW"]
+
     def r_stats(self, symbol: Optional[str] = None):
         from .trading import ExcursionProfile, r_stats
 
