@@ -63,6 +63,8 @@ class HttpClient:
                 if e.code == 429:   # limite de requisições: repetir em segundos só prolonga o bloqueio — quem decide a espera é o chamador
                     retry_after = e.headers.get("Retry-After") if e.headers else None
                     raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests" + (f" (Retry-After {retry_after}s)" if retry_after else "")) from e
+                if 400 <= e.code < 500:      # erro do pedido (chave, parâmetro, 404): repetir não muda nada
+                    raise DataError(f"falha ao buscar {url}: {e}") from e
                 last = e
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
             except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
@@ -97,6 +99,8 @@ class HttpClient:
                     return b""
                 if e.code == 429:
                     raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests") from e
+                if 400 <= e.code < 500:
+                    raise DataError(f"falha ao buscar {url}: {e}") from e
                 last = e
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
             except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede

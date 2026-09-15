@@ -50,6 +50,13 @@ class LiveExecutionEngine:
         from .markets import get_market
         self.spec = spec or get_market("XAUUSD")
         self.symbol = self.spec.symbol
+        from .markets import default_symbol_spec
+        self.symbol_spec = default_symbol_spec(self.symbol)          # substituída pela do broker (symbol_info) quando há executor
+        if executor is not None and hasattr(executor, "spec"):
+            try:
+                self.symbol_spec = executor.spec
+            except Exception:  # noqa: BLE001
+                pass
         self.entry_gate = entry_gate
         self.mem, self.limits, self.mode = mem, limits, mode
         self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
@@ -85,7 +92,7 @@ class LiveExecutionEngine:
         return format_status(self.perf, self.ks, self.managed, self.mode.value)
 
     # ------------------------------------------------------------------ comandos
-    def handle_commands(self, res: CycleResult, now: datetime) -> None:
+    def handle_commands(self, res: CycleResult, now: datetime, price_hint: Optional[float] = None) -> None:
         if self.commands is None:
             return
         for action in self.commands.apply(self.commands.poll(), self.ks):
@@ -98,15 +105,18 @@ class LiveExecutionEngine:
             elif action == "CLOSE_REQUESTED":
                 self._send(f"⚠️ /CLOSE solicitado para {len(self.managed)} posição(ões). Responda /CLOSE CONFIRM para encerrar.", res)
             elif action == "CLOSE_CONFIRMED":
-                for tr in list(self.managed):
-                    self._close_trade(tr, tr.r_at(tr.plan.entry), "MANUAL", now, res, price_hint=None)
+                self.close_all(now, res, price_hint)
                 self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
+
+    def close_all(self, now: datetime, res: CycleResult, price_hint: Optional[float] = None) -> None:
+        for tr in list(self.managed):
+            self._close_trade(tr, tr.r_at(price_hint if price_hint is not None else tr.plan.entry), "MANUAL", now, res, price_hint=price_hint)
 
     # ------------------------------------------------------------------ ciclo
     def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None, defer_entry: bool = False) -> CycleResult:
         res = CycleResult(None, None)
         now = snap.time
-        self.handle_commands(res, now)
+        self.handle_commands(res, now, snap.price)
         if not snap.candles:
             res.notes.append("sem candles XAU — ciclo abortado")
             return res
@@ -178,10 +188,10 @@ class LiveExecutionEngine:
         if self.executor is not None:
             try:
                 bid, ask = self.executor.client.tick()
-                spread = round(ask - bid, 2)
+                spread = round(ask - bid, self.executor.digits())
             except Exception:  # noqa: BLE001
                 spread = None
-        reasons = no_trade_check(a, self.limits, spread)
+        reasons = no_trade_check(a, self.limits, spread, max_spread=self.symbol_spec.max_spread or None)
         if reasons:
             return "🟡 NÃO OPERAR — " + "; ".join(reasons)
         # uma posição por ativo (memória + broker)
@@ -191,7 +201,15 @@ class LiveExecutionEngine:
         res.plan = plan
         if not plan.viable:
             return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
-        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value, self.spec.point_value_usd)   # capital + risco + stop + contrato
+        # capital + risco + stop + contrato: valor do ponto e passo/mínimo de lote do BROKER quando conectado (USDJPY/CFDs dinâmicos)
+        ss = self.symbol_spec
+        pv = ss.point_value_usd if ss.source == "mt5" and ss.point_value_usd > 0 else self.spec.point_value_usd
+        lim = self.limits
+        if ss.source == "mt5":
+            import copy as _copy
+            lim = _copy.copy(self.limits)
+            lim.min_lot, lim.lot_step, lim.max_lot = ss.volume_min, ss.volume_step, min(self.limits.max_lot, ss.volume_max)
+        plan.lots, plan.risk_usd = size_lots(lim, self.perf.risk_usd, plan.r_value, pv)
         if not plan.lots:
             return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
         if self.entry_gate is not None:
@@ -214,8 +232,12 @@ class LiveExecutionEngine:
             if execution.mismatches:
                 self._send("⚠️ " + execution.render(), res)
                 if any(m.startswith("SL real") for m in execution.mismatches):
-                    self.executor.close(execution.ticket)
-                    return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
+                    ok_close, _ = self.executor.close(execution.ticket)
+                    if ok_close:
+                        return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
+                    self._send(f"🚨 {self.symbol}: SL divergente E o broker recusou fechar #{execution.ticket} — posição REAL assumida pelo monitor com o SL real", res)
+                    if execution.real_sl:
+                        plan.stop = execution.real_sl
             self.authorized = False
         tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon, symbol=self.symbol)
         thesis = Thesis.from_assessment(a, plan.direction)
@@ -251,7 +273,12 @@ class LiveExecutionEngine:
             return
         if from_path:
             if tr.status == "CLOSED" and ticket and self.executor is not None and self.executor.position(ticket) is not None:
-                self.executor.close(ticket)                    # stop lógico tocado antes de sincronizar com o broker
+                ok, price = self.executor.close(ticket)        # stop lógico tocado antes de sincronizar com o broker
+                if not ok:
+                    self._revert_close(tr, before, res, "stop lógico")
+                    return
+                if price is not None:
+                    tr.result_r = round(tr.realized_r + before[0] * tr.r_at(price), 3)
             elif tr.status == "OPEN" and ticket and self.executor is not None and abs(tr.stop_r - before[1]) > 1e-9:
                 self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
         else:
@@ -287,25 +314,46 @@ class LiveExecutionEngine:
                 reading.action, reading.note = "PROTEGER", reading.note + " (aguardando confirmação para encerrar)"
                 return
             ok, price = self.executor.close(ticket)
-            if ok and price is not None:
-                tr.result_r = round(tr.realized_r + (remaining_before) * tr.r_at(price), 3) if tr.result_r is None else tr.result_r
+            if not ok:
+                self._revert_close(tr, before, res, reading.note or "ENCERRAR")
+                reading.action, reading.note = "MANTER", (reading.note + " (broker recusou o fechamento — nova tentativa no próximo ciclo)")
+                return
+            if price is not None:
+                tr.result_r = round(tr.realized_r + remaining_before * tr.r_at(price), 3)   # preço REAL de saída
             return
         if tr.remaining < remaining_before:  # parcial (PROTEGER/REDUZIR)
             pos = self.executor.position(ticket)
+            sent = False
             if pos is not None:
                 vol = round(pos.volume * (1 - tr.remaining / remaining_before), 2)
                 vol = max(self.limits.min_lot, vol)
                 if vol < pos.volume:
-                    self.executor.close(ticket, vol, "GoldAI partial")
+                    sent, _ = self.executor.close(ticket, vol, "GoldAI partial")
+            if not sent:   # lote mínimo / recusa: desfaz a parcial local para a contabilidade seguir o broker
+                credited = tr.realized_r
+                tr.realized_r = round(tr.realized_r - (remaining_before - tr.remaining) * reading.current_r, 3) if credited else 0.0
+                tr.remaining = remaining_before
+                reading.note = reading.note + " (parcial não executada no broker: lote mínimo/recusa)"
         if abs(tr.stop_r - stop_before) > 1e-9:
             self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
+
+    def _revert_close(self, tr: ManagedTrade, before: tuple, res: CycleResult, why: str) -> None:
+        """O broker recusou fechar: a posição REAL continua aberta, logo a local também (nunca órfã). Tenta de novo no próximo ciclo."""
+        tr.status, tr.close_reason, tr.result_r, tr.closed_at = "OPEN", "", None, None
+        tr.remaining = before[0]
+        self._send(f"⚠️ #{tr.trade_id:05d} {self.symbol}: broker RECUSOU o fechamento ({why}); posição mantida sob monitor, nova tentativa no próximo ciclo", res)
 
     def _close_trade(self, tr: ManagedTrade, r_exit: float, reason: str, now: datetime, res: CycleResult, price_hint: Optional[float]) -> None:
         ticket = self.tickets.get(tr.trade_id)
         if ticket and self.executor is not None:
             ok, price = self.executor.close(ticket)
-            if ok and price is not None:
+            if not ok:
+                self._send(f"⚠️ #{tr.trade_id:05d} {self.symbol}: broker recusou o fechamento manual; posição continua aberta", res)
+                return
+            if price is not None:
                 r_exit = tr.r_at(price)
+        elif price_hint is not None:
+            r_exit = tr.r_at(price_hint)
         tr.close(r_exit, reason, now)
         self._finalize(tr, now, res)
 
@@ -319,8 +367,11 @@ class LiveExecutionEngine:
         lead = next((h.time for h in tr.history if h.current_r >= 1.0), None)
         lead_min = (lead - tr.plan.time).total_seconds() / 60 if lead else None
         self.mem.save_financial_result(tr.trade_id, pnl, round(minutes, 1), lead_min)
-        self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
-        self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
+        if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
+            self.mem.record_equity(now, self.perf.equity, None, f"trade #{tr.trade_id} {tr.close_reason} (capital do broker via sync)")   # sync_equity já contabilizou
+        else:
+            self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
+            self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
         self.log(render_evolution(tr))
         self.log(self.perf.render())
         if tr.close_reason in ("TESE INVALIDADA", "EXIT SCORE"):

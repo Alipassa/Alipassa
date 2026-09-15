@@ -343,6 +343,17 @@ class PredictionMemory:
         r = self.conn.execute("SELECT capital FROM account ORDER BY id DESC LIMIT 1").fetchone()
         return float(r["capital"]) if r else None
 
+    def account_rows(self) -> list[tuple[datetime, float, Optional[float]]]:
+        out = []
+        for r in self.conn.execute("SELECT hora, capital, pnl FROM account ORDER BY id").fetchall():
+            try:
+                t = datetime.fromisoformat(r["hora"])
+                t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            out.append((t, float(r["capital"]), r["pnl"]))
+        return out
+
     def equity_curve(self) -> list[tuple[datetime, float]]:
         return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
 

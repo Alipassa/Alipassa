@@ -158,7 +158,7 @@ def opportunity_report(decisions: Sequence[DecisionRecord], prices: Sequence[tup
     for mv in moves:
         if any(d == mv.direction and mv.evident_at - timedelta(minutes=horizon_min) <= t < mv.evident_at for t, d in entries):
             captured += 1
-    analyzed = [d for d in decisions if d.action != "SEM_SINAL"] or list(decisions)
+    analyzed = [d for d in decisions if d.action != "SEM_SINAL"] or list(decisions)   # SEM_SINAL_GATE (com vantagem, barrada) conta como analisada
     n_entries = sum(1 for d in decisions if d.action == "ENTRADA")
     entry_rate = (n_entries / len(analyzed)) if analyzed else None
     capture = (captured / len(moves)) if moves else None

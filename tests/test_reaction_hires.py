@@ -114,7 +114,7 @@ class HiResMeasureTests(unittest.TestCase):
         path = PricePath.from_candles(cs, 0.30, 1)
         self.assertEqual(path.resolution_sec, 60.0)
         q = path.at_or_before(T0 + timedelta(minutes=2, seconds=30))
-        self.assertAlmostEqual(q.mid, 2502.0)
+        self.assertAlmostEqual(q.mid, 2501.0)      # em T+2:30 a última barra FECHADA é a aberta em T+1 (fecho em T+2)
         self.assertAlmostEqual(q.spread, 0.30)
 
 

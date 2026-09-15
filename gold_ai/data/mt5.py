@@ -10,6 +10,7 @@ resto do MarketSnapshot com o DataEngine (DXY, juros, FRED, COT, notícias).
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -105,23 +106,68 @@ class MT5Client:
         self.connected = True
         self.server_offset_hours = self._detect_server_offset()
 
+    OFFSET_CACHE = os.environ.get("GOLD_AI_OFFSET_CACHE") or os.path.join(os.path.expanduser("~"), ".gold_ai_mt5_offset.json")
+
     def _detect_server_offset(self) -> float:
-        """Fuso do servidor da corretora: compara o carimbo do último tick com o relógio UTC local (arredondado à hora).
-        MT5_UTC_OFFSET_HOURS no .env força um valor. Sem tick recente (fim de semana), usa 0 e avisa."""
+        """Fuso do servidor da corretora: compara o carimbo do último tick com o relógio UTC local. SÓ confia quando o tick é
+        FRESCO (≤ 2 h) e o resíduo é pequeno — em fim de semana/feriado o último tick é velho e o cálculo sairia errado.
+        Nesses casos usa o último valor detectado (cache) ou 0 com aviso. MT5_UTC_OFFSET_HOURS no .env força um valor."""
         forced = os.environ.get("MT5_UTC_OFFSET_HOURS") or getattr(self.cfg, "utc_offset_hours", None)
+        self.offset_note = ""
         if forced not in (None, ""):
+            self.offset_note = "forçado por MT5_UTC_OFFSET_HOURS"
             return float(forced)
         try:
             t = self.mt5.symbol_info_tick(self.cfg.symbol)
             ts = float(getattr(t, "time", 0) or 0)
         except Exception:  # noqa: BLE001
             ts = 0.0
-        if not ts:
-            return 0.0
         now = datetime.now(timezone.utc).timestamp()
-        if abs(now - ts) > 3 * 86400:      # tick velho (mercado fechado há dias): não dá para inferir
+        if not ts:                      # terminal sem tick nenhum (ou simulado): nada a inferir
+            self.offset_note = "sem tick para inferir o fuso — 0 (defina MT5_UTC_OFFSET_HOURS se necessário)"
             return 0.0
-        return float(round((ts - now) / 3600.0))
+        if ts:
+            raw = (ts - now) / 3600.0
+            off = float(round(raw))
+            fresh = abs(raw - off) <= 0.25 and abs(off) <= 14 and abs(ts - now - off * 3600) <= 2 * 3600
+            if fresh:
+                try:
+                    with open(self.OFFSET_CACHE, "w", encoding="utf-8") as f:
+                        json.dump({"offset": off, "at": datetime.now(timezone.utc).isoformat()}, f)
+                except OSError:
+                    pass
+                self.offset_note = "detectado pelo último tick"
+                return off
+        try:
+            with open(self.OFFSET_CACHE, encoding="utf-8") as f:
+                cached = json.load(f)
+            self.offset_note = f"último tick antigo (mercado fechado?) — usando o fuso detectado em {cached.get('at', '')[:16]}"
+            return float(cached["offset"])
+        except (OSError, ValueError, KeyError):
+            self.offset_note = "AVISO: sem tick recente e sem cache — fuso 0; defina MT5_UTC_OFFSET_HOURS no .env (Pepperstone: 2 no inverno, 3 no verão)"
+            return 0.0
+
+    def symbol_spec(self, symbol: Optional[str] = None):
+        """Especificação de execução real do símbolo (symbol_info): dígitos, tick, valor do tick, passo de lote, stops level, filling."""
+        from ..markets import SymbolSpec, default_symbol_spec
+        sym = symbol or self.cfg.symbol
+        base = default_symbol_spec(sym)
+        try:
+            info = self.mt5.symbol_info(sym)
+        except Exception:  # noqa: BLE001
+            info = None
+        if info is None:
+            return base
+        g = lambda k, d: (getattr(info, k, None) if getattr(info, k, None) not in (None, 0, 0.0) else d)  # noqa: E731
+        fm = int(getattr(info, "filling_mode", 0) or 0)
+        filling = "FOK" if fm & 1 and not fm & 2 else "IOC" if fm & 2 else base.filling
+        spread_pts = float(getattr(info, "spread", 0) or 0)
+        point = float(g("point", base.point))
+        spec = SymbolSpec(sym, int(g("digits", base.digits)), float(g("trade_tick_size", base.tick_size)), float(g("trade_tick_value", base.tick_value_usd)),
+                          float(g("volume_min", base.volume_min)), float(g("volume_max", base.volume_max)), float(g("volume_step", base.volume_step)),
+                          int(getattr(info, "trade_stops_level", 0) or 0), int(getattr(info, "trade_freeze_level", 0) or 0),
+                          base.max_spread or max(2 * spread_pts * point, 2 * point), base.max_slippage or max(spread_pts * point, point), filling, "mt5")
+        return spec
 
     def close(self) -> None:
         if self.connected:

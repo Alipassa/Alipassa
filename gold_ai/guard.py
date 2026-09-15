@@ -130,6 +130,16 @@ class PerformanceEngine:
     def equity_start_of_day(self) -> float:
         return self.equity - self.daily_pnl
 
+    def restore(self, rows: list[tuple[datetime, float, Optional[float]]], now: datetime) -> None:
+        """Após reinício: reconstrói pico, resultado do dia e as travas (perda diária / meta) a partir da tabela `account`."""
+        if not rows:
+            return
+        self.peak_equity = max(self.peak_equity, max(cap for _, cap, _ in rows))
+        self.roll_day(now)
+        day = now.strftime("%Y-%m-%d")
+        self.daily_pnl = round(sum((p or 0.0) for t, _, p in rows if (t.strftime("%Y-%m-%d") if t else "") == day), 2)
+        self.blocks(now)
+
     def sync_equity(self, broker_equity: float, t: datetime) -> None:
         """Em LIVE o capital vem do broker; a variação entra como resultado do dia."""
         self.roll_day(t)
@@ -169,7 +179,7 @@ def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float, point_
     if per_lot <= 0:
         return 0.0, 0.0
     lots = min(limits.max_lot, risk_usd / per_lot)
-    lots = round(int(lots / limits.lot_step + 1e-9) * limits.lot_step, 2)
+    lots = round(int(lots / limits.lot_step + 1e-9) * limits.lot_step, 3)
     if lots < limits.min_lot:
         return 0.0, 0.0
     return lots, round(lots * per_lot, 2)

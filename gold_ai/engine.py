@@ -150,6 +150,7 @@ class GoldAIEngine:
 
     # ------------------------------------------------------------------ ciclo
     def analyze(self, s: MarketSnapshot) -> Assessment:
+        s.session_start = self._session_start()          # VWAP de sessão conforme o mercado (NY para índices; 22:00 UTC nos demais)
         factors, readings = self.score_factors(s)
         score = self.total_score(factors)
         systemic = systemic_risk_index(s)
@@ -223,6 +224,17 @@ class GoldAIEngine:
         if sig is not None:
             sig.text = format_signal(sig)
         return sig
+
+    def _session_start(self) -> tuple[int, int]:
+        """Início da sessão para o VWAP: abertura de NY (13:30) em índices; 22:00 UTC (CME/forex) nos demais."""
+        try:
+            from .markets import MARKETS
+            spec = MARKETS.get(self.cfg.symbol)
+            if spec is not None and spec.session_hours_utc != (0, 24):
+                return (spec.session_hours_utc[0], 30 if spec.session_hours_utc[0] == 13 else 0)
+        except Exception:  # noqa: BLE001
+            pass
+        return (22, 0)
 
     def run_cycle(self, s: MarketSnapshot, new_event_key: Optional[str] = None) -> tuple[Assessment, Optional[Signal]]:
         a = self.analyze(s)

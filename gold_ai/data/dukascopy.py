@@ -61,7 +61,8 @@ class DukascopyImporter:
         from .http import DataError
         for attempt in range(self.retries + 1):
             try:
-                data = self.http.get_bytes(hour_url(inst, h), ttl=365 * 24 * 3600, allow_404=True)
+                recent = h > datetime.now(timezone.utc) - timedelta(hours=48)
+                data = self.http.get_bytes(hour_url(inst, h), ttl=(3600 if recent else 365 * 24 * 3600), allow_404=True)   # 404 recente não é 'sem dados' para sempre
                 if self.pace:
                     self._sleep(self.pace)
                 return data
@@ -79,7 +80,7 @@ class DukascopyImporter:
         sc = scale or sc
         out = []
         for h in sorted(set(x.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc) for x in hours)):
-            if h.weekday() == 5 or (h.weekday() == 6 and h.hour < 22):
+            if h.weekday() == 5 or (h.weekday() == 6 and h.hour < 21):
                 continue                                              # mercado fechado: nem pede
             data = self._fetch_hour(inst, h)
             if data is None:
@@ -116,7 +117,7 @@ class DukascopyImporter:
         t = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
         t_end = datetime(end.year, end.month, end.day, 23, tzinfo=timezone.utc)
         while t <= t_end:
-            if t.weekday() < 5 or (t.weekday() == 6 and t.hour >= 22):
+            if t.weekday() < 5 or (t.weekday() == 6 and t.hour >= 21):
                 hours.append(t)
             t += timedelta(hours=1)
         if self._log:

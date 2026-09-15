@@ -112,8 +112,13 @@ class MultiMarketData:
             try:
                 if not self.mt5.connected:
                     self.mt5.connect()
-                self.mt5.mt5.symbol_select(self.mt5.cfg.symbol, True)
+                if not self.mt5.mt5.symbol_select(self.mt5.cfg.symbol, True):
+                    self.status[f"mt5:{spec.symbol}"] = f"símbolo {self.mt5.cfg.symbol} indisponível na corretora → Yahoo (confira MT5_SYMBOL_{spec.symbol} no .env)"
+                    return self.yahoo.all_timeframes(spec.yahoo)
                 return {tf: cs for tf in TF_TO_MT5 if (cs := self.mt5.candles(tf))}
+            except Exception as e:  # noqa: BLE001
+                self.status[f"mt5:{spec.symbol}"] = f"MT5 falhou ({str(e)[:60]}) → Yahoo"
+                return self.yahoo.all_timeframes(spec.yahoo)
             finally:
                 self.mt5.cfg.symbol = orig
         return self.yahoo.all_timeframes(spec.yahoo)
@@ -140,7 +145,7 @@ class MultiMarketData:
         out.identified = identified
         for spec in self.specs:
             try:
-                candles = base.candles if spec.symbol == "XAUUSD" and base.candles else self.market_candles(spec)
+                candles = base.candles if (self.mt5 is None and spec.symbol == "XAUUSD" and base.candles) else self.market_candles(spec)   # com MT5, o ouro é o SPOT do broker
                 if not candles:
                     raise RuntimeError("sem candles")
                 s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec, now), identified)

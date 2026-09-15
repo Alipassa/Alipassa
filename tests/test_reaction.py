@@ -79,7 +79,7 @@ def snap(price_change_pct, dxy_change, y_change, price=2500.0, atr=10.0):
 
 class ClockTests(unittest.TestCase):
     def _stats(self):
-        return ReactionStats([rec("cpi", T0 - timedelta(days=30 * k), 20.0, 35.0, 60.0) for k in range(1, 5)])
+        return ReactionStats([rec("cpi", T0 - timedelta(days=30 * k), 20.0, 35.0, 60.0) for k in range(1, 7)])
 
     def _event(self, age_min):
         return [IdentifiedEvent("cpi", "CPI MoM", T0 - timedelta(minutes=age_min), 1.0, 0.2, 0.4, 2.0, +1.0)]
@@ -92,7 +92,7 @@ class ClockTests(unittest.TestCase):
         self.assertLess(ra.pressure, 0)                      # pressão vendedora no ouro
         self.assertEqual(ra.lead, {"USD": "✓ reagiu", "YIELD": "✓ reagiu"})
         self.assertEqual(ra.expected_min, 20.0)
-        self.assertEqual(ra.n_history, 4)
+        self.assertEqual(ra.n_history, 6)
         self.assertGreater(ra.probability, 0.5)
         self.assertIn("assimetria temporal", ra.chain)
         self.assertIn("T+8 min", ra.chain)
@@ -142,7 +142,7 @@ class ClockTests(unittest.TestCase):
         self.assertEqual(ra.status, "PRESSÃO LATENTE")
         self.assertIsNone(ra.expected_min)
         self.assertIn("sem histórico suficiente", ra.chain)
-        self.assertAlmostEqual(ra.probability, 0.5 + 0.16 + 0.05, places=2)
+        self.assertAlmostEqual(ra.probability, 0.5 + 0.16 + 0.05, places=2)   # sem histórico: base 0,5 + evidência atual
 
 
 class FrameIntegrationTests(unittest.TestCase):
@@ -166,8 +166,8 @@ class FrameIntegrationTests(unittest.TestCase):
         s = frame.snapshot_at(250)                                                          # instante do 1º CPI
         self.assertIn(s.reaction_status, ("AGUARDANDO", "PRESSÃO LATENTE", "DIVERGÊNCIA", "REAGIU"))
         self.assertIn("sem histórico suficiente", s.reaction_chain)                         # ainda não aprendeu nada
-        s_late = frame.snapshot_at(250 + 60 * 4)
-        self.assertIn("histórico cpi→XAUUSD", s_late.reaction_chain)                         # já aprendeu com os 4 anteriores
+        s_late = frame.snapshot_at(250 + 60 * 6)
+        self.assertIn("histórico cpi→XAUUSD", s_late.reaction_chain)                         # já aprendeu com os 6 anteriores (mínimo 5)
         self.assertNotIn("sem histórico", s_late.reaction_chain)
         self.assertIn("REACTION CLOCK", s_late.reaction_chain)
 

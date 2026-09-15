@@ -20,6 +20,62 @@ from typing import Optional
 # USD_SHORT = o mercado sobe quando o dólar cai; RISK_ON = sobe com apetite a risco; OIL = petróleo.
 
 
+@dataclass
+class SymbolSpec:
+    """Especificação de execução por símbolo — padrão por mercado; substituída pela do MT5 (symbol_info) quando conectado.
+    point_value_usd = tick_value / tick_size (USD por 1.0 de preço por lote) — dinâmico para USDJPY e CFDs."""
+
+    symbol: str
+    digits: int = 2
+    tick_size: float = 0.01
+    tick_value_usd: float = 1.0          # USD por tick por lote
+    volume_min: float = 0.01
+    volume_max: float = 100.0
+    volume_step: float = 0.01
+    stops_level_points: int = 0          # distância mínima SL/TP em pontos
+    freeze_level_points: int = 0
+    max_spread: float = 0.0              # em unidades de preço (0 = usar 2× spread típico)
+    max_slippage: float = 0.0            # em unidades de preço (0 = usar spread típico)
+    filling: str = "IOC"                 # IOC | FOK | RETURN
+    source: str = "padrão"               # padrão | mt5
+
+    @property
+    def point(self) -> float:
+        return 10.0 ** (-self.digits)
+
+    @property
+    def point_value_usd(self) -> float:
+        return (self.tick_value_usd / self.tick_size) if self.tick_size > 0 else 0.0
+
+    def round_price(self, x: float) -> float:
+        return round(round(x / self.tick_size) * self.tick_size, self.digits) if self.tick_size > 0 else round(x, self.digits)
+
+    def normalize_volume(self, lots: float) -> float:
+        if lots < self.volume_min:
+            return 0.0
+        n = int((lots - self.volume_min) / self.volume_step + 1e-9)
+        return round(min(self.volume_max, self.volume_min + n * self.volume_step), 3)
+
+    def min_stop_distance(self) -> float:
+        return self.stops_level_points * self.point
+
+
+DEFAULT_SYMBOL_SPECS: dict[str, SymbolSpec] = {
+    "XAUUSD": SymbolSpec("XAUUSD", 2, 0.01, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.60, 0.30),
+    "EURUSD": SymbolSpec("EURUSD", 5, 0.00001, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.00020, 0.00010),
+    "USDJPY": SymbolSpec("USDJPY", 3, 0.001, 0.68, 0.01, 100.0, 0.01, 0, 0, 0.030, 0.015),     # tick value ≈ 1000 JPY / USDJPY
+    "US500": SymbolSpec("US500", 1, 0.1, 0.1, 0.1, 100.0, 0.1, 0, 0, 1.0, 0.5),
+    "WTI": SymbolSpec("WTI", 3, 0.001, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.06, 0.03),
+    "NAS100": SymbolSpec("NAS100", 1, 0.1, 0.1, 0.1, 100.0, 0.1, 0, 0, 3.0, 1.5),
+    "GBPUSD": SymbolSpec("GBPUSD", 5, 0.00001, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.00030, 0.00015),
+    "BTCUSD": SymbolSpec("BTCUSD", 2, 0.01, 0.01, 0.01, 100.0, 0.01, 0, 0, 40.0, 20.0),
+}
+
+
+def default_symbol_spec(symbol: str) -> SymbolSpec:
+    return DEFAULT_SYMBOL_SPECS.get(symbol.upper(), SymbolSpec(symbol.upper()))
+
+
 @dataclass(frozen=True)
 class MarketSpec:
     symbol: str                        # nome canônico (XAUUSD, EURUSD, US500, USDJPY, WTI)

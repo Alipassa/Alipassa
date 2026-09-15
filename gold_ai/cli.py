@@ -156,8 +156,8 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         mcfg = MT5Config.from_env(env)
         if args.mt5_path:
             mcfg.path = args.mt5_path
-        mt5_client = MT5Client(mcfg)
         try:
+            mt5_client = MT5Client(mcfg)
             mt5_client.connect()
         except Exception as e:  # noqa: BLE001
             print(f"MT5 indisponível: {e}")
@@ -167,15 +167,15 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
             mt5_client = None
         if mt5_client is not None and mode != TradingMode.PAPER:
             from .markets import get_market
-            symbol_map = MultiMarketData.symbol_map_from_env(env)
+            symbol_map = MultiMarketData.symbol_map_from_env({**env, **os.environ})
             for sym in symbols:
                 c = MT5Client(MT5Config(path=mcfg.path, symbol=symbol_map.get(sym, get_market(sym).mt5), login=mcfg.login, password=mcfg.password, server=mcfg.server))
                 c.mt5, c.connected = mt5_client.mt5, True
-                executors[sym] = ExecutionEngine(c, max_slippage=limits.max_slippage)
+                executors[sym] = ExecutionEngine(c)      # tolerâncias por símbolo (symbol_info), não o MAX_SLIPPAGE global do ouro
     elif mode != TradingMode.PAPER:
         print("execução real exige --source mt5; rebaixando para PAPER")
         mode = TradingMode.PAPER
-    data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env(env))
+    data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env({**env, **os.environ}))
     sender = TelegramSender(dry_run=not args.send)
     commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
@@ -186,6 +186,15 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         print("REACTION EDGE carregado (Asset Selector): " + ", ".join(f"{k} {v:.2f}" for k, v in edge.items()))
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
                             selector=AssetSelector(reaction_edge=edge))
+    # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
+    from .data import HttpClient as _Http
+    from .data.yahoo import YahooCollector as _Yahoo
+    _y = _Yahoo(_Http(cache_dir=dcfg.cache_dir, ttl=60))
+
+    def lead_history(name, t_from, t_to):
+        sym = {"USD": "DX-Y.NYB", "YIELD": "^TNX"}[name]
+        return [(c.time + timedelta(minutes=1), c.close) for c in _y.candles(sym, "M1") if t_from <= c.time + timedelta(minutes=1) <= t_to]
+    engine.lead_history = lead_history
     print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
     print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
     try:
@@ -302,6 +311,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         os.makedirs(out_dir, exist_ok=True)
         symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
         ev_times = []
+        hard_failed = False
         if not args.full:
             if not exists:
                 print(f"{path} não existe — sem eventos para delimitar as horas; use --full para baixar o período inteiro")
@@ -316,12 +326,14 @@ def cmd_history(args: argparse.Namespace) -> int:
                     imp.around_events(sym, ev_times, args.before, args.after, args.scale, checkpoint=lambda t, d=dest: save_ticks(t, d))
             except Exception as e:  # noqa: BLE001
                 print(f"{sym} ({inst}): FALHOU — {e}")
+                hard_failed = True
                 continue
             n = save_ticks(ticks, dest)
             first = f" · 1º tick {ticks[0][0]:%Y-%m-%d %H:%M} bid {ticks[0][1]:g} ask {ticks[0][2]:g} (confira a escala!)" if ticks else " · nenhum tick (instrumento/escala/período?)"
             print(f"{sym} ({inst}, escala {args.scale or sc:g}): {n} ticks → {dest}{first}")
-        if imp.failed:
-            print(f"\n{len(imp.failed)} hora(s) falharam (timeout/503 do Dukascopy). Repita o mesmo comando: as horas já baixadas estão em cache e só as que faltam são pedidas.")
+        if imp.failed or hard_failed:
+            print(f"\n{len(imp.failed)} hora(s) falharam" + (" e houve símbolo com falha total" if hard_failed else "") +
+                  ". Repita o mesmo comando: as horas já baixadas estão em cache e só as que faltam são pedidas.")
             return 2      # código 2 = incompleto (o .bat repete até 0)
         return 0
     if args.action == "prices":
@@ -331,7 +343,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         from .markets import MARKETS, get_market
         from .reaction_hires import save_candles, save_ticks
         cfg = MT5Config.from_env(env)
-        symbol_map = MultiMarketData.symbol_map_from_env(env)
+        symbol_map = MultiMarketData.symbol_map_from_env({**env, **os.environ})
         out_dir = args.out_dir or "dados"
         os.makedirs(out_dir, exist_ok=True)
         t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
@@ -405,7 +417,7 @@ def cmd_history(args: argparse.Namespace) -> int:
                 return 1
             imp = ALFREDImporter(http, key, log=print)
             try:
-                new = imp.fetch(start, end, progress=progress)
+                new = imp.fetch(start, end, progress=progress, checkpoint=lambda partial: save_history(merge(hist, partial), path))
             except DataError as e:
                 print(str(e))
                 return 1
@@ -562,11 +574,14 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
     delays = [int(x) for x in (args.delays or delays_default).split(",")]
     sim_rows = sim.table(sim_items, delays=delays)
     txt = ll.render() + "\n\n" + sim.render(sim_rows)
-    results = {}
+    results, tests = {}, {}
     for d in delays:
         ct = ClockTradeTest(delay_sec=d, p_min=args.p_min, slippage_atr=args.slippage, latency_sec=args.latency)
         results[d] = ct.run(sim_items)
+        tests[d] = ct
         txt += "\n\n" + ct.render(results[d])
+    from .reaction_hires import walk_forward_choice
+    txt += "\n\n" + walk_forward_choice(tests)
     from .reaction_hires import delta_table, render_delta
     txt += "\n\n" + render_delta(delta_table(results), tf)
     verdicts = asset_verdicts(results)
@@ -626,8 +641,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 c.connect()
                 bid, ask = c.tick()
                 off = c.server_offset_hours
+                note = getattr(c, "offset_note", "")
+                # TESTE DE CARIMBO: o último candle M1 (convertido para UTC) tem de ter aberto há menos de 3 min (mercado aberto)
+                cs = c.candles("M1", 3)
                 c.close()
-                return True, f"conectado · {c.cfg.symbol} bid {bid:g} ask {ask:g} · fuso do servidor UTC{off:+.0f}h"
+                age = (datetime.now(timezone.utc) - cs[-1].time).total_seconds() / 60 if cs else None
+                ok_ts = age is not None and -1 <= age <= 3
+                ts_txt = f"último M1 aberto há {age:.1f} min ({'✅ carimbos alinhados' if ok_ts else '⚠️ desalinhado: mercado fechado ou fuso errado → MT5_UTC_OFFSET_HOURS'})" if age is not None else "sem candles M1"
+                return True, f"conectado · {c.cfg.symbol} bid {bid:g} ask {ask:g} · fuso UTC{off:+.0f}h ({note}) · {ts_txt}"
             except Exception as e:  # noqa: BLE001
                 return False, str(e)[:160]
     tg_probe = None
@@ -668,7 +689,7 @@ def cmd_reaction(args: argparse.Namespace) -> int:
             if args.out:
                 with open(args.out, "a", encoding="utf-8") as f:
                     f.write("\n\n" + txt)
-        return 0
+        return 0 if (isinstance(outs["TICK"], list) or isinstance(outs["M1"], list)) else 1
     if args.action == "learn" and args.tf.upper() in ("M1", "M5", "TICK"):
         return 0 if isinstance(_reaction_learn_hires(args), list) else 1
     if args.action == "learn":
@@ -736,7 +757,7 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
     if "macro" in modes or "full" in modes:
         if cov.macro_pct < args.min_coverage:
             gaps.append(f"MACRO cobre {cov.macro_pct:.0%} das semanas (mínimo {args.min_coverage:.0%}) — rode `history fetch-alfred` / `fetch-te`")
-    if "full" in modes and cov.news_pct < args.min_coverage:
+    if any(m.startswith("full") for m in modes) and cov.news_pct < args.min_coverage:
         gaps.append(f"NEWS cobre {cov.news_pct:.0%} dos dias (mínimo {args.min_coverage:.0%}) — rode `history fetch-gdelt` até completar")
     if gaps:
         for g in gaps:
@@ -831,10 +852,17 @@ def cmd_live(args: argparse.Namespace) -> int:
         mcfg = MT5Config.from_env(env)
         if args.mt5_path:
             mcfg.path = args.mt5_path
-        source = MT5Source(mcfg, data_engine=data)
-        if mode != TradingMode.PAPER:
-            source.client.connect()
-            executor = ExecutionEngine(source.client, max_slippage=limits.max_slippage)
+        try:
+            source = MT5Source(mcfg, data_engine=data)
+            if mode != TradingMode.PAPER:
+                source.client.connect()
+                executor = ExecutionEngine(source.client)
+        except Exception as e:  # noqa: BLE001
+            if mode != TradingMode.PAPER:
+                print(f"MT5 indisponível: {e}")
+                return 1
+            print(f"MT5 indisponível ({e}); modo PAPER continua com dados web")
+            source, executor = data, None
     elif mode != TradingMode.PAPER:
         print("execução real exige --source mt5; rebaixando para PAPER")
         mode = TradingMode.PAPER
@@ -1277,7 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
     cn.add_argument("--start", default="2026-01-01")
     cn.add_argument("--end", default=None)
     cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
-    cn.add_argument("--modes", default=None, help="none,macro,full (padrão: os três)")
+    cn.add_argument("--modes", default=None, help="none,macro,full,full_sem_relogio,full_sem_flow (padrão: none,macro,full; os dois últimos isolam o relógio e o fluxo)")
     cn.add_argument("--min-coverage", type=float, default=0.8, help="cobertura mínima do banco no período (macro por semana, news por dia)")
     cn.add_argument("--allow-partial", action="store_true", help="roda mesmo com banco incompleto (resultado é ensaio, não conclusão)")
     cn.add_argument("--equity", type=float, default=10000.0)

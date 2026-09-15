@@ -24,7 +24,20 @@ from .news_engine import IdentifiedEvent, expected_direction
 FIRST_ATR = 0.15          # 1ª reação: movimento ≥ 0,15 ATR na direção esperada
 CONFIRM_ATR = 0.40        # confirmação: ≥ 0,40 ATR
 LEAD_THRESHOLDS = {"USD": 0.08, "YIELD": 1.5}   # DXY em %, US10Y em bp
-MIN_N = 3                 # amostra mínima para usar a mediana de um tipo de evento
+MIN_N = 5                 # abaixo disto o relógio diz UNKNOWN (não usa mediana nem P histórica)
+CONFIDENCE_TIERS = ((50, "forte"), (30, "utilizável"), (20, "boa"), (10, "moderada"), (5, "fraca"))
+
+
+def confidence_label(n: int) -> str:
+    for k, label in CONFIDENCE_TIERS:
+        if n >= k:
+            return label
+    return "UNKNOWN"
+
+
+def shrink(p: float, n: int, k: float = 10.0) -> float:
+    """Probabilidade histórica encolhida para 0,5 conforme a amostra: n=5 → 1/3 do desvio; n=30 → 3/4; n=50 → 5/6."""
+    return 0.5 + (p - 0.5) * (n / (n + k))
 
 
 @dataclass
@@ -208,7 +221,9 @@ class ReactionClock:
     def __init__(self, stats: Optional[ReactionStats] = None) -> None:
         self.stats = stats or ReactionStats()
 
-    def assess(self, market: str, s: MarketSnapshot, events: Sequence[IdentifiedEvent], now: datetime) -> ReactionAssessment:
+    def assess(self, market: str, s: MarketSnapshot, events: Sequence[IdentifiedEvent], now: datetime,
+               lead_since_event: Optional[dict[str, float]] = None) -> ReactionAssessment:
+        """`lead_since_event`: {"USD": Δ% do DXY desde o evento, "YIELD": Δbp} quando o chamador tem a série; sem isso usa a janela."""
         cands = []
         for ev in events:
             exp, chans = expected_direction(ev, market)
@@ -220,7 +235,7 @@ class ReactionClock:
         ev, exp, chans = max(cands, key=lambda c: (c[0].importance * (1 if c[0].surprise_sigma is None else min(2.0, abs(c[0].surprise_sigma))), c[0].time))
         sign = 1.0 if exp > 0 else -1.0
         elapsed = ev.age_min(now)
-        ks = self.stats.get(ev.kind, market, now)
+        ks = self.stats.get(ev.kind, market, min(now, ev.time))    # nunca inclui o registro do próprio evento em curso
         n_hist = ks.n if ks else 0
         expected_min = ks.median_first if ks and ks.n >= MIN_N else None
         full_min = ks.median_full if ks and ks.n >= MIN_N else None
@@ -228,7 +243,9 @@ class ReactionClock:
         # líderes: canais dollar/yields esperados × observados
         lead: dict[str, str] = {}
         exp_usd, exp_y = chans.get("dollar", 0.0), chans.get("yields", 0.0)
-        for name, e, obs, thr in (("USD", exp_usd, s.dxy_change_pct, LEAD_THRESHOLDS["USD"]), ("YIELD", exp_y, s.us10y_change_bp, LEAD_THRESHOLDS["YIELD"])):
+        obs_usd = (lead_since_event or {}).get("USD", s.dxy_change_pct)
+        obs_y = (lead_since_event or {}).get("YIELD", s.us10y_change_bp)
+        for name, e, obs, thr in (("USD", exp_usd, obs_usd, LEAD_THRESHOLDS["USD"]), ("YIELD", exp_y, obs_y, LEAD_THRESHOLDS["YIELD"])):
             if e == 0.0:
                 continue
             if obs is None:
@@ -243,9 +260,9 @@ class ReactionClock:
         move_atr = 0.0
         if s.atr and s.price:
             p0 = None
-            for tf in ("M5", "M15", "H1"):
+            for tf, mins in (("M1", 1), ("M5", 5), ("M15", 15), ("H1", 60)):
                 cs = s.candles.get(tf) or []
-                past = [c for c in cs if c.time <= ev.time]
+                past = [c for c in cs if c.time + timedelta(minutes=mins) <= ev.time]   # barra já FECHADA no instante do evento
                 if past:
                     p0 = past[-1].close
                     break
@@ -276,10 +293,12 @@ class ReactionClock:
         if not ks or ks.n < MIN_N:
             hist_note = f"sem histórico suficiente para {ev.kind}→{market} (n={n_hist}; mínimo {MIN_N}) — janela padrão 240 min"
         else:
-            hist_note = f"histórico {ev.kind}→{market}: 1ª reação mediana {ks.median_first:.0f} min, pleno {ks.median_full:.0f} min, P(dir) {ks.p_correct:.0%} (n={ks.n})" \
-                if ks.median_first is not None and ks.median_full is not None else f"histórico {ev.kind}→{market}: n={ks.n}, P(reação) {ks.p_first:.0%}, P(dir) {ks.p_correct:.0%}"
+            hist_note = (f"histórico {ev.kind}→{market}: 1ª reação mediana {ks.median_first:.0f} min, pleno {ks.median_full:.0f} min, P(dir) {ks.p_correct:.0%} "
+                         f"(n={ks.n}, evidência {confidence_label(ks.n)})") \
+                if ks.median_first is not None and ks.median_full is not None else \
+                f"histórico {ev.kind}→{market}: n={ks.n} ({confidence_label(ks.n)}), P(reação) {ks.p_first:.0%}, P(dir) {ks.p_correct:.0%}"
         # probabilidade estimada: base histórica ajustada pela evidência atual (nunca inventada: sem histórico, 0,5 ± evidência)
-        base = ks.p_correct if ks and ks.n >= MIN_N else 0.5
+        base = shrink(ks.p_correct, ks.n) if ks and ks.n >= MIN_N else 0.5    # encolhida para 0,5 conforme a amostra
         prob = base + 0.08 * leads_ok - 0.15 * leads_against + (0.05 if status == "PRESSÃO LATENTE" else 0.0) - (0.25 if target == "contra" else 0.0)
         if status == "EXPIRADO":
             prob = min(prob, 0.45)

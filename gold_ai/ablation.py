@@ -21,7 +21,8 @@ from .history import EventHistory
 from .markets import get_market
 from .sweep import FloorMetrics, _metrics
 
-MODES: tuple[tuple[str, str], ...] = (("none", "Preço somente"), ("macro", "Preço + Macro (A)"), ("full", "Preço + Macro + News (B)"))
+MODES: tuple[tuple[str, str], ...] = (("none", "Preço somente"), ("macro", "Preço + Macro (A)"), ("full", "Preço + Macro + News (B)"),
+                                      ("full_sem_relogio", "B sem REACTION CLOCK"), ("full_sem_flow", "B sem FLOW ANOMALY"))
 
 
 @dataclass

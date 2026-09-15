@@ -56,8 +56,9 @@ class PricePath:
 
     @classmethod
     def from_candles(cls, candles: Sequence[Candle], spread: float, minutes: int = 1) -> "PricePath":
+        """Candle.time é a ABERTURA: o fecho só existe `minutes` depois → carimbo no fecho (anti look-ahead)."""
         half = spread / 2
-        return cls([Quote(c.time, c.close - half, c.close + half) for c in candles], minutes * 60.0)
+        return cls([Quote(c.time + timedelta(minutes=minutes), c.close - half, c.close + half) for c in candles], minutes * 60.0)
 
     def resample(self, minutes: int = 1) -> "PricePath":
         """Ticks → barras de `minutes` (mid = último, spread = média): para checar se a relação sobrevive à resolução de minuto."""
@@ -284,7 +285,7 @@ class ReactionTradeSim:
             return None
         sign = rec.base.expected_dir
         entry = (q_in.ask if sign > 0 else q_in.bid) + sign * self.slippage_atr * atr
-        t_short = rec.base.published_at + timedelta(seconds=SHORT_SEC) if rec.lead_first_sec + delay_sec < SHORT_SEC else t_in + timedelta(seconds=SHORT_SEC)
+        t_short = max(t_in, rec.base.published_at + timedelta(seconds=SHORT_SEC)) if rec.lead_first_sec + delay_sec < SHORT_SEC else t_in + timedelta(seconds=SHORT_SEC)
         q_s = path.at_or_before(t_short)
         if q_s is None:
             return None
@@ -424,7 +425,7 @@ class ClockTradeTest:
     SAÍDA: QUICK (take +0,40 ATR ou 5 min; stop −0,5) · EXTEND (aos 5 min, se ≥ +0,15 ATR, trailing 0,40 até 60 min) · FOLLOW (stop/60 min).
     Compara com a entrada INGÊNUA (toda reação do líder, saída em 5 min) para isolar o valor do relógio."""
 
-    def __init__(self, delay_sec: int = 5, p_min: float = 0.55, min_n: int = 3, slippage_atr: float = 0.02, latency_sec: float = 0.5) -> None:
+    def __init__(self, delay_sec: int = 5, p_min: float = 0.55, min_n: int = 5, slippage_atr: float = 0.02, latency_sec: float = 0.5) -> None:
         self.delay_sec, self.p_min, self.min_n = delay_sec, p_min, min_n
         self.sim = ReactionTradeSim(slippage_atr, latency_sec)
         self.trades: list[ClockTrade] = []
@@ -531,7 +532,7 @@ class ClockTradeTest:
                 sk["sem_preço"] += 1
                 continue
             sign = rec.base.expected_dir
-            if sign * (q_in.mid - q0.mid) / atr >= FIRST_ATR:
+            if abs(q_in.mid - q0.mid) / atr >= FIRST_ATR:      # já reagiu (a favor OU contra) → não é "atrasado"
                 sk["alvo_já_reagiu"] += 1
                 continue
             entry = (q_in.ask if sign > 0 else q_in.bid) + sign * self.sim.slippage_atr * atr
@@ -581,6 +582,7 @@ class AssetVerdict:
     exit: str
     n_events: int
     kinds: int
+    robust: float = 0.0     # mediana do líquido entre as combinações atraso × saída com amostra (base do veredito)
 
     @property
     def edge_score(self) -> float:
@@ -588,7 +590,7 @@ class AssetVerdict:
 
     def row(self) -> str:
         label = {"🟢": "forte", "🟡": "moderado", "🔴": "sem edge", "⚪": "inconclusivo"}[self.verdict]
-        return (f"{self.symbol:<8}{self.verdict} {label:<13}{self.n_events:>6}{self.n:>7}{self.net:>+9.3f}{self.net / STOP_ATR:>+7.2f}R{self.naive:>+9.3f}"
+        return (f"{self.symbol:<8}{self.verdict} {label:<13}{self.n_events:>6}{self.n:>7}{self.net:>+9.3f}{self.net / STOP_ATR:>+7.2f}R{self.robust:>+9.3f}{self.naive:>+9.3f}"
                 f"{self.delay_sec:>7}s {self.exit:<7}{self.kinds:>6}")
 
 
@@ -620,20 +622,21 @@ def asset_verdicts(results: dict[int, list[ClockTestRow]], min_n: int = 20) -> l
             continue
         best = max(valid, key=lambda c: c[2])
         delay, ex, net, n, naive, n_ev, kinds = best
-        if net >= 0.10 and net > naive:
+        robust = statistics.median([c[2] for c in valid])     # mediana das combinações válidas: evita escolher o melhor por sorte
+        if robust >= 0.10 and net > naive:
             v = "🟢"
-        elif net > 0.02:
+        elif robust > 0.02:
             v = "🟡"
         else:
             v = "🔴"
-        out.append(AssetVerdict(sym, v, n, net, naive, delay, ex, n_ev, kinds))
+        out.append(AssetVerdict(sym, v, n, net, naive, delay, ex, n_ev, kinds, robust))
     return sorted(out, key=lambda v: (-VERDICT_SCORE[v.verdict], -v.net))
 
 
 def render_verdicts(verdicts: Sequence[AssetVerdict], resolution: str) -> str:
-    head = f"{'ativo':<8}{'veredito':<16}{'evts':>6}{'entr':>7}{'líquido':>9}{'':>8}{'ingênua':>9}{'atraso':>8} {'saída':<7}{'tipos':>6}"
+    head = f"{'ativo':<8}{'veredito':<16}{'evts':>6}{'entr':>7}{'melhor':>9}{'':>8}{'mediana':>9}{'ingênua':>9}{'atraso':>8} {'saída':<7}{'tipos':>6}"
     lines = [f"🏁 REACTION EDGE POR ATIVO ({resolution}) — o relógio não funciona igual em todos os mercados", head] + [v.row() for v in verdicts]
-    lines.append("   🟢 forte: n ≥ 20, líquido ≥ 0,10 ATR (0,2R) e acima da ingênua · 🟡 moderado: líquido > 0,02 ATR · 🔴 custo consome · ⚪ n < 20")
+    lines.append("   veredito pela MEDIANA das combinações atraso × saída com n ≥ 20 (não pelo melhor caso): 🟢 ≥ 0,10 ATR e melhor > ingênua · 🟡 > 0,02 · 🔴 custo consome · ⚪ n < 20")
     lines.append("   'melhor combinação' atraso × saída por ativo; o Asset Selector usa este veredito (reaction_edge.json) só quando o relógio marca PRESSÃO LATENTE")
     return "\n".join(lines)
 
@@ -730,4 +733,44 @@ def render_stability(tick: Sequence[AssetVerdict], m1: Sequence[AssetVerdict]) -
         fa = (f"{a.n:>5}{a.net / STOP_ATR:>+7.2f}R" if a else f"{'':>5}{'':>8}")
         fb = (f"{b.n:>5}{b.net / STOP_ATR:>+7.2f}R" if b else f"{'':>5}{'':>8}")
         lines.append(f"{sym:<8}{label[va]:<16}{fa}{label[vb]:<16}{fb}  {concl}")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- WALK-FORWARD DO ATRASO: escolhe na 1ª metade, mede na 2ª
+def walk_forward_choice(tests: dict[int, "ClockTradeTest"]) -> str:
+    """`tests`: atraso → ClockTradeTest já executado (com .trades). Para cada ativo, escolhe (atraso, saída) pelo líquido da
+    PRIMEIRA metade dos eventos e reporta o líquido na SEGUNDA metade — a escolha nunca vê os dados em que é avaliada."""
+    all_tr = [(d, t) for d, ct in tests.items() for t in ct.trades]
+    if not all_tr:
+        return "🧭 WALK-FORWARD DO ATRASO: sem entradas para avaliar"
+    by_sym: dict[str, list] = {}
+    for d, t in all_tr:
+        by_sym.setdefault(t.target, []).append((d, t))
+    lines = ["🧭 WALK-FORWARD DO ATRASO — (atraso × saída) escolhido na 1ª metade dos eventos, resultado medido na 2ª metade (R = 0,5 ATR)",
+             f"{'ativo':<8}{'escolha':<14}{'n1':>4}{'líq.1ª':>9}{'n2':>4}{'líq.2ª':>9}{'ingênua 2ª':>12}  leitura"]
+    for sym, items in sorted(by_sym.items()):
+        times = sorted({t.published_at for _, t in items})
+        split = times[len(times) // 2]
+        first = [(d, t) for d, t in items if t.published_at < split]
+        second = [(d, t) for d, t in items if t.published_at >= split]
+        best, best_net = None, None
+        for d in tests:
+            for ex, attr in (("QUICK", "net_quick"), ("EXTEND", "net_extend"), ("FOLLOW", "net_follow")):
+                xs = [getattr(t, attr) for dd, t in first if dd == d]
+                if len(xs) >= 5:
+                    m = statistics.fmean(xs)
+                    if best_net is None or m > best_net:
+                        best, best_net = (d, ex, attr), m
+        if best is None:
+            lines.append(f"{sym:<8}{'—':<14}{len(first):>4}{'':>9}{len(second):>4}{'':>9}{'':>12}  ⚪ 1ª metade sem 5 entradas por combinação")
+            continue
+        d, ex, attr = best
+        xs2 = [getattr(t, attr) for dd, t in second if dd == d]
+        naive2 = tests[d].naive
+        n2_naive = [v for key, vals in naive2.items() if key[1] == sym for v in vals]
+        net2 = statistics.fmean(xs2) / STOP_ATR if xs2 else 0.0
+        nv2 = (statistics.fmean(n2_naive) / STOP_ATR) if n2_naive else 0.0
+        tag = "⚪ amostra pequena" if len(xs2) < 20 else ("🟢 sobreviveu fora da amostra" if net2 > 0.02 / STOP_ATR and net2 > nv2 else "🔴 não sobreviveu")
+        lines.append(f"{sym:<8}{f'{d}s {ex}':<14}{len(first):>4}{best_net / STOP_ATR:>+8.2f}R{len(xs2):>4}{net2:>+8.2f}R{nv2:>+11.2f}R  {tag}")
+    lines.append("   só a coluna 'líq.2ª' conta: é o que a escolha feita antes teria rendido depois; se ela desaparece, a 'melhor combinação' era ruído")
     return "\n".join(lines)

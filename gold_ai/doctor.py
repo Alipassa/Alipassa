@@ -75,7 +75,7 @@ def run_doctor(env: dict, db_path: str = "gold_ai.db", events_path: str = os.pat
     keys = ("TOKEN_TELEGRAM", "CHAT_ID", "MT5_PATH", "RISK_PER_TRADE", "MAX_DAILY_LOSS", "FRED_API_KEY")
     missing = [k for k in keys if not env.get(k)]
     if not envf:
-        rep.add(".env", "❌", "não encontrado na pasta", "salve o .env na mesma pasta do market_ai_engine_v4.py")
+        rep.add(".env", "❌", "não encontrado na pasta", "salve o .env na mesma pasta do market_ai_engine_v5.py")
     elif missing:
         rep.add(".env", "⚠️", f"{envf} · faltam: {', '.join(missing)}", "preencha as chaves que faltam")
     else:
@@ -150,6 +150,7 @@ def run_doctor(env: dict, db_path: str = "gold_ai.db", events_path: str = os.pat
             n_react = mem.conn.execute("SELECT COUNT(*) FROM reactions").fetchone()[0]
             eq = mem.last_equity()
             fresh = ""
+            age_h = 1e9
             if last:
                 try:
                     age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() / 3600

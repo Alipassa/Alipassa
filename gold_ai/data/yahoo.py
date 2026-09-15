@@ -38,8 +38,13 @@ def parse_chart(payload: dict) -> list[Candle]:
     ts = result.get("timestamp") or []
     q = (result.get("indicators", {}).get("quote") or [{}])[0]
     out: list[Candle] = []
+    n = len(ts)
+    col = lambda k: (q.get(k) or [None] * n)  # noqa: E731
+    opens, highs, lows, closes = col("open"), col("high"), col("low"), col("close")
     for i, t in enumerate(ts):
-        o, h, l, c = q.get("open", [None])[i], q.get("high", [None])[i], q.get("low", [None])[i], q.get("close", [None])[i]
+        if i >= min(len(opens), len(highs), len(lows), len(closes)):
+            break
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
         if None in (o, h, l, c):
             continue
         v = (q.get("volume") or [0] * len(ts))[i] or 0
@@ -106,7 +111,10 @@ class YahooCollector:
     def all_timeframes(self, symbol: str, tfs: tuple[str, ...] = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1")) -> dict[str, list[Candle]]:
         out: dict[str, list[Candle]] = {}
         for tf in tfs:
-            cs = self.candles(symbol, tf, ttl=60 if TF_MINUTES[tf] <= 60 else 900)
+            try:
+                cs = self.candles(symbol, tf, ttl=60 if TF_MINUTES[tf] <= 60 else 900)
+            except DataError:
+                continue                      # um timeframe recusado (ex.: 1m) não derruba os outros
             if cs:
                 out[tf] = cs
         return out

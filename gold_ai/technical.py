@@ -8,6 +8,7 @@ várias evidências, e a nota global é a média ponderada dos timeframes.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Optional, Sequence
 
 from .config import TIMEFRAME_WEIGHTS
@@ -139,6 +140,26 @@ def vwap(candles: Sequence[Candle]) -> Optional[float]:
     return sum(((c.high + c.low + c.close) / 3) * c.volume for c in candles) / vol
 
 
+SESSION_START_HOUR_UTC = 22   # sessão global (CME/forex): reinicia às 22:00 UTC; US500 usa a abertura de NY (13:30) via MarketSpec
+
+
+def session_candles(candles: Sequence[Candle], start_hour_utc: int = SESSION_START_HOUR_UTC, start_minute: int = 0) -> list[Candle]:
+    """Candles desde o início da SESSÃO corrente (último cruzamento de start_hour:start_minute UTC). Reinicia todo dia."""
+    if not candles:
+        return []
+    last = candles[-1].time
+    start = last.replace(hour=start_hour_utc, minute=start_minute, second=0, microsecond=0)
+    if start > last:
+        start -= timedelta(days=1)
+    out = [c for c in candles if c.time >= start]
+    return out or list(candles[-1:])
+
+
+def session_vwap(candles: Sequence[Candle], start_hour_utc: int = SESSION_START_HOUR_UTC, start_minute: int = 0) -> Optional[float]:
+    """VWAP DA SESSÃO (reinicia a cada sessão), não VWAP móvel."""
+    return vwap(session_candles(candles, start_hour_utc, start_minute))
+
+
 def swing_levels(candles: Sequence[Candle], lookback: int = 20) -> tuple[Optional[float], Optional[float]]:
     """Suporte/resistência simples: mínima/máxima do lookback."""
     if not candles:
@@ -147,8 +168,8 @@ def swing_levels(candles: Sequence[Candle], lookback: int = 20) -> tuple[Optiona
     return min(c.low for c in win), max(c.high for c in win)
 
 
-def analyze_timeframe(tf: str, candles: Sequence[Candle]) -> TechnicalReading:
-    """Nota técnica -1..+1 de um timeframe combinando múltiplas evidências."""
+def analyze_timeframe(tf: str, candles: Sequence[Candle], session_start: tuple[int, int] = (SESSION_START_HOUR_UTC, 0)) -> TechnicalReading:
+    """Nota técnica -1..+1 de um timeframe combinando múltiplas evidências. VWAP = da sessão nos timeframes intradiários."""
     closes = [c.close for c in candles]
     reading = TechnicalReading(timeframe=tf, score=0.0, trend="LATERAL")
     if len(closes) < 30:
@@ -208,8 +229,8 @@ def analyze_timeframe(tf: str, candles: Sequence[Candle]) -> TechnicalReading:
         if a < 18:
             reading.notes.append("mercado sem tendência (ADX baixo)")
 
-    # 5) VWAP (posição relativa)
-    v = vwap(candles[-60:])
+    # 5) VWAP DA SESSÃO (posição relativa) nos intradiários; nos diários/semanais o VWAP de sessão não faz sentido → rolling
+    v = session_vwap(candles, *session_start) if tf in ("M1", "M5", "M15", "M30", "H1", "H4") else vwap(candles[-60:])
     if v is not None and _atr:
         pos = (close - v) / _atr
         reading.vwap_position = pos
@@ -257,7 +278,7 @@ def analyze_timeframe(tf: str, candles: Sequence[Candle]) -> TechnicalReading:
     return reading
 
 
-def analyze_multi_timeframe(candles_by_tf: dict[str, Sequence[Candle]]) -> tuple[float, list[TechnicalReading]]:
+def analyze_multi_timeframe(candles_by_tf: dict[str, Sequence[Candle]], session_start: tuple[int, int] = (SESSION_START_HOUR_UTC, 0)) -> tuple[float, list[TechnicalReading]]:
     """Retorna (nota técnica global -1..+1, leituras por timeframe)."""
     readings: list[TechnicalReading] = []
     num, den = 0.0, 0.0
@@ -265,7 +286,7 @@ def analyze_multi_timeframe(candles_by_tf: dict[str, Sequence[Candle]]) -> tuple
         cs = candles_by_tf.get(tf)
         if not cs:
             continue
-        r = analyze_timeframe(tf, cs)
+        r = analyze_timeframe(tf, cs, session_start)
         readings.append(r)
         if "dados insuficientes" in r.notes:
             continue

@@ -265,7 +265,7 @@ def score_sentimento(s: MarketSnapshot, w: float) -> FactorScore:
 def score_tecnico(s: MarketSnapshot, w: float) -> tuple[FactorScore, list]:
     if not s.candles:
         return _factor("tecnico", w, 0.0, "sem candles", available=False), []
-    global_score, readings = analyze_multi_timeframe(s.candles)
+    global_score, readings = analyze_multi_timeframe(s.candles, getattr(s, "session_start", (22, 0)))
     valid = [r for r in readings if "dados insuficientes" not in r.notes]
     if not valid:
         return _factor("tecnico", w, 0.0, "dados insuficientes", available=False), readings

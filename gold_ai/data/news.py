@@ -145,6 +145,8 @@ class NewsCollector:
         out: list[NewsItem] = []
         seen: set[str] = set()
         self.health = []
+        if hasattr(self.interpreter, "events"):
+            self.interpreter.events = []          # reinterpretação a cada ciclo: sem duplicar eventos já lidos
         self.errors = {}
         for url in self.feeds:
             source = url.split("/")[2]

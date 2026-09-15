@@ -3,7 +3,7 @@
 O News Engine pergunta "existe uma informação que explica o movimento?". Este motor pergunta o inverso:
 "existe um movimento que revela uma informação que ainda não conhecemos?"
 
-FLOW SCORE 0–100 = preço anormal (24) + velocidade (19) + volume/ticks (17) + cross-market não explica (16) + persistência (10)
+FLOW SCORE 0–100 = preço anormal (28) + velocidade (22) + volume/ticks (20) + cross-market não explica (18) + persistência (12)
 + notícia explicativa (penalidade até −30; 0 quando não há). Assinaturas:
   A  líderes explicam (DXY/yields no sentido esperado)       → movimento macro/rates plausível
   B  líderes parados, par confirma (prata p/ ouro), volume ↑ → fluxo específico do ativo / comprador institucional POSSÍVEL
@@ -121,13 +121,13 @@ class FlowAnomalyEngine:
         fa.move_atr, fa.minutes, fa.start_time = round(move, 2), minutes, t0
         comp: dict[str, int] = {}
         # 1) preço anormal: 0,5 ATR/h é normal; 1,5 ATR em poucas horas é extremo
-        comp["preço anormal"] = int(round(24 * max(0.0, min(1.0, (move - 0.4) / 1.1))))
+        comp["preço anormal"] = int(round(28 * max(0.0, min(1.0, (move - 0.4) / 1.1))))
         # 2) velocidade: ATR por minuto (1 ATR em 20 min = extremo)
         speed = (move / minutes) if minutes else None
-        comp["velocidade"] = int(round(19 * max(0.0, min(1.0, (speed - 0.005) / 0.045)))) if speed is not None else (int(round(19 * min(1.0, move / 1.5))) if move > 0.6 else 0)
+        comp["velocidade"] = int(round(22 * max(0.0, min(1.0, (speed - 0.005) / 0.045)))) if speed is not None else (int(round(22 * min(1.0, move / 1.5))) if move > 0.6 else 0)
         # 3) volume/ticks
         vr = _volume_ratio(s)
-        comp["volume/ticks"] = int(round(17 * max(0.0, min(1.0, (vr - 1.2) / 1.8)))) if vr is not None else 0
+        comp["volume/ticks"] = int(round(20 * max(0.0, min(1.0, (vr - 1.2) / 1.8)))) if vr is not None else 0
         # 4) cross-market: quanto do movimento os líderes NÃO explicam
         weights = CHANNEL_TO_MARKET.get(market, {})
         obs = {"dollar": s.dxy_change_pct, "yields": (s.us10y_change_bp / 10.0) if s.us10y_change_bp is not None else None,
@@ -155,10 +155,10 @@ class FlowAnomalyEngine:
         pair_confirms = pair_v is not None and (pair_v > 0) == (sign > 0) and abs(pair_v) >= 0.15
         if market in PAIR_FIELD:
             leaders["par"] = "confirma" if pair_confirms else ("n/d" if pair_v is None else "não confirma")
-        comp["cross-market"] = int(round(16 * unexplained))
+        comp["cross-market"] = int(round(18 * unexplained))
         fa.leaders = leaders
         # 5) persistência: não revertido
-        comp["persistência"] = 10 if retrace <= 0.3 else 5 if retrace <= 0.5 else 0
+        comp["persistência"] = 12 if retrace <= 0.3 else 6 if retrace <= 0.5 else 0
         # 6) notícia explicativa (penalidade): evento identificado com direção esperada igual ao movimento
         explained_by_news = 0.0
         for ev in identified or []:
@@ -176,7 +176,8 @@ class FlowAnomalyEngine:
         elif against_w > 0 and against_w >= explained_w:
             fa.signature, fa.origin = "C", "E"
         elif explained_w > 0 and unexplained < 0.5:
-            fa.signature, fa.origin = "A", "B" if s.events else "C"
+            released = [e for e in s.events if e.actual is not None and (now - e.time) <= timedelta(hours=6)]
+            fa.signature, fa.origin = "A", "B" if released else "C"
         elif pair_confirms or (vr or 0) >= 1.5:
             fa.signature, fa.origin = "B", "D"
         else:

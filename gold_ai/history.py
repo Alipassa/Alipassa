@@ -39,11 +39,9 @@ KIND_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 # eventos sem sensibilidade direta na tabela do motor recebem uma transmissão própria aqui (unidade: acima do consenso)
 EXTRA_TRANSMISSION = {
-    "ppi": {"yields": +0.7, "dollar": +0.5, "risk": -0.4},
-    "oil_inventories": {"oil": -0.8},           # estoques ACIMA do esperado → petróleo cai
-    "ecb": {"dollar": -0.5, "yields": +0.2},    # BCE hawkish (acima) → euro sobe → dólar cai
-    "boj": {"dollar": -0.3, "yields": +0.2},
-    "china": {"risk": +0.4, "oil": +0.3},
+    "fomc": {"yields": +1.0, "dollar": +0.9, "risk": -0.7},     # decisão acima do consenso = hawkish (regra do banco histórico)
+    "ecb": {"dollar": -0.6, "yields": +0.2, "risk": -0.2},      # BCE acima do consenso = hawkish → euro sobe → dólar cai
+    "boj": {"dollar": -0.4, "yields": +0.2, "risk": -0.2},
 }
 TYPICAL = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "ppi": 0.2, "nfp": 60.0, "unemployment": 0.1, "jobless_claims": 15.0, "gdp": 0.5,
            "ism": 1.5, "pmi": 1.0, "retail_sales": 0.4, "jolts": 300.0, "consumer_confidence": 3.0, "michigan": 2.0, "housing": 5.0, "earnings": 0.1,
@@ -179,7 +177,8 @@ class EventHistory:
         """Eventos futuros já agendados (consenso conhecido, sem actual) — calendário de risco."""
         hi = t + timedelta(hours=ahead_hours)
         return [HistoricalEvent(e.timestamp, e.published_at, e.event_id, e.event, e.country, e.currency, e.impact, e.forecast, e.previous, None, None, None,
-                                e.category, e.kind, e.source) for e in self.events if t < e.timestamp <= hi]
+                                e.category, e.kind, e.source) for e in self.events
+                if t < e.timestamp <= hi and e.category in MACRO_CATEGORIES and not str(e.source).startswith("gdelt") and e.revised is None]
 
     def snapshot_inputs(self, t: datetime, lookback_hours: float = 24.0) -> tuple[list[EconomicEvent], list[NewsItem]]:
         avail = self.available_at(t, lookback_hours)

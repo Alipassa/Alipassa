@@ -33,6 +33,11 @@ def _iso(t: datetime) -> datetime:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
+def _http_code(msg: str) -> Optional[int]:
+    m = re.search(r"HTTP Error (\d{3})", msg)
+    return int(m.group(1)) if m else None
+
+
 def us_release_time(d: date, hour_et: int = 8, minute: int = 30) -> datetime:
     """Horário UTC de uma divulgação às hour_et:minute (hora de Nova York), respeitando o horário de verão dos EUA."""
     def nth_sunday(year: int, month: int, n: int) -> date:
@@ -106,7 +111,7 @@ class ALFREDImporter:
             raise DataError(f"FRED_API_KEY inválida ('{self.key[:12]}…'): a chave do FRED tem 32 caracteres hexadecimais minúsculos. "
                             "Gere a sua (gratuita) em https://fred.stlouisfed.org/docs/api/api_key.html e coloque FRED_API_KEY=... no .env")
 
-    def fetch(self, start: date, end: date, series: Optional[list[str]] = None, progress=None) -> EventHistory:
+    def fetch(self, start: date, end: date, series: Optional[list[str]] = None, progress=None, checkpoint=None) -> EventHistory:
         from .http import DataError
         self.validate_key()
         hist = EventHistory()
@@ -127,7 +132,7 @@ class ALFREDImporter:
                 try:
                     payload = self.http.get_json(url_for(rt_end), ttl=24 * 3600)
                 except DataError as e:
-                    if "400" in str(e) and rt_end == end:
+                    if _http_code(str(e)) == 400 and rt_end == end:
                         rt_end = end - timedelta(days=1)
                         if self._log:
                             self._log(f"  ALFRED: {end} ainda é 'futuro' em St. Louis — repetindo com realtime_end={rt_end}")
@@ -136,8 +141,9 @@ class ALFREDImporter:
                         raise
             except DataError as e:
                 msg = str(e)
-                reason = ("HTTP 400: chave rejeitada ou parâmetros inválidos (confira FRED_API_KEY)" if "400" in msg else
-                          "HTTP 429: limite de requisições do FRED" if "429" in msg else msg[-160:])
+                code = _http_code(msg)
+                reason = ("HTTP 400: chave rejeitada ou parâmetros inválidos (confira FRED_API_KEY)" if code == 400 else
+                          "HTTP 429: limite de requisições do FRED" if code == 429 else msg[-160:])
                 self.failed.append((sid, reason))
                 if self._log:
                     self._log(f"  ALFRED {sid}: FALHOU — {reason}")
@@ -147,6 +153,8 @@ class ALFREDImporter:
                 hist.add(e)
             if self._log:
                 self._log(f"  ALFRED {sid} ({ALFRED_SERIES.get(sid, (sid,))[0]}): {len(part)} publicações/revisões")
+            if checkpoint:
+                checkpoint(hist)                  # salva ANTES de marcar como feito (Ctrl-C não perde nem pula séries)
             if progress is not None:
                 progress.mark(key, len(part))
         return hist
@@ -254,7 +262,7 @@ class GDELTImporter:
                 self._last = time.monotonic()
                 if attempt == self.max_retries:
                     raise
-                rate = "429" in str(e)
+                rate = _http_code(str(e)) == 429
                 m = re.search(r"Retry-After (\d+)s", str(e))
                 # 429 é bloqueio por rajada: espera exponencial (60 s, 2, 4, 8, 16 min) ou o Retry-After do servidor
                 wait = (float(m.group(1)) if m else min(self.max_wait, self.retry_wait * (2 ** attempt))) if rate else min(self.retry_wait, 20.0)

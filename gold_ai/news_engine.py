@@ -44,7 +44,15 @@ TRANSMISSION: dict[str, dict[str, float]] = {
     "oil_supply_increase": {"oil": -1.0, "risk": +0.1},
     "cb_gold_buying": {"safe_haven": +0.6},
     "china_stimulus": {"risk": +0.6, "oil": +0.4, "dollar": -0.2},
+    # releases sem entrada própria antes (eram só regra do banco histórico)
+    "ppi":         {"yields": +0.7, "dollar": +0.5, "risk": -0.4},
+    "oil_inventories": {"oil": -0.8},                              # estoques ACIMA do esperado → petróleo cai
+    "ecb_hawkish": {"dollar": -0.6, "yields": +0.2, "risk": -0.2}, "ecb_dovish": {"dollar": +0.6, "yields": -0.2, "risk": +0.2},
+    "boj_hawkish": {"dollar": -0.4, "yields": +0.2, "risk": -0.2}, "boj_dovish": {"dollar": +0.4, "yields": -0.2, "risk": +0.2},
+    "china":       {"risk": +0.4, "oil": +0.3},
 }
+# decisões de bancos centrais: o "actual vs consenso" define hawkish/dovish; sem surpresa, a direção vem do tom (manchetes)
+CENTRAL_BANK_KINDS = {"fomc": ("fomc_hawkish", "fomc_dovish"), "ecb": ("ecb_hawkish", "ecb_dovish"), "boj": ("boj_hawkish", "boj_dovish")}
 
 # Como cada canal afeta cada mercado (+1 = mercado sobe quando o canal sobe).
 CHANNEL_TO_MARKET: dict[str, dict[str, float]] = {
@@ -79,7 +87,7 @@ class IdentifiedEvent:
         return max(0.0, (now - self.time).total_seconds() / 60)
 
 
-TYPICAL_SURPRISE = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "nfp": 60.0, "unemployment": 0.1, "earnings": 0.1, "gdp": 0.5,
+TYPICAL_SURPRISE = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "nfp": 60.0, "unemployment": 0.1, "earnings": 0.1, "gdp": 0.5, "ppi": 0.2, "fomc": 0.25, "ecb": 0.25, "boj": 0.1, "oil_inventories": 2.0,
                     "ism": 1.5, "pmi": 1.0, "retail_sales": 0.4, "jolts": 300.0, "jobless_claims": 15.0, "consumer_confidence": 3.0, "michigan": 2.0, "housing": 5.0}
 
 QUALITATIVE = [
@@ -107,12 +115,22 @@ class EventIdentifier:
             sp = e.surprise()
             typical = TYPICAL_SURPRISE.get(e.kind, max(abs(e.consensus or 1.0) * 0.1, 0.1))
             sigma = (sp / typical) if sp is not None and typical else None
-            key = f"{e.kind}:{e.time:%Y%m%d%H}"
+            kind = e.kind
+            sign = 0.0 if sigma is None else (1.0 if sigma > 0 else -1.0 if sigma < 0 else 0.0)
+            if e.kind in CENTRAL_BANK_KINDS:
+                # decisão de juros: acima do consenso = hawkish, abaixo = dovish; em linha = sem direção pela decisão (o tom decide)
+                hawk, dove = CENTRAL_BANK_KINDS[e.kind]
+                if sign > 0:
+                    kind, sign = hawk, 1.0
+                elif sign < 0:
+                    kind, sign = dove, 1.0
+                else:
+                    sign = 0.0
+            key = f"{kind}:{e.time:%Y%m%d%H}" + (f":{e.name[:30].lower()}" if kind == "generic" else "")
             if key in seen:
                 continue
             seen.add(key)
-            out.append(IdentifiedEvent(e.kind, e.name, e.time, IMPORTANCE.get(e.impact, 0.6), e.consensus, e.actual, sigma,
-                                       0.0 if sigma is None else (1.0 if sigma > 0 else -1.0 if sigma < 0 else 0.0), "calendário/release"))
+            out.append(IdentifiedEvent(kind, e.name, e.time, IMPORTANCE.get(e.impact, 0.6), e.consensus, e.actual, sigma, sign, "calendário/release"))
         for n in news:
             if now - n.time > timedelta(hours=max_age_hours) or n.time > now:
                 continue

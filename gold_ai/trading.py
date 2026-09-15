@@ -390,7 +390,7 @@ class MaxProfitEngine:
 
 # --------------------------------------------------------------------------- NO TRADE + risco
 def no_trade_check(a: Assessment, limits: RiskLimits, spread: Optional[float] = None, min_confidence: float = 60.0,
-                   min_level: int = 2) -> list[str]:
+                   min_level: int = 2, max_spread: Optional[float] = None) -> list[str]:
     """Fatores conflitantes, confiança baixa ou spread alto → 🟡 NÃO OPERAR. Lista vazia = pode operar."""
     reasons: list[str] = []
     if not a.has_edge:
@@ -406,8 +406,9 @@ def no_trade_check(a: Assessment, limits: RiskLimits, spread: Optional[float] = 
         reasons.append(f"fatores conflitantes contra a direção: {', '.join(against)}")
     if a.premove.stage.value == "MOVIMENTO":
         reasons.append("movimento já ocorreu (não perseguir)")
-    if spread is not None and spread > limits.max_spread:
-        reasons.append(f"spread {spread:.2f} > máximo {limits.max_spread:.2f}")
+    lim_spread = max_spread if max_spread is not None else limits.max_spread
+    if spread is not None and spread > lim_spread:
+        reasons.append(f"spread {spread:g} > máximo do ativo {lim_spread:g}")
     return reasons
 
 

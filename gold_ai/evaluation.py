@@ -231,7 +231,7 @@ class HistoryFrame:
     breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
     symbol: str = "XAUUSD"                                     # mercado (para o NEWS ENGINE por mercado)
     events: Optional[object] = None                            # history.EventHistory (banco point-in-time de eventos/notícias)
-    news_mode: str = "full"                                    # none | macro | full — o que do banco o cérebro pode ver
+    news_mode: str = "full"                                    # none | macro | full | full_sem_relogio | full_sem_flow — o que o cérebro pode ver
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -278,9 +278,10 @@ class HistoryFrame:
         _, d_zq = change(self.fedfunds, False)
         if d_zq is not None:
             s.fed_cut_prob_change_pp = round(max(-100.0, min(100.0, d_zq * 100 * 4)), 1)   # Δpreço → −Δtaxa implícita (bp) → p.p. de corte
-        be_pts = [(d, v) for d, v in self.breakeven_daily if d <= t] if self.breakeven_daily else []
+        avail = t - timedelta(days=1)   # série diária do FRED: o fecho do dia D só existe em D+1 (anti look-ahead)
+        be_pts = [(d, v) for d, v in self.breakeven_daily if d <= avail] if self.breakeven_daily else []
         if self.real_yield_daily:
-            pts = [(d, v) for d, v in self.real_yield_daily if d <= t]
+            pts = [(d, v) for d, v in self.real_yield_daily if d <= avail]
             if len(pts) >= 2:
                 s.real_yield_10y = pts[-1][1]
                 if s.us10y_change_bp is not None and len(be_pts) >= 2:
@@ -290,9 +291,10 @@ class HistoryFrame:
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
         self._attach_events(s, t)
-        from .flow_anomaly import FlowAnomalyEngine
-        fa = FlowAnomalyEngine().assess(self.symbol, s, [], t)
-        s.flow_score, s.flow_status, s.flow_origin, s.flow_direction, s.anomalous_regime, s.flow_chain = fa.score, fa.status, fa.origin, fa.direction, fa.anomalous_regime, fa.chain
+        if self.news_mode != "full_sem_flow":
+            from .flow_anomaly import FlowAnomalyEngine
+            fa = FlowAnomalyEngine().assess(self.symbol, s, getattr(self, "_last_identified", []) if self.events is not None and self.news_mode != "none" else [], t)
+            s.flow_score, s.flow_status, s.flow_origin, s.flow_direction, s.anomalous_regime, s.flow_chain = fa.score, fa.status, fa.origin, fa.direction, fa.anomalous_regime, fa.chain
         return s
 
     def reaction_stats(self):
@@ -303,9 +305,9 @@ class HistoryFrame:
             return cached
         from .reaction import ReactionStats, records_from_history
 
-        series = [(c.time, c.close) for c in self.xau]
-        leads = {"USD": [(c.time, c.close) for c in self.dxy], "YIELD": [(c.time, c.close) for c in self.us10y]}
-        closes = [c.close for c in self.xau]
+        one_h = timedelta(hours=1)      # Candle.time é a ABERTURA da barra H1: o fecho só existe 60 min depois
+        series = [(c.time + one_h, c.close) for c in self.xau]
+        leads = {"USD": [(c.time + one_h, c.close) for c in self.dxy], "YIELD": [(c.time + one_h, c.close) for c in self.us10y]}
 
         def atr_at(t: datetime) -> float:
             j = self._at(self.xau, t)
@@ -326,15 +328,26 @@ class HistoryFrame:
         events, news = self.events.snapshot_inputs(t)
         if self.news_mode == "macro":
             news = []
+        use_clock = self.news_mode != "full_sem_relogio"
         s.events = events
         identified = EventIdentifier().identify(news, events, t)
+        self._last_identified = identified
         na = NewsEngine().assess(self.symbol, s, identified, t)
         s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
         # REACTION ENGINE: relógio com estatística point-in-time (só eventos concluídos antes de t)
         from .reaction import ReactionClock
-        ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t)
-        s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
-        s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
+        lead = {}
+        if identified:
+            ev0 = max(identified, key=lambda e: e.time)
+            for name, series, pct in (("USD", self.dxy, True), ("YIELD", self.us10y, False)):
+                j0, j1 = self._at(series, ev0.time - timedelta(hours=1)), self._at(series, t - timedelta(hours=1))   # fechos ≤ instante
+                if j0 is not None and j1 is not None and j1 >= j0:
+                    a, b = series[j0].close, series[j1].close
+                    lead[name] = ((b / a - 1) * 100) if pct else ((b - a) * 100)
+        if use_clock:
+            ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t, lead or None)
+            s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
+            s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         if self.news_mode == "full":
             tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
             if tones:
@@ -406,7 +419,7 @@ class Backtester:
             # OPPORTUNITY ENGINE: cada passo é uma oportunidade analisada
             d_dir = a.direction if a.direction != Direction.LATERAL else a.premove.direction
             entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
-            rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
+            rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL_GATE")   # com vantagem mas barrada pelo gate = analisada
             # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
             decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
             funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
@@ -414,7 +427,7 @@ class Backtester:
             coverage_n += 1
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
-                rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
+                rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: min(end, i + 1 + self.horizon_min // 60 + 2)], self.horizon_min)
             decisions.append(rec)
             if entered:
                 entries.append((a.time, sig.direction.value))
@@ -440,7 +453,7 @@ class Backtester:
             signals.append(record_from(a, sig, snap.atr))
             if self.simulate_trades and sig.type != SignalType.WATCH:
                 plan = mpe.plan(a, snap, sig.direction, sig.type.value)
-                sim = simulate_all(plan, xau[i + 1: i + 1 + horizon_bars + 2], self.horizon_min)
+                sim = simulate_all(plan, xau[i + 1: min(end, i + 1 + horizon_bars + 2)], self.horizon_min)
                 row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
                        "score": a.score, "direction": sig.direction.value, "entry": a.price}
                 trade_rows.append(row)
@@ -450,8 +463,7 @@ class Backtester:
             tr.close(tr.r_at(xau[min(end, len(xau)) - 1].close), "FIM", xau[min(end, len(xau)) - 1].time)
             row["results"]["adaptive"] = tr.result_r
         path = [(c.time, c.close) for c in xau[start:end]]
-        atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
-        threshold = self.threshold_atr * statistics.fmean(atrs)
+        threshold = self.threshold_atr * (_atr(xau[max(0, start - 20):end]) or 1.0)   # do caminho, não dos sinais (comparável entre configs)
         from .opportunity import opportunity_report
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
@@ -527,8 +539,9 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     # agrega OOS
     all_sigs = [s for _, r in folds for s in r.signals]
     path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + train_folds * fold_len:]]
-    atrs = [s.atr for s in all_sigs if s.atr] or [1.0]
-    oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
+    oos_start = bt.warmup + train_folds * fold_len
+    oos_thr = bt.threshold_atr * (_atr(bt.frame.xau[max(0, oos_start - 20):]) or 1.0)
+    oos = evaluate(all_sigs, path, oos_thr, bt.horizon_min)
     from .trading import r_stats
     rows = [r for _, res in folds for r in res.trade_rows]
     # oportunidades OOS agregadas: decisões, entradas e curva de limiar de todos os folds de teste
@@ -536,7 +549,7 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     decisions = [d for _, res in folds if res.opportunity for d in res.decisions]
     entries = [e for _, res in folds if res.opportunity for e in res.entries]
     curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
-    opp = opportunity_report(decisions, path, entries, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min, curve_rows) if decisions else None
+    opp = opportunity_report(decisions, path, entries, oos_thr, bt.horizon_min, curve_rows) if decisions else None
     from .opportunity import Funnel
     fun = Funnel()
     for _, res in folds:

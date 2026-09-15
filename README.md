@@ -212,6 +212,32 @@ ao atingir +10% no dia o Risk Guard bloqueia novas entradas até o dia seguinte 
 o monitor. Sem edge, não opera — a meta não cria entradas. Com 3% por operação, +10% = +3,33R líquidos no dia (+1R = +3%).
 O painel de capital mostra a meta em USD, o % do dia e quantos R faltam.
 
+## 🔧 5.1 — estabilização (pente-fino: 4 revisores + auditoria do usuário)
+
+Corrigido antes de qualquer ajuste de limiar:
+- **Look-ahead no backtest**: série diária do FRED (DFII10/T10YIE) só visível no dia seguinte; candles carimbados no FECHO
+  (não na abertura) para o relógio de reação, o simulador de ticks/M1 e o T0 do alvo; limiar de "movimento relevante" vem do
+  caminho, não dos sinais; janelas de trade/hipotético não invadem o fold seguinte; FLOW no backtest recebe os eventos.
+- **Execução multiativo**: `SymbolSpec` por símbolo (dígitos, tick, valor do tick, passo/mín/máx de lote, stops level,
+  filling, spread e slippage máximos) — padrão por mercado e substituído pelo `symbol_info` do MT5 quando conectado; lote e
+  valor do ponto (USDJPY/CFDs) vêm do broker; SL/TP arredondados ao tick do ativo; spread máximo por ativo.
+- **LIVE**: fechamento recusado pelo broker nunca deixa posição órfã (reverte e tenta de novo); P&L não é contado duas vezes
+  com sincronização do broker; perda diária, meta e pico sobrevivem a reinício (tabela `account`); `/CLOSE`/`/STATUS`
+  valem para todos os mercados; `--authorize` autoriza UMA ordem real, não uma por mercado; SL divergente + recusa de
+  fechamento é assumida pelo monitor com o SL real.
+- **MT5 fuso**: só confia no tick fresco; fim de semana usa o último fuso detectado; `doctor --mt5` testa o alinhamento
+  dos carimbos (último M1 aberto há < 3 min).
+- **Estratégia**: VWAP DE SESSÃO (reinicia às 22:00 UTC; NY 13:30 para índices) nos intradiários; FOMC/BCE/BoJ classificados
+  hawkish/dovish pela decisão vs consenso; PPI, estoques de petróleo e China com transmissão própria; relógio com níveis de
+  evidência por amostra (n < 5 UNKNOWN · 5–9 fraca · 10–19 moderada · 20–29 boa · 30+ utilizável · 50+ forte) e P histórica
+  encolhida para 0,5 conforme n; líderes medidos DESDE O EVENTO; T0 real no live a partir do M1 (Yahoo DXY/US10Y) e dos
+  candles do alvo; veredito por ativo pela MEDIANA das combinações (não pelo melhor caso) + `🧭 WALK-FORWARD DO ATRASO`
+  (escolha na 1ª metade, resultado na 2ª); `compare-news --modes ...,full_sem_relogio,full_sem_flow` isola relógio e fluxo.
+- **Dados**: Dukascopy não cacheia 404 recente por um ano, domingo 21h; ALFRED salva antes de marcar progresso; 4xx não é
+  repetido; um timeframe recusado no Yahoo não derruba os outros; manchetes nunca entram como calendário futuro; eventos
+  do RSS não se duplicam a cada ciclo; ouro no live com MT5 usa o SPOT do broker; símbolo ausente cai para Yahoo com aviso.
+- Scripts: carimbo do log via PowerShell; `.bat` com CRLF; `STOP_TRADING` encerra o `rodar_live.bat`.
+
 ## 🟣 5.0 — FLOW ANOMALY ENGINE (informação implícita)
 
 O News Engine pergunta "existe uma informação que explica o movimento?". O Flow Anomaly Engine pergunta o inverso: **"existe um
@@ -219,7 +245,7 @@ movimento que revela uma informação que ainda não conhecemos?"** Sem notícia
 persistência, e os líderes (DXY, yields) não explicam; a prata confirma.
 
 ```text
-FLOW SCORE 0–100 = preço anormal (24) + velocidade (19) + volume/ticks (17) + cross-market não explica (16) + persistência (10)
+FLOW SCORE 0–100 = preço anormal (28) + velocidade (22) + volume/ticks (20) + cross-market não explica (18) + persistência (12)
                    − notícia explicativa (até 30)
 Assinatura A: líderes explicam → macro/rates plausível · B: líderes ≈, par confirma, volume ↑ → fluxo institucional POSSÍVEL
 Assinatura C: líderes CONTRA → extremamente anômalo → ANOMALOUS FLOW REGIME (modelo normal suspenso; entradas contra o fluxo adiadas)

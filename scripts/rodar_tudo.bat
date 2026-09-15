@@ -16,10 +16,9 @@ set "ENGINE=market_ai_engine_v5.py"
 set "MERCADOS=XAUUSD,US500,EURUSD,USDJPY,WTI"
 set "INICIO=2026-01-01"
 set "FIM=2026-09-13"
-for /f "tokens=1-3 delims=/ " %%a in ("%date%") do set "D=%%c-%%b-%%a"
-set "H=%time:~0,2%%time:~3,2%"
-set "H=%H: =0%"
-set "LOG=logs\pipeline_%D%_%H%.log"
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HHmm"') do set "STAMP=%%i"
+if "%STAMP%"=="" set "STAMP=%RANDOM%"
+set "LOG=logs\pipeline_%STAMP%.log"
 
 echo [%date% %time%] INICIO DA PIPELINE > "%LOG%"
 echo Log: %LOG%

@@ -386,6 +386,7 @@ class MarketSnapshot:
 
     # Técnico: candles por timeframe (§17, §18)
     candles: dict[str, list[Candle]] = field(default_factory=dict)
+    session_start: tuple[int, int] = (22, 0)   # início da sessão (hora, minuto UTC) para o VWAP de sessão — definido pelo motor conforme o mercado
 
     # Notícias e eventos (§13, §32)
     news: list[NewsItem] = field(default_factory=list)
@@ -662,6 +663,26 @@ def vwap(candles: Sequence[Candle]) -> Optional[float]:
     return sum(((c.high + c.low + c.close) / 3) * c.volume for c in candles) / vol
 
 
+SESSION_START_HOUR_UTC = 22   # sessão global (CME/forex): reinicia às 22:00 UTC; US500 usa a abertura de NY (13:30) via MarketSpec
+
+
+def session_candles(candles: Sequence[Candle], start_hour_utc: int = SESSION_START_HOUR_UTC, start_minute: int = 0) -> list[Candle]:
+    """Candles desde o início da SESSÃO corrente (último cruzamento de start_hour:start_minute UTC). Reinicia todo dia."""
+    if not candles:
+        return []
+    last = candles[-1].time
+    start = last.replace(hour=start_hour_utc, minute=start_minute, second=0, microsecond=0)
+    if start > last:
+        start -= timedelta(days=1)
+    out = [c for c in candles if c.time >= start]
+    return out or list(candles[-1:])
+
+
+def session_vwap(candles: Sequence[Candle], start_hour_utc: int = SESSION_START_HOUR_UTC, start_minute: int = 0) -> Optional[float]:
+    """VWAP DA SESSÃO (reinicia a cada sessão), não VWAP móvel."""
+    return vwap(session_candles(candles, start_hour_utc, start_minute))
+
+
 def swing_levels(candles: Sequence[Candle], lookback: int = 20) -> tuple[Optional[float], Optional[float]]:
     """Suporte/resistência simples: mínima/máxima do lookback."""
     if not candles:
@@ -670,8 +691,8 @@ def swing_levels(candles: Sequence[Candle], lookback: int = 20) -> tuple[Optiona
     return min(c.low for c in win), max(c.high for c in win)
 
 
-def analyze_timeframe(tf: str, candles: Sequence[Candle]) -> TechnicalReading:
-    """Nota técnica -1..+1 de um timeframe combinando múltiplas evidências."""
+def analyze_timeframe(tf: str, candles: Sequence[Candle], session_start: tuple[int, int] = (SESSION_START_HOUR_UTC, 0)) -> TechnicalReading:
+    """Nota técnica -1..+1 de um timeframe combinando múltiplas evidências. VWAP = da sessão nos timeframes intradiários."""
     closes = [c.close for c in candles]
     reading = TechnicalReading(timeframe=tf, score=0.0, trend="LATERAL")
     if len(closes) < 30:
@@ -731,8 +752,8 @@ def analyze_timeframe(tf: str, candles: Sequence[Candle]) -> TechnicalReading:
         if a < 18:
             reading.notes.append("mercado sem tendência (ADX baixo)")
 
-    # 5) VWAP (posição relativa)
-    v = vwap(candles[-60:])
+    # 5) VWAP DA SESSÃO (posição relativa) nos intradiários; nos diários/semanais o VWAP de sessão não faz sentido → rolling
+    v = session_vwap(candles, *session_start) if tf in ("M1", "M5", "M15", "M30", "H1", "H4") else vwap(candles[-60:])
     if v is not None and _atr:
         pos = (close - v) / _atr
         reading.vwap_position = pos
@@ -780,7 +801,7 @@ def analyze_timeframe(tf: str, candles: Sequence[Candle]) -> TechnicalReading:
     return reading
 
 
-def analyze_multi_timeframe(candles_by_tf: dict[str, Sequence[Candle]]) -> tuple[float, list[TechnicalReading]]:
+def analyze_multi_timeframe(candles_by_tf: dict[str, Sequence[Candle]], session_start: tuple[int, int] = (SESSION_START_HOUR_UTC, 0)) -> tuple[float, list[TechnicalReading]]:
     """Retorna (nota técnica global -1..+1, leituras por timeframe)."""
     readings: list[TechnicalReading] = []
     num, den = 0.0, 0.0
@@ -788,7 +809,7 @@ def analyze_multi_timeframe(candles_by_tf: dict[str, Sequence[Candle]]) -> tuple
         cs = candles_by_tf.get(tf)
         if not cs:
             continue
-        r = analyze_timeframe(tf, cs)
+        r = analyze_timeframe(tf, cs, session_start)
         readings.append(r)
         if "dados insuficientes" in r.notes:
             continue
@@ -1095,7 +1116,7 @@ def score_sentimento(s: MarketSnapshot, w: float) -> FactorScore:
 def score_tecnico(s: MarketSnapshot, w: float) -> tuple[FactorScore, list]:
     if not s.candles:
         return _factor("tecnico", w, 0.0, "sem candles", available=False), []
-    global_score, readings = analyze_multi_timeframe(s.candles)
+    global_score, readings = analyze_multi_timeframe(s.candles, getattr(s, "session_start", (22, 0)))
     valid = [r for r in readings if "dados insuficientes" not in r.notes]
     if not valid:
         return _factor("tecnico", w, 0.0, "dados insuficientes", available=False), readings
@@ -2070,6 +2091,17 @@ class PredictionMemory:
         r = self.conn.execute("SELECT capital FROM account ORDER BY id DESC LIMIT 1").fetchone()
         return float(r["capital"]) if r else None
 
+    def account_rows(self) -> list[tuple[datetime, float, Optional[float]]]:
+        out = []
+        for r in self.conn.execute("SELECT hora, capital, pnl FROM account ORDER BY id").fetchall():
+            try:
+                t = datetime.fromisoformat(r["hora"])
+                t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            out.append((t, float(r["capital"]), r["pnl"]))
+        return out
+
     def equity_curve(self) -> list[tuple[datetime, float]]:
         return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
 
@@ -2743,6 +2775,7 @@ class GoldAIEngine:
 
     # ------------------------------------------------------------------ ciclo
     def analyze(self, s: MarketSnapshot) -> Assessment:
+        s.session_start = self._session_start()          # VWAP de sessão conforme o mercado (NY para índices; 22:00 UTC nos demais)
         factors, readings = self.score_factors(s)
         score = self.total_score(factors)
         systemic = systemic_risk_index(s)
@@ -2816,6 +2849,16 @@ class GoldAIEngine:
         if sig is not None:
             sig.text = format_signal(sig)
         return sig
+
+    def _session_start(self) -> tuple[int, int]:
+        """Início da sessão para o VWAP: abertura de NY (13:30) em índices; 22:00 UTC (CME/forex) nos demais."""
+        try:
+            spec = MARKETS.get(self.cfg.symbol)
+            if spec is not None and spec.session_hours_utc != (0, 24):
+                return (spec.session_hours_utc[0], 30 if spec.session_hours_utc[0] == 13 else 0)
+        except Exception:  # noqa: BLE001
+            pass
+        return (22, 0)
 
     def run_cycle(self, s: MarketSnapshot, new_event_key: Optional[str] = None) -> tuple[Assessment, Optional[Signal]]:
         a = self.analyze(s)
@@ -3131,6 +3174,8 @@ class HttpClient:
                 if e.code == 429:   # limite de requisições: repetir em segundos só prolonga o bloqueio — quem decide a espera é o chamador
                     retry_after = e.headers.get("Retry-After") if e.headers else None
                     raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests" + (f" (Retry-After {retry_after}s)" if retry_after else "")) from e
+                if 400 <= e.code < 500:      # erro do pedido (chave, parâmetro, 404): repetir não muda nada
+                    raise DataError(f"falha ao buscar {url}: {e}") from e
                 last = e
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
             except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
@@ -3165,6 +3210,8 @@ class HttpClient:
                     return b""
                 if e.code == 429:
                     raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests") from e
+                if 400 <= e.code < 500:
+                    raise DataError(f"falha ao buscar {url}: {e}") from e
                 last = e
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
             except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
@@ -3218,8 +3265,13 @@ def parse_chart(payload: dict) -> list[Candle]:
     ts = result.get("timestamp") or []
     q = (result.get("indicators", {}).get("quote") or [{}])[0]
     out: list[Candle] = []
+    n = len(ts)
+    col = lambda k: (q.get(k) or [None] * n)  # noqa: E731
+    opens, highs, lows, closes = col("open"), col("high"), col("low"), col("close")
     for i, t in enumerate(ts):
-        o, h, l, c = q.get("open", [None])[i], q.get("high", [None])[i], q.get("low", [None])[i], q.get("close", [None])[i]
+        if i >= min(len(opens), len(highs), len(lows), len(closes)):
+            break
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
         if None in (o, h, l, c):
             continue
         v = (q.get("volume") or [0] * len(ts))[i] or 0
@@ -3286,7 +3338,10 @@ class YahooCollector:
     def all_timeframes(self, symbol: str, tfs: tuple[str, ...] = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1")) -> dict[str, list[Candle]]:
         out: dict[str, list[Candle]] = {}
         for tf in tfs:
-            cs = self.candles(symbol, tf, ttl=60 if TF_MINUTES[tf] <= 60 else 900)
+            try:
+                cs = self.candles(symbol, tf, ttl=60 if TF_MINUTES[tf] <= 60 else 900)
+            except DataError:
+                continue                      # um timeframe recusado (ex.: 1m) não derruba os outros
             if cs:
                 out[tf] = cs
         return out
@@ -3563,6 +3618,8 @@ class NewsCollector:
         out: list[NewsItem] = []
         seen: set[str] = set()
         self.health = []
+        if hasattr(self.interpreter, "events"):
+            self.interpreter.events = []          # reinterpretação a cada ciclo: sem duplicar eventos já lidos
         self.errors = {}
         for url in self.feeds:
             source = url.split("/")[2]
@@ -3971,23 +4028,67 @@ class MT5Client:
         self.connected = True
         self.server_offset_hours = self._detect_server_offset()
 
+    OFFSET_CACHE = os.environ.get("GOLD_AI_OFFSET_CACHE") or os.path.join(os.path.expanduser("~"), ".gold_ai_mt5_offset.json")
+
     def _detect_server_offset(self) -> float:
-        """Fuso do servidor da corretora: compara o carimbo do último tick com o relógio UTC local (arredondado à hora).
-        MT5_UTC_OFFSET_HOURS no .env força um valor. Sem tick recente (fim de semana), usa 0 e avisa."""
+        """Fuso do servidor da corretora: compara o carimbo do último tick com o relógio UTC local. SÓ confia quando o tick é
+        FRESCO (≤ 2 h) e o resíduo é pequeno — em fim de semana/feriado o último tick é velho e o cálculo sairia errado.
+        Nesses casos usa o último valor detectado (cache) ou 0 com aviso. MT5_UTC_OFFSET_HOURS no .env força um valor."""
         forced = os.environ.get("MT5_UTC_OFFSET_HOURS") or getattr(self.cfg, "utc_offset_hours", None)
+        self.offset_note = ""
         if forced not in (None, ""):
+            self.offset_note = "forçado por MT5_UTC_OFFSET_HOURS"
             return float(forced)
         try:
             t = self.mt5.symbol_info_tick(self.cfg.symbol)
             ts = float(getattr(t, "time", 0) or 0)
         except Exception:  # noqa: BLE001
             ts = 0.0
-        if not ts:
-            return 0.0
         now = datetime.now(timezone.utc).timestamp()
-        if abs(now - ts) > 3 * 86400:      # tick velho (mercado fechado há dias): não dá para inferir
+        if not ts:                      # terminal sem tick nenhum (ou simulado): nada a inferir
+            self.offset_note = "sem tick para inferir o fuso — 0 (defina MT5_UTC_OFFSET_HOURS se necessário)"
             return 0.0
-        return float(round((ts - now) / 3600.0))
+        if ts:
+            raw = (ts - now) / 3600.0
+            off = float(round(raw))
+            fresh = abs(raw - off) <= 0.25 and abs(off) <= 14 and abs(ts - now - off * 3600) <= 2 * 3600
+            if fresh:
+                try:
+                    with open(self.OFFSET_CACHE, "w", encoding="utf-8") as f:
+                        json.dump({"offset": off, "at": datetime.now(timezone.utc).isoformat()}, f)
+                except OSError:
+                    pass
+                self.offset_note = "detectado pelo último tick"
+                return off
+        try:
+            with open(self.OFFSET_CACHE, encoding="utf-8") as f:
+                cached = json.load(f)
+            self.offset_note = f"último tick antigo (mercado fechado?) — usando o fuso detectado em {cached.get('at', '')[:16]}"
+            return float(cached["offset"])
+        except (OSError, ValueError, KeyError):
+            self.offset_note = "AVISO: sem tick recente e sem cache — fuso 0; defina MT5_UTC_OFFSET_HOURS no .env (Pepperstone: 2 no inverno, 3 no verão)"
+            return 0.0
+
+    def symbol_spec(self, symbol: Optional[str] = None):
+        """Especificação de execução real do símbolo (symbol_info): dígitos, tick, valor do tick, passo de lote, stops level, filling."""
+        sym = symbol or self.cfg.symbol
+        base = default_symbol_spec(sym)
+        try:
+            info = self.mt5.symbol_info(sym)
+        except Exception:  # noqa: BLE001
+            info = None
+        if info is None:
+            return base
+        g = lambda k, d: (getattr(info, k, None) if getattr(info, k, None) not in (None, 0, 0.0) else d)  # noqa: E731
+        fm = int(getattr(info, "filling_mode", 0) or 0)
+        filling = "FOK" if fm & 1 and not fm & 2 else "IOC" if fm & 2 else base.filling
+        spread_pts = float(getattr(info, "spread", 0) or 0)
+        point = float(g("point", base.point))
+        spec = SymbolSpec(sym, int(g("digits", base.digits)), float(g("trade_tick_size", base.tick_size)), float(g("trade_tick_value", base.tick_value_usd)),
+                          float(g("volume_min", base.volume_min)), float(g("volume_max", base.volume_max)), float(g("volume_step", base.volume_step)),
+                          int(getattr(info, "trade_stops_level", 0) or 0), int(getattr(info, "trade_freeze_level", 0) or 0),
+                          base.max_spread or max(2 * spread_pts * point, 2 * point), base.max_slippage or max(spread_pts * point, point), filling, "mt5")
+        return spec
 
     def close(self) -> None:
         if self.connected:
@@ -4226,7 +4327,8 @@ class DukascopyImporter:
     def _fetch_hour(self, inst: str, h: datetime) -> Optional[bytes]:
         for attempt in range(self.retries + 1):
             try:
-                data = self.http.get_bytes(hour_url(inst, h), ttl=365 * 24 * 3600, allow_404=True)
+                recent = h > datetime.now(timezone.utc) - timedelta(hours=48)
+                data = self.http.get_bytes(hour_url(inst, h), ttl=(3600 if recent else 365 * 24 * 3600), allow_404=True)   # 404 recente não é 'sem dados' para sempre
                 if self.pace:
                     self._sleep(self.pace)
                 return data
@@ -4244,7 +4346,7 @@ class DukascopyImporter:
         sc = scale or sc
         out = []
         for h in sorted(set(x.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc) for x in hours)):
-            if h.weekday() == 5 or (h.weekday() == 6 and h.hour < 22):
+            if h.weekday() == 5 or (h.weekday() == 6 and h.hour < 21):
                 continue                                              # mercado fechado: nem pede
             data = self._fetch_hour(inst, h)
             if data is None:
@@ -4281,7 +4383,7 @@ class DukascopyImporter:
         t = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
         t_end = datetime(end.year, end.month, end.day, 23, tzinfo=timezone.utc)
         while t <= t_end:
-            if t.weekday() < 5 or (t.weekday() == 6 and t.hour >= 22):
+            if t.weekday() < 5 or (t.weekday() == 6 and t.hour >= 21):
                 hours.append(t)
             t += timedelta(hours=1)
         if self._log:
@@ -4683,7 +4785,7 @@ class MaxProfitEngine:
 
 # --------------------------------------------------------------------------- NO TRADE + risco
 def no_trade_check(a: Assessment, limits: RiskLimits, spread: Optional[float] = None, min_confidence: float = 60.0,
-                   min_level: int = 2) -> list[str]:
+                   min_level: int = 2, max_spread: Optional[float] = None) -> list[str]:
     """Fatores conflitantes, confiança baixa ou spread alto → 🟡 NÃO OPERAR. Lista vazia = pode operar."""
     reasons: list[str] = []
     if not a.has_edge:
@@ -4699,8 +4801,9 @@ def no_trade_check(a: Assessment, limits: RiskLimits, spread: Optional[float] = 
         reasons.append(f"fatores conflitantes contra a direção: {', '.join(against)}")
     if a.premove.stage.value == "MOVIMENTO":
         reasons.append("movimento já ocorreu (não perseguir)")
-    if spread is not None and spread > limits.max_spread:
-        reasons.append(f"spread {spread:.2f} > máximo {limits.max_spread:.2f}")
+    lim_spread = max_spread if max_spread is not None else limits.max_spread
+    if spread is not None and spread > lim_spread:
+        reasons.append(f"spread {spread:g} > máximo do ativo {lim_spread:g}")
     return reasons
 
 
@@ -5161,6 +5264,62 @@ inventar edge. O técnico e o fluxo vêm sempre dos candles do próprio mercado.
 # USD_SHORT = o mercado sobe quando o dólar cai; RISK_ON = sobe com apetite a risco; OIL = petróleo.
 
 
+@dataclass
+class SymbolSpec:
+    """Especificação de execução por símbolo — padrão por mercado; substituída pela do MT5 (symbol_info) quando conectado.
+    point_value_usd = tick_value / tick_size (USD por 1.0 de preço por lote) — dinâmico para USDJPY e CFDs."""
+
+    symbol: str
+    digits: int = 2
+    tick_size: float = 0.01
+    tick_value_usd: float = 1.0          # USD por tick por lote
+    volume_min: float = 0.01
+    volume_max: float = 100.0
+    volume_step: float = 0.01
+    stops_level_points: int = 0          # distância mínima SL/TP em pontos
+    freeze_level_points: int = 0
+    max_spread: float = 0.0              # em unidades de preço (0 = usar 2× spread típico)
+    max_slippage: float = 0.0            # em unidades de preço (0 = usar spread típico)
+    filling: str = "IOC"                 # IOC | FOK | RETURN
+    source: str = "padrão"               # padrão | mt5
+
+    @property
+    def point(self) -> float:
+        return 10.0 ** (-self.digits)
+
+    @property
+    def point_value_usd(self) -> float:
+        return (self.tick_value_usd / self.tick_size) if self.tick_size > 0 else 0.0
+
+    def round_price(self, x: float) -> float:
+        return round(round(x / self.tick_size) * self.tick_size, self.digits) if self.tick_size > 0 else round(x, self.digits)
+
+    def normalize_volume(self, lots: float) -> float:
+        if lots < self.volume_min:
+            return 0.0
+        n = int((lots - self.volume_min) / self.volume_step + 1e-9)
+        return round(min(self.volume_max, self.volume_min + n * self.volume_step), 3)
+
+    def min_stop_distance(self) -> float:
+        return self.stops_level_points * self.point
+
+
+DEFAULT_SYMBOL_SPECS: dict[str, SymbolSpec] = {
+    "XAUUSD": SymbolSpec("XAUUSD", 2, 0.01, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.60, 0.30),
+    "EURUSD": SymbolSpec("EURUSD", 5, 0.00001, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.00020, 0.00010),
+    "USDJPY": SymbolSpec("USDJPY", 3, 0.001, 0.68, 0.01, 100.0, 0.01, 0, 0, 0.030, 0.015),     # tick value ≈ 1000 JPY / USDJPY
+    "US500": SymbolSpec("US500", 1, 0.1, 0.1, 0.1, 100.0, 0.1, 0, 0, 1.0, 0.5),
+    "WTI": SymbolSpec("WTI", 3, 0.001, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.06, 0.03),
+    "NAS100": SymbolSpec("NAS100", 1, 0.1, 0.1, 0.1, 100.0, 0.1, 0, 0, 3.0, 1.5),
+    "GBPUSD": SymbolSpec("GBPUSD", 5, 0.00001, 1.0, 0.01, 100.0, 0.01, 0, 0, 0.00030, 0.00015),
+    "BTCUSD": SymbolSpec("BTCUSD", 2, 0.01, 0.01, 0.01, 100.0, 0.01, 0, 0, 40.0, 20.0),
+}
+
+
+def default_symbol_spec(symbol: str) -> SymbolSpec:
+    return DEFAULT_SYMBOL_SPECS.get(symbol.upper(), SymbolSpec(symbol.upper()))
+
+
 @dataclass(frozen=True)
 class MarketSpec:
     symbol: str                        # nome canônico (XAUUSD, EURUSD, US500, USDJPY, WTI)
@@ -5279,7 +5438,15 @@ TRANSMISSION: dict[str, dict[str, float]] = {
     "oil_supply_increase": {"oil": -1.0, "risk": +0.1},
     "cb_gold_buying": {"safe_haven": +0.6},
     "china_stimulus": {"risk": +0.6, "oil": +0.4, "dollar": -0.2},
+    # releases sem entrada própria antes (eram só regra do banco histórico)
+    "ppi":         {"yields": +0.7, "dollar": +0.5, "risk": -0.4},
+    "oil_inventories": {"oil": -0.8},                              # estoques ACIMA do esperado → petróleo cai
+    "ecb_hawkish": {"dollar": -0.6, "yields": +0.2, "risk": -0.2}, "ecb_dovish": {"dollar": +0.6, "yields": -0.2, "risk": +0.2},
+    "boj_hawkish": {"dollar": -0.4, "yields": +0.2, "risk": -0.2}, "boj_dovish": {"dollar": +0.4, "yields": -0.2, "risk": +0.2},
+    "china":       {"risk": +0.4, "oil": +0.3},
 }
+# decisões de bancos centrais: o "actual vs consenso" define hawkish/dovish; sem surpresa, a direção vem do tom (manchetes)
+CENTRAL_BANK_KINDS = {"fomc": ("fomc_hawkish", "fomc_dovish"), "ecb": ("ecb_hawkish", "ecb_dovish"), "boj": ("boj_hawkish", "boj_dovish")}
 
 # Como cada canal afeta cada mercado (+1 = mercado sobe quando o canal sobe).
 CHANNEL_TO_MARKET: dict[str, dict[str, float]] = {
@@ -5314,7 +5481,7 @@ class IdentifiedEvent:
         return max(0.0, (now - self.time).total_seconds() / 60)
 
 
-TYPICAL_SURPRISE = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "nfp": 60.0, "unemployment": 0.1, "earnings": 0.1, "gdp": 0.5,
+TYPICAL_SURPRISE = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "nfp": 60.0, "unemployment": 0.1, "earnings": 0.1, "gdp": 0.5, "ppi": 0.2, "fomc": 0.25, "ecb": 0.25, "boj": 0.1, "oil_inventories": 2.0,
                     "ism": 1.5, "pmi": 1.0, "retail_sales": 0.4, "jolts": 300.0, "jobless_claims": 15.0, "consumer_confidence": 3.0, "michigan": 2.0, "housing": 5.0}
 
 QUALITATIVE = [
@@ -5342,12 +5509,22 @@ class EventIdentifier:
             sp = e.surprise()
             typical = TYPICAL_SURPRISE.get(e.kind, max(abs(e.consensus or 1.0) * 0.1, 0.1))
             sigma = (sp / typical) if sp is not None and typical else None
-            key = f"{e.kind}:{e.time:%Y%m%d%H}"
+            kind = e.kind
+            sign = 0.0 if sigma is None else (1.0 if sigma > 0 else -1.0 if sigma < 0 else 0.0)
+            if e.kind in CENTRAL_BANK_KINDS:
+                # decisão de juros: acima do consenso = hawkish, abaixo = dovish; em linha = sem direção pela decisão (o tom decide)
+                hawk, dove = CENTRAL_BANK_KINDS[e.kind]
+                if sign > 0:
+                    kind, sign = hawk, 1.0
+                elif sign < 0:
+                    kind, sign = dove, 1.0
+                else:
+                    sign = 0.0
+            key = f"{kind}:{e.time:%Y%m%d%H}" + (f":{e.name[:30].lower()}" if kind == "generic" else "")
             if key in seen:
                 continue
             seen.add(key)
-            out.append(IdentifiedEvent(e.kind, e.name, e.time, IMPORTANCE.get(e.impact, 0.6), e.consensus, e.actual, sigma,
-                                       0.0 if sigma is None else (1.0 if sigma > 0 else -1.0 if sigma < 0 else 0.0), "calendário/release"))
+            out.append(IdentifiedEvent(kind, e.name, e.time, IMPORTANCE.get(e.impact, 0.6), e.consensus, e.actual, sigma, sign, "calendário/release"))
         for n in news:
             if now - n.time > timedelta(hours=max_age_hours) or n.time > now:
                 continue
@@ -5498,7 +5675,20 @@ from bisect import bisect_right
 FIRST_ATR = 0.15          # 1ª reação: movimento ≥ 0,15 ATR na direção esperada
 CONFIRM_ATR = 0.40        # confirmação: ≥ 0,40 ATR
 LEAD_THRESHOLDS = {"USD": 0.08, "YIELD": 1.5}   # DXY em %, US10Y em bp
-MIN_N = 3                 # amostra mínima para usar a mediana de um tipo de evento
+MIN_N = 5                 # abaixo disto o relógio diz UNKNOWN (não usa mediana nem P histórica)
+CONFIDENCE_TIERS = ((50, "forte"), (30, "utilizável"), (20, "boa"), (10, "moderada"), (5, "fraca"))
+
+
+def confidence_label(n: int) -> str:
+    for k, label in CONFIDENCE_TIERS:
+        if n >= k:
+            return label
+    return "UNKNOWN"
+
+
+def shrink(p: float, n: int, k: float = 10.0) -> float:
+    """Probabilidade histórica encolhida para 0,5 conforme a amostra: n=5 → 1/3 do desvio; n=30 → 3/4; n=50 → 5/6."""
+    return 0.5 + (p - 0.5) * (n / (n + k))
 
 
 @dataclass
@@ -5682,7 +5872,9 @@ class ReactionClock:
     def __init__(self, stats: Optional[ReactionStats] = None) -> None:
         self.stats = stats or ReactionStats()
 
-    def assess(self, market: str, s: MarketSnapshot, events: Sequence[IdentifiedEvent], now: datetime) -> ReactionAssessment:
+    def assess(self, market: str, s: MarketSnapshot, events: Sequence[IdentifiedEvent], now: datetime,
+               lead_since_event: Optional[dict[str, float]] = None) -> ReactionAssessment:
+        """`lead_since_event`: {"USD": Δ% do DXY desde o evento, "YIELD": Δbp} quando o chamador tem a série; sem isso usa a janela."""
         cands = []
         for ev in events:
             exp, chans = expected_direction(ev, market)
@@ -5694,7 +5886,7 @@ class ReactionClock:
         ev, exp, chans = max(cands, key=lambda c: (c[0].importance * (1 if c[0].surprise_sigma is None else min(2.0, abs(c[0].surprise_sigma))), c[0].time))
         sign = 1.0 if exp > 0 else -1.0
         elapsed = ev.age_min(now)
-        ks = self.stats.get(ev.kind, market, now)
+        ks = self.stats.get(ev.kind, market, min(now, ev.time))    # nunca inclui o registro do próprio evento em curso
         n_hist = ks.n if ks else 0
         expected_min = ks.median_first if ks and ks.n >= MIN_N else None
         full_min = ks.median_full if ks and ks.n >= MIN_N else None
@@ -5702,7 +5894,9 @@ class ReactionClock:
         # líderes: canais dollar/yields esperados × observados
         lead: dict[str, str] = {}
         exp_usd, exp_y = chans.get("dollar", 0.0), chans.get("yields", 0.0)
-        for name, e, obs, thr in (("USD", exp_usd, s.dxy_change_pct, LEAD_THRESHOLDS["USD"]), ("YIELD", exp_y, s.us10y_change_bp, LEAD_THRESHOLDS["YIELD"])):
+        obs_usd = (lead_since_event or {}).get("USD", s.dxy_change_pct)
+        obs_y = (lead_since_event or {}).get("YIELD", s.us10y_change_bp)
+        for name, e, obs, thr in (("USD", exp_usd, obs_usd, LEAD_THRESHOLDS["USD"]), ("YIELD", exp_y, obs_y, LEAD_THRESHOLDS["YIELD"])):
             if e == 0.0:
                 continue
             if obs is None:
@@ -5717,9 +5911,9 @@ class ReactionClock:
         move_atr = 0.0
         if s.atr and s.price:
             p0 = None
-            for tf in ("M5", "M15", "H1"):
+            for tf, mins in (("M1", 1), ("M5", 5), ("M15", 15), ("H1", 60)):
                 cs = s.candles.get(tf) or []
-                past = [c for c in cs if c.time <= ev.time]
+                past = [c for c in cs if c.time + timedelta(minutes=mins) <= ev.time]   # barra já FECHADA no instante do evento
                 if past:
                     p0 = past[-1].close
                     break
@@ -5750,10 +5944,12 @@ class ReactionClock:
         if not ks or ks.n < MIN_N:
             hist_note = f"sem histórico suficiente para {ev.kind}→{market} (n={n_hist}; mínimo {MIN_N}) — janela padrão 240 min"
         else:
-            hist_note = f"histórico {ev.kind}→{market}: 1ª reação mediana {ks.median_first:.0f} min, pleno {ks.median_full:.0f} min, P(dir) {ks.p_correct:.0%} (n={ks.n})" \
-                if ks.median_first is not None and ks.median_full is not None else f"histórico {ev.kind}→{market}: n={ks.n}, P(reação) {ks.p_first:.0%}, P(dir) {ks.p_correct:.0%}"
+            hist_note = (f"histórico {ev.kind}→{market}: 1ª reação mediana {ks.median_first:.0f} min, pleno {ks.median_full:.0f} min, P(dir) {ks.p_correct:.0%} "
+                         f"(n={ks.n}, evidência {confidence_label(ks.n)})") \
+                if ks.median_first is not None and ks.median_full is not None else \
+                f"histórico {ev.kind}→{market}: n={ks.n} ({confidence_label(ks.n)}), P(reação) {ks.p_first:.0%}, P(dir) {ks.p_correct:.0%}"
         # probabilidade estimada: base histórica ajustada pela evidência atual (nunca inventada: sem histórico, 0,5 ± evidência)
-        base = ks.p_correct if ks and ks.n >= MIN_N else 0.5
+        base = shrink(ks.p_correct, ks.n) if ks and ks.n >= MIN_N else 0.5    # encolhida para 0,5 conforme a amostra
         prob = base + 0.08 * leads_ok - 0.15 * leads_against + (0.05 if status == "PRESSÃO LATENTE" else 0.0) - (0.25 if target == "contra" else 0.0)
         if status == "EXPIRADO":
             prob = min(prob, 0.45)
@@ -5856,8 +6052,9 @@ class PricePath:
 
     @classmethod
     def from_candles(cls, candles: Sequence[Candle], spread: float, minutes: int = 1) -> "PricePath":
+        """Candle.time é a ABERTURA: o fecho só existe `minutes` depois → carimbo no fecho (anti look-ahead)."""
         half = spread / 2
-        return cls([Quote(c.time, c.close - half, c.close + half) for c in candles], minutes * 60.0)
+        return cls([Quote(c.time + timedelta(minutes=minutes), c.close - half, c.close + half) for c in candles], minutes * 60.0)
 
     def resample(self, minutes: int = 1) -> "PricePath":
         """Ticks → barras de `minutes` (mid = último, spread = média): para checar se a relação sobrevive à resolução de minuto."""
@@ -6084,7 +6281,7 @@ class ReactionTradeSim:
             return None
         sign = rec.base.expected_dir
         entry = (q_in.ask if sign > 0 else q_in.bid) + sign * self.slippage_atr * atr
-        t_short = rec.base.published_at + timedelta(seconds=SHORT_SEC) if rec.lead_first_sec + delay_sec < SHORT_SEC else t_in + timedelta(seconds=SHORT_SEC)
+        t_short = max(t_in, rec.base.published_at + timedelta(seconds=SHORT_SEC)) if rec.lead_first_sec + delay_sec < SHORT_SEC else t_in + timedelta(seconds=SHORT_SEC)
         q_s = path.at_or_before(t_short)
         if q_s is None:
             return None
@@ -6224,7 +6421,7 @@ class ClockTradeTest:
     SAÍDA: QUICK (take +0,40 ATR ou 5 min; stop −0,5) · EXTEND (aos 5 min, se ≥ +0,15 ATR, trailing 0,40 até 60 min) · FOLLOW (stop/60 min).
     Compara com a entrada INGÊNUA (toda reação do líder, saída em 5 min) para isolar o valor do relógio."""
 
-    def __init__(self, delay_sec: int = 5, p_min: float = 0.55, min_n: int = 3, slippage_atr: float = 0.02, latency_sec: float = 0.5) -> None:
+    def __init__(self, delay_sec: int = 5, p_min: float = 0.55, min_n: int = 5, slippage_atr: float = 0.02, latency_sec: float = 0.5) -> None:
         self.delay_sec, self.p_min, self.min_n = delay_sec, p_min, min_n
         self.sim = ReactionTradeSim(slippage_atr, latency_sec)
         self.trades: list[ClockTrade] = []
@@ -6331,7 +6528,7 @@ class ClockTradeTest:
                 sk["sem_preço"] += 1
                 continue
             sign = rec.base.expected_dir
-            if sign * (q_in.mid - q0.mid) / atr >= FIRST_ATR:
+            if abs(q_in.mid - q0.mid) / atr >= FIRST_ATR:      # já reagiu (a favor OU contra) → não é "atrasado"
                 sk["alvo_já_reagiu"] += 1
                 continue
             entry = (q_in.ask if sign > 0 else q_in.bid) + sign * self.sim.slippage_atr * atr
@@ -6381,6 +6578,7 @@ class AssetVerdict:
     exit: str
     n_events: int
     kinds: int
+    robust: float = 0.0     # mediana do líquido entre as combinações atraso × saída com amostra (base do veredito)
 
     @property
     def edge_score(self) -> float:
@@ -6388,7 +6586,7 @@ class AssetVerdict:
 
     def row(self) -> str:
         label = {"🟢": "forte", "🟡": "moderado", "🔴": "sem edge", "⚪": "inconclusivo"}[self.verdict]
-        return (f"{self.symbol:<8}{self.verdict} {label:<13}{self.n_events:>6}{self.n:>7}{self.net:>+9.3f}{self.net / STOP_ATR:>+7.2f}R{self.naive:>+9.3f}"
+        return (f"{self.symbol:<8}{self.verdict} {label:<13}{self.n_events:>6}{self.n:>7}{self.net:>+9.3f}{self.net / STOP_ATR:>+7.2f}R{self.robust:>+9.3f}{self.naive:>+9.3f}"
                 f"{self.delay_sec:>7}s {self.exit:<7}{self.kinds:>6}")
 
 
@@ -6420,20 +6618,21 @@ def asset_verdicts(results: dict[int, list[ClockTestRow]], min_n: int = 20) -> l
             continue
         best = max(valid, key=lambda c: c[2])
         delay, ex, net, n, naive, n_ev, kinds = best
-        if net >= 0.10 and net > naive:
+        robust = statistics.median([c[2] for c in valid])     # mediana das combinações válidas: evita escolher o melhor por sorte
+        if robust >= 0.10 and net > naive:
             v = "🟢"
-        elif net > 0.02:
+        elif robust > 0.02:
             v = "🟡"
         else:
             v = "🔴"
-        out.append(AssetVerdict(sym, v, n, net, naive, delay, ex, n_ev, kinds))
+        out.append(AssetVerdict(sym, v, n, net, naive, delay, ex, n_ev, kinds, robust))
     return sorted(out, key=lambda v: (-VERDICT_SCORE[v.verdict], -v.net))
 
 
 def render_verdicts(verdicts: Sequence[AssetVerdict], resolution: str) -> str:
-    head = f"{'ativo':<8}{'veredito':<16}{'evts':>6}{'entr':>7}{'líquido':>9}{'':>8}{'ingênua':>9}{'atraso':>8} {'saída':<7}{'tipos':>6}"
+    head = f"{'ativo':<8}{'veredito':<16}{'evts':>6}{'entr':>7}{'melhor':>9}{'':>8}{'mediana':>9}{'ingênua':>9}{'atraso':>8} {'saída':<7}{'tipos':>6}"
     lines = [f"🏁 REACTION EDGE POR ATIVO ({resolution}) — o relógio não funciona igual em todos os mercados", head] + [v.row() for v in verdicts]
-    lines.append("   🟢 forte: n ≥ 20, líquido ≥ 0,10 ATR (0,2R) e acima da ingênua · 🟡 moderado: líquido > 0,02 ATR · 🔴 custo consome · ⚪ n < 20")
+    lines.append("   veredito pela MEDIANA das combinações atraso × saída com n ≥ 20 (não pelo melhor caso): 🟢 ≥ 0,10 ATR e melhor > ingênua · 🟡 > 0,02 · 🔴 custo consome · ⚪ n < 20")
     lines.append("   'melhor combinação' atraso × saída por ativo; o Asset Selector usa este veredito (reaction_edge.json) só quando o relógio marca PRESSÃO LATENTE")
     return "\n".join(lines)
 
@@ -6529,6 +6728,46 @@ def render_stability(tick: Sequence[AssetVerdict], m1: Sequence[AssetVerdict]) -
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- WALK-FORWARD DO ATRASO: escolhe na 1ª metade, mede na 2ª
+def walk_forward_choice(tests: dict[int, "ClockTradeTest"]) -> str:
+    """`tests`: atraso → ClockTradeTest já executado (com .trades). Para cada ativo, escolhe (atraso, saída) pelo líquido da
+    PRIMEIRA metade dos eventos e reporta o líquido na SEGUNDA metade — a escolha nunca vê os dados em que é avaliada."""
+    all_tr = [(d, t) for d, ct in tests.items() for t in ct.trades]
+    if not all_tr:
+        return "🧭 WALK-FORWARD DO ATRASO: sem entradas para avaliar"
+    by_sym: dict[str, list] = {}
+    for d, t in all_tr:
+        by_sym.setdefault(t.target, []).append((d, t))
+    lines = ["🧭 WALK-FORWARD DO ATRASO — (atraso × saída) escolhido na 1ª metade dos eventos, resultado medido na 2ª metade (R = 0,5 ATR)",
+             f"{'ativo':<8}{'escolha':<14}{'n1':>4}{'líq.1ª':>9}{'n2':>4}{'líq.2ª':>9}{'ingênua 2ª':>12}  leitura"]
+    for sym, items in sorted(by_sym.items()):
+        times = sorted({t.published_at for _, t in items})
+        split = times[len(times) // 2]
+        first = [(d, t) for d, t in items if t.published_at < split]
+        second = [(d, t) for d, t in items if t.published_at >= split]
+        best, best_net = None, None
+        for d in tests:
+            for ex, attr in (("QUICK", "net_quick"), ("EXTEND", "net_extend"), ("FOLLOW", "net_follow")):
+                xs = [getattr(t, attr) for dd, t in first if dd == d]
+                if len(xs) >= 5:
+                    m = statistics.fmean(xs)
+                    if best_net is None or m > best_net:
+                        best, best_net = (d, ex, attr), m
+        if best is None:
+            lines.append(f"{sym:<8}{'—':<14}{len(first):>4}{'':>9}{len(second):>4}{'':>9}{'':>12}  ⚪ 1ª metade sem 5 entradas por combinação")
+            continue
+        d, ex, attr = best
+        xs2 = [getattr(t, attr) for dd, t in second if dd == d]
+        naive2 = tests[d].naive
+        n2_naive = [v for key, vals in naive2.items() if key[1] == sym for v in vals]
+        net2 = statistics.fmean(xs2) / STOP_ATR if xs2 else 0.0
+        nv2 = (statistics.fmean(n2_naive) / STOP_ATR) if n2_naive else 0.0
+        tag = "⚪ amostra pequena" if len(xs2) < 20 else ("🟢 sobreviveu fora da amostra" if net2 > 0.02 / STOP_ATR and net2 > nv2 else "🔴 não sobreviveu")
+        lines.append(f"{sym:<8}{f'{d}s {ex}':<14}{len(first):>4}{best_net / STOP_ATR:>+8.2f}R{len(xs2):>4}{net2:>+8.2f}R{nv2:>+11.2f}R  {tag}")
+    lines.append("   só a coluna 'líq.2ª' conta: é o que a escolha feita antes teria rendido depois; se ela desaparece, a 'melhor combinação' era ruído")
+    return "\n".join(lines)
+
+
 # ============================================================================
 # FLOW_ANOMALY
 # ============================================================================
@@ -6538,7 +6777,7 @@ def render_stability(tick: Sequence[AssetVerdict], m1: Sequence[AssetVerdict]) -
 O News Engine pergunta "existe uma informação que explica o movimento?". Este motor pergunta o inverso:
 "existe um movimento que revela uma informação que ainda não conhecemos?"
 
-FLOW SCORE 0–100 = preço anormal (24) + velocidade (19) + volume/ticks (17) + cross-market não explica (16) + persistência (10)
+FLOW SCORE 0–100 = preço anormal (28) + velocidade (22) + volume/ticks (20) + cross-market não explica (18) + persistência (12)
 + notícia explicativa (penalidade até −30; 0 quando não há). Assinaturas:
   A  líderes explicam (DXY/yields no sentido esperado)       → movimento macro/rates plausível
   B  líderes parados, par confirma (prata p/ ouro), volume ↑ → fluxo específico do ativo / comprador institucional POSSÍVEL
@@ -6650,13 +6889,13 @@ class FlowAnomalyEngine:
         fa.move_atr, fa.minutes, fa.start_time = round(move, 2), minutes, t0
         comp: dict[str, int] = {}
         # 1) preço anormal: 0,5 ATR/h é normal; 1,5 ATR em poucas horas é extremo
-        comp["preço anormal"] = int(round(24 * max(0.0, min(1.0, (move - 0.4) / 1.1))))
+        comp["preço anormal"] = int(round(28 * max(0.0, min(1.0, (move - 0.4) / 1.1))))
         # 2) velocidade: ATR por minuto (1 ATR em 20 min = extremo)
         speed = (move / minutes) if minutes else None
-        comp["velocidade"] = int(round(19 * max(0.0, min(1.0, (speed - 0.005) / 0.045)))) if speed is not None else (int(round(19 * min(1.0, move / 1.5))) if move > 0.6 else 0)
+        comp["velocidade"] = int(round(22 * max(0.0, min(1.0, (speed - 0.005) / 0.045)))) if speed is not None else (int(round(22 * min(1.0, move / 1.5))) if move > 0.6 else 0)
         # 3) volume/ticks
         vr = _volume_ratio(s)
-        comp["volume/ticks"] = int(round(17 * max(0.0, min(1.0, (vr - 1.2) / 1.8)))) if vr is not None else 0
+        comp["volume/ticks"] = int(round(20 * max(0.0, min(1.0, (vr - 1.2) / 1.8)))) if vr is not None else 0
         # 4) cross-market: quanto do movimento os líderes NÃO explicam
         weights = CHANNEL_TO_MARKET.get(market, {})
         obs = {"dollar": s.dxy_change_pct, "yields": (s.us10y_change_bp / 10.0) if s.us10y_change_bp is not None else None,
@@ -6684,10 +6923,10 @@ class FlowAnomalyEngine:
         pair_confirms = pair_v is not None and (pair_v > 0) == (sign > 0) and abs(pair_v) >= 0.15
         if market in PAIR_FIELD:
             leaders["par"] = "confirma" if pair_confirms else ("n/d" if pair_v is None else "não confirma")
-        comp["cross-market"] = int(round(16 * unexplained))
+        comp["cross-market"] = int(round(18 * unexplained))
         fa.leaders = leaders
         # 5) persistência: não revertido
-        comp["persistência"] = 10 if retrace <= 0.3 else 5 if retrace <= 0.5 else 0
+        comp["persistência"] = 12 if retrace <= 0.3 else 6 if retrace <= 0.5 else 0
         # 6) notícia explicativa (penalidade): evento identificado com direção esperada igual ao movimento
         explained_by_news = 0.0
         for ev in identified or []:
@@ -6705,7 +6944,8 @@ class FlowAnomalyEngine:
         elif against_w > 0 and against_w >= explained_w:
             fa.signature, fa.origin = "C", "E"
         elif explained_w > 0 and unexplained < 0.5:
-            fa.signature, fa.origin = "A", "B" if s.events else "C"
+            released = [e for e in s.events if e.actual is not None and (now - e.time) <= timedelta(hours=6)]
+            fa.signature, fa.origin = "A", "B" if released else "C"
         elif pair_confirms or (vr or 0) >= 1.5:
             fa.signature, fa.origin = "B", "D"
         else:
@@ -6784,11 +7024,9 @@ KIND_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 # eventos sem sensibilidade direta na tabela do motor recebem uma transmissão própria aqui (unidade: acima do consenso)
 EXTRA_TRANSMISSION = {
-    "ppi": {"yields": +0.7, "dollar": +0.5, "risk": -0.4},
-    "oil_inventories": {"oil": -0.8},           # estoques ACIMA do esperado → petróleo cai
-    "ecb": {"dollar": -0.5, "yields": +0.2},    # BCE hawkish (acima) → euro sobe → dólar cai
-    "boj": {"dollar": -0.3, "yields": +0.2},
-    "china": {"risk": +0.4, "oil": +0.3},
+    "fomc": {"yields": +1.0, "dollar": +0.9, "risk": -0.7},     # decisão acima do consenso = hawkish (regra do banco histórico)
+    "ecb": {"dollar": -0.6, "yields": +0.2, "risk": -0.2},      # BCE acima do consenso = hawkish → euro sobe → dólar cai
+    "boj": {"dollar": -0.4, "yields": +0.2, "risk": -0.2},
 }
 TYPICAL = {"cpi": 0.1, "core_cpi": 0.1, "pce": 0.1, "core_pce": 0.1, "ppi": 0.2, "nfp": 60.0, "unemployment": 0.1, "jobless_claims": 15.0, "gdp": 0.5,
            "ism": 1.5, "pmi": 1.0, "retail_sales": 0.4, "jolts": 300.0, "consumer_confidence": 3.0, "michigan": 2.0, "housing": 5.0, "earnings": 0.1,
@@ -6924,7 +7162,8 @@ class EventHistory:
         """Eventos futuros já agendados (consenso conhecido, sem actual) — calendário de risco."""
         hi = t + timedelta(hours=ahead_hours)
         return [HistoricalEvent(e.timestamp, e.published_at, e.event_id, e.event, e.country, e.currency, e.impact, e.forecast, e.previous, None, None, None,
-                                e.category, e.kind, e.source) for e in self.events if t < e.timestamp <= hi]
+                                e.category, e.kind, e.source) for e in self.events
+                if t < e.timestamp <= hi and e.category in MACRO_CATEGORIES and not str(e.source).startswith("gdelt") and e.revised is None]
 
     def snapshot_inputs(self, t: datetime, lookback_hours: float = 24.0) -> tuple[list[EconomicEvent], list[NewsItem]]:
         avail = self.available_at(t, lookback_hours)
@@ -7176,6 +7415,11 @@ def _iso(t: datetime) -> datetime:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
+def _http_code(msg: str) -> Optional[int]:
+    m = re.search(r"HTTP Error (\d{3})", msg)
+    return int(m.group(1)) if m else None
+
+
 def us_release_time(d: date, hour_et: int = 8, minute: int = 30) -> datetime:
     """Horário UTC de uma divulgação às hour_et:minute (hora de Nova York), respeitando o horário de verão dos EUA."""
     def nth_sunday(year: int, month: int, n: int) -> date:
@@ -7248,7 +7492,7 @@ class ALFREDImporter:
             raise DataError(f"FRED_API_KEY inválida ('{self.key[:12]}…'): a chave do FRED tem 32 caracteres hexadecimais minúsculos. "
                             "Gere a sua (gratuita) em https://fred.stlouisfed.org/docs/api/api_key.html e coloque FRED_API_KEY=... no .env")
 
-    def fetch(self, start: date, end: date, series: Optional[list[str]] = None, progress=None) -> EventHistory:
+    def fetch(self, start: date, end: date, series: Optional[list[str]] = None, progress=None, checkpoint=None) -> EventHistory:
         self.validate_key()
         hist = EventHistory()
         # O FRED rejeita (400) realtime_end "no futuro" — e o dia dele é o de St. Louis (UTC−5/−6). Se a data UTC de hoje
@@ -7268,7 +7512,7 @@ class ALFREDImporter:
                 try:
                     payload = self.http.get_json(url_for(rt_end), ttl=24 * 3600)
                 except DataError as e:
-                    if "400" in str(e) and rt_end == end:
+                    if _http_code(str(e)) == 400 and rt_end == end:
                         rt_end = end - timedelta(days=1)
                         if self._log:
                             self._log(f"  ALFRED: {end} ainda é 'futuro' em St. Louis — repetindo com realtime_end={rt_end}")
@@ -7277,8 +7521,9 @@ class ALFREDImporter:
                         raise
             except DataError as e:
                 msg = str(e)
-                reason = ("HTTP 400: chave rejeitada ou parâmetros inválidos (confira FRED_API_KEY)" if "400" in msg else
-                          "HTTP 429: limite de requisições do FRED" if "429" in msg else msg[-160:])
+                code = _http_code(msg)
+                reason = ("HTTP 400: chave rejeitada ou parâmetros inválidos (confira FRED_API_KEY)" if code == 400 else
+                          "HTTP 429: limite de requisições do FRED" if code == 429 else msg[-160:])
                 self.failed.append((sid, reason))
                 if self._log:
                     self._log(f"  ALFRED {sid}: FALHOU — {reason}")
@@ -7288,6 +7533,8 @@ class ALFREDImporter:
                 hist.add(e)
             if self._log:
                 self._log(f"  ALFRED {sid} ({ALFRED_SERIES.get(sid, (sid,))[0]}): {len(part)} publicações/revisões")
+            if checkpoint:
+                checkpoint(hist)                  # salva ANTES de marcar como feito (Ctrl-C não perde nem pula séries)
             if progress is not None:
                 progress.mark(key, len(part))
         return hist
@@ -7394,7 +7641,7 @@ class GDELTImporter:
                 self._last = time.monotonic()
                 if attempt == self.max_retries:
                     raise
-                rate = "429" in str(e)
+                rate = _http_code(str(e)) == 429
                 m = re.search(r"Retry-After (\d+)s", str(e))
                 # 429 é bloqueio por rajada: espera exponencial (60 s, 2, 4, 8, 16 min) ou o Retry-After do servidor
                 wait = (float(m.group(1)) if m else min(self.max_wait, self.retry_wait * (2 ** attempt))) if rate else min(self.retry_wait, 20.0)
@@ -7598,10 +7845,45 @@ class BrokerPosition:
 class ExecutionEngine:
     """Executa e confirma ordens no MT5 (o objeto `mt5` é injetável para testes)."""
 
-    def __init__(self, client, price_tol: float = 0.05, sl_tol: float = 0.05, max_slippage: float = 0.30, deviation: int = 20) -> None:
+    def __init__(self, client, price_tol: Optional[float] = None, sl_tol: Optional[float] = None, max_slippage: Optional[float] = None, deviation: int = 20) -> None:
         self.client = client
         self.mt5 = client.mt5
-        self.price_tol, self.sl_tol, self.max_slippage, self.deviation = price_tol, sl_tol, max_slippage, deviation
+        self._price_tol, self._sl_tol, self._max_slippage, self.deviation = price_tol, sl_tol, max_slippage, deviation
+
+    # ------------------------------------------------------------------ especificação do símbolo (symbol_info): dígitos, tick, lote, stops level, filling
+    @property
+    def spec(self):
+        sp = getattr(self, "_spec", None)
+        if sp is None or sp.symbol != self.client.cfg.symbol:
+            sp = self.client.symbol_spec() if hasattr(self.client, "symbol_spec") else default_symbol_spec(self.client.cfg.symbol)
+            self._spec = sp
+        return sp
+
+    def digits(self, symbol: Optional[str] = None) -> int:
+        return self.spec.digits
+
+    def point(self, symbol: Optional[str] = None) -> float:
+        return self.spec.point
+
+    def rnd(self, x: Optional[float], symbol: Optional[str] = None) -> Optional[float]:
+        return None if x is None else self.spec.round_price(x)
+
+    def filling(self):
+        mt5 = self.mt5
+        name = {"FOK": "ORDER_FILLING_FOK", "RETURN": "ORDER_FILLING_RETURN"}.get(self.spec.filling, "ORDER_FILLING_IOC")
+        return getattr(mt5, name, getattr(mt5, "ORDER_FILLING_IOC", 2))
+
+    @property
+    def price_tol(self) -> float:      # tolerâncias em unidades de preço do símbolo (padrão: spread máximo do ativo)
+        return self._price_tol if self._price_tol is not None else max(self.spec.max_spread, 5 * self.spec.point)
+
+    @property
+    def sl_tol(self) -> float:
+        return self._sl_tol if self._sl_tol is not None else max(self.spec.max_spread, 5 * self.spec.point)
+
+    @property
+    def max_slippage(self) -> float:
+        return self._max_slippage if self._max_slippage is not None else max(self.spec.max_slippage, 3 * self.spec.point)
 
     # ------------------------------------------------------------------ leitura
     def positions(self, symbol: Optional[str] = None) -> list[BrokerPosition]:
@@ -7628,13 +7910,21 @@ class ExecutionEngine:
         buy = plan.direction == Direction.ALTA
         price = ask if buy else bid
         tp = plan.targets.get(plan.recommended) if plan.recommended in plan.targets else plan.targets.get("3R")
-        rep = ExecutionReport(plan.lots or 0.0, round(plan.stop, 2), round(tp, 2) if tp else None, price)
-        if not plan.lots:
-            rep.error = "lote zero"
+        spec = self.spec
+        stop = plan.stop
+        min_dist = spec.min_stop_distance()
+        if min_dist and abs(price - stop) < min_dist:          # stops level da corretora: SL não pode ficar mais perto que isso
+            stop = price - min_dist if buy else price + min_dist
+        vol = spec.normalize_volume(plan.lots or 0.0)
+        rep = ExecutionReport(vol, self.rnd(stop), self.rnd(tp) if tp else None, price)
+        if not vol:
+            rep.error = f"lote {plan.lots} abaixo do mínimo {spec.volume_min} / passo {spec.volume_step}"
             return rep
-        req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": self.client.cfg.symbol, "volume": plan.lots,
+        if abs(stop - plan.stop) > 1e-12:
+            rep.mismatches.append(f"SL ajustado ao stops level ({spec.stops_level_points} pts): {plan.stop} → {rep.requested_sl}")
+        req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": self.client.cfg.symbol, "volume": vol,
                "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": price, "sl": rep.requested_sl, "tp": rep.requested_tp or 0.0,
-               "deviation": self.deviation, "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC}
+               "deviation": self.deviation, "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": self.filling()}
         res = mt5.order_send(req)
         if res is None:
             rep.error = f"order_send devolveu None: {mt5.last_error()}"
@@ -7656,7 +7946,7 @@ class ExecutionEngine:
             rep.error = "posição não encontrada no broker após o envio"
             return rep
         rep.ticket, rep.fill_price, rep.real_volume, rep.real_sl, rep.real_tp = pos.ticket, pos.price_open, pos.volume, pos.sl, pos.tp
-        rep.slippage = round(abs(pos.price_open - rep.requested_price), 2)
+        rep.slippage = round(abs(pos.price_open - rep.requested_price), self.digits())
         rep.confirmed = True
         if abs(pos.volume - rep.requested_volume) > 1e-9:
             rep.mismatches.append(f"volume {pos.volume} ≠ pedido {rep.requested_volume}")
@@ -7679,7 +7969,7 @@ class ExecutionEngine:
     # ------------------------------------------------------------------ gestão no broker
     def modify(self, ticket: int, sl: Optional[float], tp: Optional[float]) -> bool:
         mt5 = self.mt5
-        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": self.client.cfg.symbol, "sl": round(sl, 2) if sl else 0.0, "tp": round(tp, 2) if tp else 0.0}
+        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": self.client.cfg.symbol, "sl": self.rnd(sl) if sl else 0.0, "tp": self.rnd(tp) if tp else 0.0}
         res = mt5.order_send(req)
         return res is not None and getattr(res, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009)
 
@@ -7694,7 +7984,7 @@ class ExecutionEngine:
         vol = round(min(volume or pos.volume, pos.volume), 2)
         req = {"action": mt5.TRADE_ACTION_DEAL, "position": ticket, "symbol": pos.symbol, "volume": vol,
                "type": mt5.ORDER_TYPE_SELL if buy else mt5.ORDER_TYPE_BUY, "price": bid if buy else ask, "deviation": self.deviation,
-               "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC}
+               "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": self.filling()}
         res = mt5.order_send(req)
         ok = res is not None and getattr(res, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009)
         return ok, (float(getattr(res, "price", 0.0)) or (bid if buy else ask)) if ok else None
@@ -7839,6 +8129,16 @@ class PerformanceEngine:
     def equity_start_of_day(self) -> float:
         return self.equity - self.daily_pnl
 
+    def restore(self, rows: list[tuple[datetime, float, Optional[float]]], now: datetime) -> None:
+        """Após reinício: reconstrói pico, resultado do dia e as travas (perda diária / meta) a partir da tabela `account`."""
+        if not rows:
+            return
+        self.peak_equity = max(self.peak_equity, max(cap for _, cap, _ in rows))
+        self.roll_day(now)
+        day = now.strftime("%Y-%m-%d")
+        self.daily_pnl = round(sum((p or 0.0) for t, _, p in rows if (t.strftime("%Y-%m-%d") if t else "") == day), 2)
+        self.blocks(now)
+
     def sync_equity(self, broker_equity: float, t: datetime) -> None:
         """Em LIVE o capital vem do broker; a variação entra como resultado do dia."""
         self.roll_day(t)
@@ -7878,7 +8178,7 @@ def size_lots(limits: GuardLimits, risk_usd: float, stop_distance: float, point_
     if per_lot <= 0:
         return 0.0, 0.0
     lots = min(limits.max_lot, risk_usd / per_lot)
-    lots = round(int(lots / limits.lot_step + 1e-9) * limits.lot_step, 2)
+    lots = round(int(lots / limits.lot_step + 1e-9) * limits.lot_step, 3)
     if lots < limits.min_lot:
         return 0.0, 0.0
     return lots, round(lots * per_lot, 2)
@@ -8426,7 +8726,7 @@ class HistoryFrame:
     breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
     symbol: str = "XAUUSD"                                     # mercado (para o NEWS ENGINE por mercado)
     events: Optional[object] = None                            # history.EventHistory (banco point-in-time de eventos/notícias)
-    news_mode: str = "full"                                    # none | macro | full — o que do banco o cérebro pode ver
+    news_mode: str = "full"                                    # none | macro | full | full_sem_relogio | full_sem_flow — o que o cérebro pode ver
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -8472,9 +8772,10 @@ class HistoryFrame:
         _, d_zq = change(self.fedfunds, False)
         if d_zq is not None:
             s.fed_cut_prob_change_pp = round(max(-100.0, min(100.0, d_zq * 100 * 4)), 1)   # Δpreço → −Δtaxa implícita (bp) → p.p. de corte
-        be_pts = [(d, v) for d, v in self.breakeven_daily if d <= t] if self.breakeven_daily else []
+        avail = t - timedelta(days=1)   # série diária do FRED: o fecho do dia D só existe em D+1 (anti look-ahead)
+        be_pts = [(d, v) for d, v in self.breakeven_daily if d <= avail] if self.breakeven_daily else []
         if self.real_yield_daily:
-            pts = [(d, v) for d, v in self.real_yield_daily if d <= t]
+            pts = [(d, v) for d, v in self.real_yield_daily if d <= avail]
             if len(pts) >= 2:
                 s.real_yield_10y = pts[-1][1]
                 if s.us10y_change_bp is not None and len(be_pts) >= 2:
@@ -8484,8 +8785,9 @@ class HistoryFrame:
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
         self._attach_events(s, t)
-        fa = FlowAnomalyEngine().assess(self.symbol, s, [], t)
-        s.flow_score, s.flow_status, s.flow_origin, s.flow_direction, s.anomalous_regime, s.flow_chain = fa.score, fa.status, fa.origin, fa.direction, fa.anomalous_regime, fa.chain
+        if self.news_mode != "full_sem_flow":
+            fa = FlowAnomalyEngine().assess(self.symbol, s, getattr(self, "_last_identified", []) if self.events is not None and self.news_mode != "none" else [], t)
+            s.flow_score, s.flow_status, s.flow_origin, s.flow_direction, s.anomalous_regime, s.flow_chain = fa.score, fa.status, fa.origin, fa.direction, fa.anomalous_regime, fa.chain
         return s
 
     def reaction_stats(self):
@@ -8495,9 +8797,9 @@ class HistoryFrame:
         if cached is not None and getattr(self, "_reaction_key", None) == key:
             return cached
 
-        series = [(c.time, c.close) for c in self.xau]
-        leads = {"USD": [(c.time, c.close) for c in self.dxy], "YIELD": [(c.time, c.close) for c in self.us10y]}
-        closes = [c.close for c in self.xau]
+        one_h = timedelta(hours=1)      # Candle.time é a ABERTURA da barra H1: o fecho só existe 60 min depois
+        series = [(c.time + one_h, c.close) for c in self.xau]
+        leads = {"USD": [(c.time + one_h, c.close) for c in self.dxy], "YIELD": [(c.time + one_h, c.close) for c in self.us10y]}
 
         def atr_at(t: datetime) -> float:
             j = self._at(self.xau, t)
@@ -8517,14 +8819,25 @@ class HistoryFrame:
         events, news = self.events.snapshot_inputs(t)
         if self.news_mode == "macro":
             news = []
+        use_clock = self.news_mode != "full_sem_relogio"
         s.events = events
         identified = EventIdentifier().identify(news, events, t)
+        self._last_identified = identified
         na = NewsEngine().assess(self.symbol, s, identified, t)
         s.news_pressure, s.news_status, s.news_chain = na.pressure, na.status, na.chain
         # REACTION ENGINE: relógio com estatística point-in-time (só eventos concluídos antes de t)
-        ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t)
-        s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
-        s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
+        lead = {}
+        if identified:
+            ev0 = max(identified, key=lambda e: e.time)
+            for name, series, pct in (("USD", self.dxy, True), ("YIELD", self.us10y, False)):
+                j0, j1 = self._at(series, ev0.time - timedelta(hours=1)), self._at(series, t - timedelta(hours=1))   # fechos ≤ instante
+                if j0 is not None and j1 is not None and j1 >= j0:
+                    a, b = series[j0].close, series[j1].close
+                    lead[name] = ((b / a - 1) * 100) if pct else ((b - a) * 100)
+        if use_clock:
+            ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t, lead or None)
+            s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
+            s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         if self.news_mode == "full":
             tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
             if tones:
@@ -8593,7 +8906,7 @@ class Backtester:
             # OPPORTUNITY ENGINE: cada passo é uma oportunidade analisada
             d_dir = a.direction if a.direction != Direction.LATERAL else a.premove.direction
             entered = sig is not None and sig.type not in (SignalType.RISK, SignalType.REVERSAL, SignalType.WATCH) and sig.direction != Direction.LATERAL
-            rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL" if sig is None else "SEM_SINAL")
+            rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL_GATE")   # com vantagem mas barrada pelo gate = analisada
             # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
             decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
             funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
@@ -8601,7 +8914,7 @@ class Backtester:
             coverage_n += 1
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
-                rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: i + 1 + self.horizon_min // 60 + 2], self.horizon_min)
+                rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: min(end, i + 1 + self.horizon_min // 60 + 2)], self.horizon_min)
             decisions.append(rec)
             if entered:
                 entries.append((a.time, sig.direction.value))
@@ -8627,7 +8940,7 @@ class Backtester:
             signals.append(record_from(a, sig, snap.atr))
             if self.simulate_trades and sig.type != SignalType.WATCH:
                 plan = mpe.plan(a, snap, sig.direction, sig.type.value)
-                sim = simulate_all(plan, xau[i + 1: i + 1 + horizon_bars + 2], self.horizon_min)
+                sim = simulate_all(plan, xau[i + 1: min(end, i + 1 + horizon_bars + 2)], self.horizon_min)
                 row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
                        "score": a.score, "direction": sig.direction.value, "entry": a.price}
                 trade_rows.append(row)
@@ -8637,8 +8950,7 @@ class Backtester:
             tr.close(tr.r_at(xau[min(end, len(xau)) - 1].close), "FIM", xau[min(end, len(xau)) - 1].time)
             row["results"]["adaptive"] = tr.result_r
         path = [(c.time, c.close) for c in xau[start:end]]
-        atrs = [s.atr for s in signals if s.atr] or [_atr(xau[start - 20:end]) or 1.0]
-        threshold = self.threshold_atr * statistics.fmean(atrs)
+        threshold = self.threshold_atr * (_atr(xau[max(0, start - 20):end]) or 1.0)   # do caminho, não dos sinais (comparável entre configs)
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
         res = BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
@@ -8713,14 +9025,15 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     # agrega OOS
     all_sigs = [s for _, r in folds for s in r.signals]
     path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + train_folds * fold_len:]]
-    atrs = [s.atr for s in all_sigs if s.atr] or [1.0]
-    oos = evaluate(all_sigs, path, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min)
+    oos_start = bt.warmup + train_folds * fold_len
+    oos_thr = bt.threshold_atr * (_atr(bt.frame.xau[max(0, oos_start - 20):]) or 1.0)
+    oos = evaluate(all_sigs, path, oos_thr, bt.horizon_min)
     rows = [r for _, res in folds for r in res.trade_rows]
     # oportunidades OOS agregadas: decisões, entradas e curva de limiar de todos os folds de teste
     decisions = [d for _, res in folds if res.opportunity for d in res.decisions]
     entries = [e for _, res in folds if res.opportunity for e in res.entries]
     curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
-    opp = opportunity_report(decisions, path, entries, bt.threshold_atr * statistics.fmean(atrs), bt.horizon_min, curve_rows) if decisions else None
+    opp = opportunity_report(decisions, path, entries, oos_thr, bt.horizon_min, curve_rows) if decisions else None
     fun = Funnel()
     for _, res in folds:
         if res.funnel is not None:
@@ -8967,7 +9280,7 @@ def opportunity_report(decisions: Sequence[DecisionRecord], prices: Sequence[tup
     for mv in moves:
         if any(d == mv.direction and mv.evident_at - timedelta(minutes=horizon_min) <= t < mv.evident_at for t, d in entries):
             captured += 1
-    analyzed = [d for d in decisions if d.action != "SEM_SINAL"] or list(decisions)
+    analyzed = [d for d in decisions if d.action != "SEM_SINAL"] or list(decisions)   # SEM_SINAL_GATE (com vantagem, barrada) conta como analisada
     n_entries = sum(1 for d in decisions if d.action == "ENTRADA")
     entry_rate = (n_entries / len(analyzed)) if analyzed else None
     capture = (captured / len(moves)) if moves else None
@@ -9806,7 +10119,8 @@ Se a informação cria a oportunidade, entradas e expectancy sobem SEM mexer no 
 
 
 
-MODES: tuple[tuple[str, str], ...] = (("none", "Preço somente"), ("macro", "Preço + Macro (A)"), ("full", "Preço + Macro + News (B)"))
+MODES: tuple[tuple[str, str], ...] = (("none", "Preço somente"), ("macro", "Preço + Macro (A)"), ("full", "Preço + Macro + News (B)"),
+                                      ("full_sem_relogio", "B sem REACTION CLOCK"), ("full_sem_flow", "B sem FLOW ANOMALY"))
 
 
 @dataclass
@@ -9995,7 +10309,7 @@ def run_doctor(env: dict, db_path: str = "gold_ai.db", events_path: str = os.pat
     keys = ("TOKEN_TELEGRAM", "CHAT_ID", "MT5_PATH", "RISK_PER_TRADE", "MAX_DAILY_LOSS", "FRED_API_KEY")
     missing = [k for k in keys if not env.get(k)]
     if not envf:
-        rep.add(".env", "❌", "não encontrado na pasta", "salve o .env na mesma pasta do market_ai_engine_v4.py")
+        rep.add(".env", "❌", "não encontrado na pasta", "salve o .env na mesma pasta do market_ai_engine_v5.py")
     elif missing:
         rep.add(".env", "⚠️", f"{envf} · faltam: {', '.join(missing)}", "preencha as chaves que faltam")
     else:
@@ -10068,6 +10382,7 @@ def run_doctor(env: dict, db_path: str = "gold_ai.db", events_path: str = os.pat
             n_react = mem.conn.execute("SELECT COUNT(*) FROM reactions").fetchone()[0]
             eq = mem.last_equity()
             fresh = ""
+            age_h = 1e9
             if last:
                 try:
                     age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() / 3600
@@ -10145,6 +10460,12 @@ class LiveExecutionEngine:
         entre mercados (4.0); `entry_gate(symbol, direction, risk_usd)` → lista de bloqueios do portfólio (exposição)."""
         self.spec = spec or get_market("XAUUSD")
         self.symbol = self.spec.symbol
+        self.symbol_spec = default_symbol_spec(self.symbol)          # substituída pela do broker (symbol_info) quando há executor
+        if executor is not None and hasattr(executor, "spec"):
+            try:
+                self.symbol_spec = executor.spec
+            except Exception:  # noqa: BLE001
+                pass
         self.entry_gate = entry_gate
         self.mem, self.limits, self.mode = mem, limits, mode
         self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
@@ -10180,7 +10501,7 @@ class LiveExecutionEngine:
         return format_status(self.perf, self.ks, self.managed, self.mode.value)
 
     # ------------------------------------------------------------------ comandos
-    def handle_commands(self, res: CycleResult, now: datetime) -> None:
+    def handle_commands(self, res: CycleResult, now: datetime, price_hint: Optional[float] = None) -> None:
         if self.commands is None:
             return
         for action in self.commands.apply(self.commands.poll(), self.ks):
@@ -10193,15 +10514,18 @@ class LiveExecutionEngine:
             elif action == "CLOSE_REQUESTED":
                 self._send(f"⚠️ /CLOSE solicitado para {len(self.managed)} posição(ões). Responda /CLOSE CONFIRM para encerrar.", res)
             elif action == "CLOSE_CONFIRMED":
-                for tr in list(self.managed):
-                    self._close_trade(tr, tr.r_at(tr.plan.entry), "MANUAL", now, res, price_hint=None)
+                self.close_all(now, res, price_hint)
                 self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
+
+    def close_all(self, now: datetime, res: CycleResult, price_hint: Optional[float] = None) -> None:
+        for tr in list(self.managed):
+            self._close_trade(tr, tr.r_at(price_hint if price_hint is not None else tr.plan.entry), "MANUAL", now, res, price_hint=price_hint)
 
     # ------------------------------------------------------------------ ciclo
     def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None, defer_entry: bool = False) -> CycleResult:
         res = CycleResult(None, None)
         now = snap.time
-        self.handle_commands(res, now)
+        self.handle_commands(res, now, snap.price)
         if not snap.candles:
             res.notes.append("sem candles XAU — ciclo abortado")
             return res
@@ -10272,10 +10596,10 @@ class LiveExecutionEngine:
         if self.executor is not None:
             try:
                 bid, ask = self.executor.client.tick()
-                spread = round(ask - bid, 2)
+                spread = round(ask - bid, self.executor.digits())
             except Exception:  # noqa: BLE001
                 spread = None
-        reasons = no_trade_check(a, self.limits, spread)
+        reasons = no_trade_check(a, self.limits, spread, max_spread=self.symbol_spec.max_spread or None)
         if reasons:
             return "🟡 NÃO OPERAR — " + "; ".join(reasons)
         # uma posição por ativo (memória + broker)
@@ -10285,7 +10609,15 @@ class LiveExecutionEngine:
         res.plan = plan
         if not plan.viable:
             return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
-        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value, self.spec.point_value_usd)   # capital + risco + stop + contrato
+        # capital + risco + stop + contrato: valor do ponto e passo/mínimo de lote do BROKER quando conectado (USDJPY/CFDs dinâmicos)
+        ss = self.symbol_spec
+        pv = ss.point_value_usd if ss.source == "mt5" and ss.point_value_usd > 0 else self.spec.point_value_usd
+        lim = self.limits
+        if ss.source == "mt5":
+            import copy as _copy
+            lim = _copy.copy(self.limits)
+            lim.min_lot, lim.lot_step, lim.max_lot = ss.volume_min, ss.volume_step, min(self.limits.max_lot, ss.volume_max)
+        plan.lots, plan.risk_usd = size_lots(lim, self.perf.risk_usd, plan.r_value, pv)
         if not plan.lots:
             return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
         if self.entry_gate is not None:
@@ -10308,8 +10640,12 @@ class LiveExecutionEngine:
             if execution.mismatches:
                 self._send("⚠️ " + execution.render(), res)
                 if any(m.startswith("SL real") for m in execution.mismatches):
-                    self.executor.close(execution.ticket)
-                    return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
+                    ok_close, _ = self.executor.close(execution.ticket)
+                    if ok_close:
+                        return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
+                    self._send(f"🚨 {self.symbol}: SL divergente E o broker recusou fechar #{execution.ticket} — posição REAL assumida pelo monitor com o SL real", res)
+                    if execution.real_sl:
+                        plan.stop = execution.real_sl
             self.authorized = False
         tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon, symbol=self.symbol)
         thesis = Thesis.from_assessment(a, plan.direction)
@@ -10345,7 +10681,12 @@ class LiveExecutionEngine:
             return
         if from_path:
             if tr.status == "CLOSED" and ticket and self.executor is not None and self.executor.position(ticket) is not None:
-                self.executor.close(ticket)                    # stop lógico tocado antes de sincronizar com o broker
+                ok, price = self.executor.close(ticket)        # stop lógico tocado antes de sincronizar com o broker
+                if not ok:
+                    self._revert_close(tr, before, res, "stop lógico")
+                    return
+                if price is not None:
+                    tr.result_r = round(tr.realized_r + before[0] * tr.r_at(price), 3)
             elif tr.status == "OPEN" and ticket and self.executor is not None and abs(tr.stop_r - before[1]) > 1e-9:
                 self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
         else:
@@ -10381,25 +10722,46 @@ class LiveExecutionEngine:
                 reading.action, reading.note = "PROTEGER", reading.note + " (aguardando confirmação para encerrar)"
                 return
             ok, price = self.executor.close(ticket)
-            if ok and price is not None:
-                tr.result_r = round(tr.realized_r + (remaining_before) * tr.r_at(price), 3) if tr.result_r is None else tr.result_r
+            if not ok:
+                self._revert_close(tr, before, res, reading.note or "ENCERRAR")
+                reading.action, reading.note = "MANTER", (reading.note + " (broker recusou o fechamento — nova tentativa no próximo ciclo)")
+                return
+            if price is not None:
+                tr.result_r = round(tr.realized_r + remaining_before * tr.r_at(price), 3)   # preço REAL de saída
             return
         if tr.remaining < remaining_before:  # parcial (PROTEGER/REDUZIR)
             pos = self.executor.position(ticket)
+            sent = False
             if pos is not None:
                 vol = round(pos.volume * (1 - tr.remaining / remaining_before), 2)
                 vol = max(self.limits.min_lot, vol)
                 if vol < pos.volume:
-                    self.executor.close(ticket, vol, "GoldAI partial")
+                    sent, _ = self.executor.close(ticket, vol, "GoldAI partial")
+            if not sent:   # lote mínimo / recusa: desfaz a parcial local para a contabilidade seguir o broker
+                credited = tr.realized_r
+                tr.realized_r = round(tr.realized_r - (remaining_before - tr.remaining) * reading.current_r, 3) if credited else 0.0
+                tr.remaining = remaining_before
+                reading.note = reading.note + " (parcial não executada no broker: lote mínimo/recusa)"
         if abs(tr.stop_r - stop_before) > 1e-9:
             self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
+
+    def _revert_close(self, tr: ManagedTrade, before: tuple, res: CycleResult, why: str) -> None:
+        """O broker recusou fechar: a posição REAL continua aberta, logo a local também (nunca órfã). Tenta de novo no próximo ciclo."""
+        tr.status, tr.close_reason, tr.result_r, tr.closed_at = "OPEN", "", None, None
+        tr.remaining = before[0]
+        self._send(f"⚠️ #{tr.trade_id:05d} {self.symbol}: broker RECUSOU o fechamento ({why}); posição mantida sob monitor, nova tentativa no próximo ciclo", res)
 
     def _close_trade(self, tr: ManagedTrade, r_exit: float, reason: str, now: datetime, res: CycleResult, price_hint: Optional[float]) -> None:
         ticket = self.tickets.get(tr.trade_id)
         if ticket and self.executor is not None:
             ok, price = self.executor.close(ticket)
-            if ok and price is not None:
+            if not ok:
+                self._send(f"⚠️ #{tr.trade_id:05d} {self.symbol}: broker recusou o fechamento manual; posição continua aberta", res)
+                return
+            if price is not None:
                 r_exit = tr.r_at(price)
+        elif price_hint is not None:
+            r_exit = tr.r_at(price_hint)
         tr.close(r_exit, reason, now)
         self._finalize(tr, now, res)
 
@@ -10413,8 +10775,11 @@ class LiveExecutionEngine:
         lead = next((h.time for h in tr.history if h.current_r >= 1.0), None)
         lead_min = (lead - tr.plan.time).total_seconds() / 60 if lead else None
         self.mem.save_financial_result(tr.trade_id, pnl, round(minutes, 1), lead_min)
-        self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
-        self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
+        if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
+            self.mem.record_equity(now, self.perf.equity, None, f"trade #{tr.trade_id} {tr.close_reason} (capital do broker via sync)")   # sync_equity já contabilizou
+        else:
+            self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
+            self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
         self.log(render_evolution(tr))
         self.log(self.perf.render())
         if tr.close_reason in ("TESE INVALIDADA", "EXIT SCORE"):
@@ -10536,8 +10901,13 @@ class MultiMarketData:
             try:
                 if not self.mt5.connected:
                     self.mt5.connect()
-                self.mt5.mt5.symbol_select(self.mt5.cfg.symbol, True)
+                if not self.mt5.mt5.symbol_select(self.mt5.cfg.symbol, True):
+                    self.status[f"mt5:{spec.symbol}"] = f"símbolo {self.mt5.cfg.symbol} indisponível na corretora → Yahoo (confira MT5_SYMBOL_{spec.symbol} no .env)"
+                    return self.yahoo.all_timeframes(spec.yahoo)
                 return {tf: cs for tf in TF_TO_MT5 if (cs := self.mt5.candles(tf))}
+            except Exception as e:  # noqa: BLE001
+                self.status[f"mt5:{spec.symbol}"] = f"MT5 falhou ({str(e)[:60]}) → Yahoo"
+                return self.yahoo.all_timeframes(spec.yahoo)
             finally:
                 self.mt5.cfg.symbol = orig
         return self.yahoo.all_timeframes(spec.yahoo)
@@ -10563,7 +10933,7 @@ class MultiMarketData:
         out.identified = identified
         for spec in self.specs:
             try:
-                candles = base.candles if spec.symbol == "XAUUSD" and base.candles else self.market_candles(spec)
+                candles = base.candles if (self.mt5 is None and spec.symbol == "XAUUSD" and base.candles) else self.market_candles(spec)   # com MT5, o ouro é o SPOT do broker
                 if not candles:
                     raise RuntimeError("sem candles")
                 s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec, now), identified)
@@ -10646,7 +11016,9 @@ class MarketAIEngine:
         start_equity = mem.last_equity() or equity
         self.perf = PerformanceEngine(limits, start_equity)   # capital ÚNICO compartilhado
         if mem.last_equity() is None:
-            mem.record_equity(datetime.now(), start_equity, None, "capital inicial")
+            mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
+        else:
+            self.perf.restore(mem.account_rows(), datetime.now(timezone.utc))   # reinício não apaga perda do dia, meta nem pico
         self.engines: dict[str, LiveExecutionEngine] = {}
         for sym, spec in self.specs.items():
             cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
@@ -10663,6 +11035,8 @@ class MarketAIEngine:
         self.flow_engine = FlowAnomalyEngine()
         self.active_flows: dict[str, object] = {}
         self.flow_assessments: dict = {}
+        # histórico fino dos líderes (USD/YIELD) ao redor do evento: função (nome, início, fim) → [(t, valor)] (Yahoo M1 / MT5); opcional
+        self.lead_history: Optional[Callable[[str, datetime, datetime], list]] = None
 
     def _flow_anomaly(self, snaps: MarketSnapshotSet) -> None:
         """Informação implícita: movimento anormal sem explicação vira evento IMPLÍCITO no REACTION ENGINE (líder → atrasados)."""
@@ -10690,17 +11064,44 @@ class MarketAIEngine:
             if all(getattr(x, "kind", None) != ev.kind or getattr(x, "time", None) != ev.time for x in snaps.identified):
                 snaps.identified.append(ev)
 
+    # ------------------------------------------------------------------ comandos Telegram (carteira inteira)
+    def _handle_commands(self, snaps: MarketSnapshotSet, pc: PortfolioCycle) -> None:
+        if self.commands is None:
+            return
+        res = CycleResult(None, None)
+        pending = [c for c in getattr(self.commands, "last_cmds", []) if c.startswith("/EDGE")]   # /EDGE aplicado fora do ciclo (teste/sob demanda)
+        actions = self.commands.apply(self.commands.poll(), self.ks)
+        if pending and "EDGE" not in actions:
+            actions.append("EDGE")
+        for action in actions:
+            if action == "EDGE":
+                self.daily_edge(snaps.time, pc, force=True)
+            elif action == "STATUS":
+                self.sender.send(self.status_text())
+            elif action in ("STOP", "PAUSE", "RESUME"):
+                self.sender.send(f"🔧 comando /{action} aplicado — " + self.ks.new_entries_allowed()[1])
+            elif action == "CLOSE_REQUESTED":
+                n = sum(len(e.managed) for e in self.engines.values())
+                self.sender.send(f"⚠️ /CLOSE solicitado para {n} posição(ões) em {len(self.engines)} mercado(s). Responda /CLOSE CONFIRM para encerrar.")
+            elif action == "CLOSE_CONFIRMED":
+                for sym, eng in self.engines.items():
+                    snap = snaps.by_symbol.get(sym)
+                    eng.close_all(snaps.time, res, snap.price if snap is not None else None)
+                self.sender.send("🔴 posições encerradas por /CLOSE CONFIRM (todos os mercados)")
+        pc.messages += res.messages
+
+    # ------------------------------------------------------------------ autorização única (AUTHORIZE: uma ordem real por --authorize, não uma por mercado)
+    def _consume_authorization(self, sym: str) -> None:
+        for other, eng in self.engines.items():
+            if other != sym:
+                eng.authorized = False
+
     # ------------------------------------------------------------------ REACTION ENGINE (live)
     def _reaction_clock(self, snaps: MarketSnapshotSet) -> None:
         """A cada ciclo: relógio por mercado (evidência para o pré-movimento) + amostragem dos eventos em curso; ao fechar o
         horizonte, mede a reação (alvo e líderes) e grava — o sistema aprende com os eventos que viveu, nunca com o futuro."""
 
         now = snaps.time
-        clock = ReactionClock(self.reaction_stats)
-        for sym, snap in snaps.by_symbol.items():
-            ra = clock.assess(sym, snap, snaps.identified, now)
-            snap.reaction_status, snap.reaction_pressure, snap.reaction_probability = ra.status, ra.pressure, ra.probability
-            snap.reaction_latency_min, snap.reaction_expected_min, snap.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         base = snaps.base
         for ev in snaps.identified:
             key = f"{ev.kind}:{ev.time:%Y%m%d%H%M}:{ev.name[:30]}"
@@ -10711,10 +11112,25 @@ class MarketAIEngine:
                 sign = ev.direction_sign or 1.0
                 self.pending_reactions[key] = {"ev": ev, "leads": {"USD": [], "YIELD": []}, "targets": {},
                                                "lead_dirs": {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}}
+                # T0 REAL: semeia líderes e alvos com histórico M1/M5 já fechado ao redor do evento (não depende do instante em que o loop viu a notícia)
+                t_from = ev.time - timedelta(minutes=15)
+                if self.lead_history is not None:
+                    for name in ("USD", "YIELD"):
+                        try:
+                            hist = self.lead_history(name, t_from, now) or []
+                        except Exception:  # noqa: BLE001
+                            hist = []
+                        self.pending_reactions[key]["leads"][name] = [(t, v) for t, v in hist if t <= now]
                 for sym, snap in snaps.by_symbol.items():
                     exp, _ = expected_direction(ev, sym)
                     if exp != 0.0 and snap.price:
-                        self.pending_reactions[key]["targets"][sym] = {"exp": exp, "atr": snap.atr or 0.0, "series": []}
+                        seed = []
+                        for tf, mins in (("M1", 1), ("M5", 5)):
+                            cs = snap.candles.get(tf) or []
+                            if cs:
+                                seed = [(c.time + timedelta(minutes=mins), c.close) for c in cs if t_from <= c.time + timedelta(minutes=mins) <= now]
+                                break
+                        self.pending_reactions[key]["targets"][sym] = {"exp": exp, "atr": snap.atr or 0.0, "series": seed}
             pr = self.pending_reactions[key]
             if base.dxy is not None:
                 pr["leads"]["USD"].append((now, base.dxy))
@@ -10724,19 +11140,43 @@ class MarketAIEngine:
                 snap = snaps.by_symbol.get(sym)
                 if snap is not None and snap.price:
                     tg["series"].append((now, snap.price))
+        clock = ReactionClock(self.reaction_stats)
+        # Δ dos líderes DESDE O EVENTO (não da última hora) a partir das amostras/histórico já guardados
+        lead_since: dict[str, float] = {}
+        if snaps.identified and self.pending_reactions:
+            ev0 = max(snaps.identified, key=lambda e: e.time)
+            for pr in self.pending_reactions.values():
+                if pr["ev"].time == ev0.time and pr["ev"].kind == ev0.kind:
+                    for name, pct in (("USD", True), ("YIELD", False)):
+                        ser = pr["leads"].get(name) or []
+                        base_pt = next((v for t, v in ser if t <= ev0.time), ser[0][1] if ser else None)
+                        if base_pt and ser:
+                            last = ser[-1][1]
+                            lead_since[name] = ((last / base_pt - 1) * 100) if pct else ((last - base_pt) * 100)
+                    break
+        for sym, snap in snaps.by_symbol.items():
+            ra = clock.assess(sym, snap, snaps.identified, now, lead_since or None)
+            snap.reaction_status, snap.reaction_pressure, snap.reaction_probability = ra.status, ra.pressure, ra.probability
+            snap.reaction_latency_min, snap.reaction_expected_min, snap.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         for key in list(self.pending_reactions):
             pr = self.pending_reactions[key]
             ev = pr["ev"]
             if ev.age_min(now) < self.reaction_horizon:
                 continue
             for sym, tg in pr["targets"].items():
-                fine = snaps.by_symbol[sym].candles.get("M5") if sym in snaps.by_symbol else None
-                series = [(c.time, c.close) for c in fine if c.time >= ev.time - timedelta(minutes=10)] if fine else tg["series"]
-                first_price = next((p for t, p in tg["series"] if t <= ev.time), None)
+                cands = snaps.by_symbol[sym].candles if sym in snaps.by_symbol else {}
+                fine, res_min = None, 1
+                for tf, mins in (("M1", 1), ("M5", 5), ("M15", 15)):
+                    if cands.get(tf):
+                        fine, res_min = cands[tf], mins
+                        break
+                # candles carimbados na abertura → série no FECHO; só barras fechadas até agora
+                series = [(c.time + timedelta(minutes=res_min), c.close) for c in fine if c.time + timedelta(minutes=res_min) >= ev.time - timedelta(minutes=10)] if fine else list(tg["series"])
+                first_price = tg["series"][0][1] if tg["series"] else None      # 1ª amostra observada (alguns minutos após a publicação, nunca antes)
                 if first_price is not None and (not series or series[0][0] > ev.time):
                     series = [(ev.time, first_price)] + list(series)
                 rec = measure_reaction(key, ev.kind, ev.time, sym, tg["exp"], series, tg["atr"], pr["leads"], pr["lead_dirs"], self.reaction_horizon,
-                                       5 if fine else 1)
+                                       res_min if fine else 1)
                 if rec:
                     self.mem.save_reaction(rec)
                     self.reaction_stats.add(rec)
@@ -10767,11 +11207,8 @@ class MarketAIEngine:
     # ------------------------------------------------------------------ ciclo de carteira
     def run_cycle(self, snaps: MarketSnapshotSet) -> PortfolioCycle:
         pc = PortfolioCycle(snaps.time)
-        # comandos (/STOP /PAUSE /STATUS /CLOSE) tratados pelo primeiro motor, com o kill switch compartilhado
-        first = next(iter(self.engines.values()))
-        first.commands = self.commands
-        if self.commands is not None and any(c.startswith("/EDGE") for c in getattr(self.commands, "last_cmds", [])):
-            self.daily_edge(snaps.time, pc, force=True)
+        # comandos (/STOP /PAUSE /RESUME /STATUS /CLOSE /EDGE) tratados AQUI, para todos os mercados, com o kill switch compartilhado
+        self._handle_commands(snaps, pc)
         # 0) FLOW ANOMALY (informação implícita) → REACTION ENGINE (relógio por mercado + aprendizado dos eventos concluídos)
         self._flow_anomaly(snaps)
         self._reaction_clock(snaps)
@@ -10810,7 +11247,10 @@ class MarketAIEngine:
             if snap_c.anomalous_regime and snap_c.flow_direction != 0 and ((c.direction == Direction.ALTA) != (snap_c.flow_direction > 0)):
                 self.engines[sym].enter(r, snap_c, veto=f"REGIME ANÔMALO em {sym} — entrada contra o fluxo anômalo adiada (FLOW {snap_c.flow_score})")
                 continue
+            was_auth = self.engines[sym].authorized
             self.engines[sym].enter(r, snap_c)
+            if was_auth and not self.engines[sym].authorized:
+                self._consume_authorization(sym)
             pc.messages += [m for m in r.messages if m not in pc.messages]
             if r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")):
                 entered, pc.chosen = True, sym
@@ -10978,8 +11418,8 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         mcfg = MT5Config.from_env(env)
         if args.mt5_path:
             mcfg.path = args.mt5_path
-        mt5_client = MT5Client(mcfg)
         try:
+            mt5_client = MT5Client(mcfg)
             mt5_client.connect()
         except Exception as e:  # noqa: BLE001
             print(f"MT5 indisponível: {e}")
@@ -10988,15 +11428,15 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
             print("modo PAPER: continuando com dados web (Yahoo) — o MT5 só é obrigatório para executar ordens")
             mt5_client = None
         if mt5_client is not None and mode != TradingMode.PAPER:
-            symbol_map = MultiMarketData.symbol_map_from_env(env)
+            symbol_map = MultiMarketData.symbol_map_from_env({**env, **os.environ})
             for sym in symbols:
                 c = MT5Client(MT5Config(path=mcfg.path, symbol=symbol_map.get(sym, get_market(sym).mt5), login=mcfg.login, password=mcfg.password, server=mcfg.server))
                 c.mt5, c.connected = mt5_client.mt5, True
-                executors[sym] = ExecutionEngine(c, max_slippage=limits.max_slippage)
+                executors[sym] = ExecutionEngine(c)      # tolerâncias por símbolo (symbol_info), não o MAX_SLIPPAGE global do ouro
     elif mode != TradingMode.PAPER:
         print("execução real exige --source mt5; rebaixando para PAPER")
         mode = TradingMode.PAPER
-    data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env(env))
+    data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env({**env, **os.environ}))
     sender = TelegramSender(dry_run=not args.send)
     commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
@@ -11005,6 +11445,13 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         print("REACTION EDGE carregado (Asset Selector): " + ", ".join(f"{k} {v:.2f}" for k, v in edge.items()))
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
                             selector=AssetSelector(reaction_edge=edge))
+    # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
+    _y = _Yahoo(_Http(cache_dir=dcfg.cache_dir, ttl=60))
+
+    def lead_history(name, t_from, t_to):
+        sym = {"USD": "DX-Y.NYB", "YIELD": "^TNX"}[name]
+        return [(c.time + timedelta(minutes=1), c.close) for c in _y.candles(sym, "M1") if t_from <= c.time + timedelta(minutes=1) <= t_to]
+    engine.lead_history = lead_history
     print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
     print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
     try:
@@ -11101,6 +11548,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         os.makedirs(out_dir, exist_ok=True)
         symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
         ev_times = []
+        hard_failed = False
         if not args.full:
             if not exists:
                 print(f"{path} não existe — sem eventos para delimitar as horas; use --full para baixar o período inteiro")
@@ -11115,18 +11563,20 @@ def cmd_history(args: argparse.Namespace) -> int:
                     imp.around_events(sym, ev_times, args.before, args.after, args.scale, checkpoint=lambda t, d=dest: save_ticks(t, d))
             except Exception as e:  # noqa: BLE001
                 print(f"{sym} ({inst}): FALHOU — {e}")
+                hard_failed = True
                 continue
             n = save_ticks(ticks, dest)
             first = f" · 1º tick {ticks[0][0]:%Y-%m-%d %H:%M} bid {ticks[0][1]:g} ask {ticks[0][2]:g} (confira a escala!)" if ticks else " · nenhum tick (instrumento/escala/período?)"
             print(f"{sym} ({inst}, escala {args.scale or sc:g}): {n} ticks → {dest}{first}")
-        if imp.failed:
-            print(f"\n{len(imp.failed)} hora(s) falharam (timeout/503 do Dukascopy). Repita o mesmo comando: as horas já baixadas estão em cache e só as que faltam são pedidas.")
+        if imp.failed or hard_failed:
+            print(f"\n{len(imp.failed)} hora(s) falharam" + (" e houve símbolo com falha total" if hard_failed else "") +
+                  ". Repita o mesmo comando: as horas já baixadas estão em cache e só as que faltam são pedidas.")
             return 2      # código 2 = incompleto (o .bat repete até 0)
         return 0
     if args.action == "prices":
         # exportação de M1 / ticks do MT5 para CSV (a corretora guarda M1 por anos e ticks por semanas/meses)
         cfg = MT5Config.from_env(env)
-        symbol_map = MultiMarketData.symbol_map_from_env(env)
+        symbol_map = MultiMarketData.symbol_map_from_env({**env, **os.environ})
         out_dir = args.out_dir or "dados"
         os.makedirs(out_dir, exist_ok=True)
         t0 = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
@@ -11194,7 +11644,7 @@ def cmd_history(args: argparse.Namespace) -> int:
                 return 1
             imp = ALFREDImporter(http, key, log=print)
             try:
-                new = imp.fetch(start, end, progress=progress)
+                new = imp.fetch(start, end, progress=progress, checkpoint=lambda partial: save_history(merge(hist, partial), path))
             except DataError as e:
                 print(str(e))
                 return 1
@@ -11344,11 +11794,13 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
     delays = [int(x) for x in (args.delays or delays_default).split(",")]
     sim_rows = sim.table(sim_items, delays=delays)
     txt = ll.render() + "\n\n" + sim.render(sim_rows)
-    results = {}
+    results, tests = {}, {}
     for d in delays:
         ct = ClockTradeTest(delay_sec=d, p_min=args.p_min, slippage_atr=args.slippage, latency_sec=args.latency)
         results[d] = ct.run(sim_items)
+        tests[d] = ct
         txt += "\n\n" + ct.render(results[d])
+    txt += "\n\n" + walk_forward_choice(tests)
     txt += "\n\n" + render_delta(delta_table(results), tf)
     verdicts = asset_verdicts(results)
     txt += "\n\n" + render_verdicts(verdicts, tf)
@@ -11400,8 +11852,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 c.connect()
                 bid, ask = c.tick()
                 off = c.server_offset_hours
+                note = getattr(c, "offset_note", "")
+                # TESTE DE CARIMBO: o último candle M1 (convertido para UTC) tem de ter aberto há menos de 3 min (mercado aberto)
+                cs = c.candles("M1", 3)
                 c.close()
-                return True, f"conectado · {c.cfg.symbol} bid {bid:g} ask {ask:g} · fuso do servidor UTC{off:+.0f}h"
+                age = (datetime.now(timezone.utc) - cs[-1].time).total_seconds() / 60 if cs else None
+                ok_ts = age is not None and -1 <= age <= 3
+                ts_txt = f"último M1 aberto há {age:.1f} min ({'✅ carimbos alinhados' if ok_ts else '⚠️ desalinhado: mercado fechado ou fuso errado → MT5_UTC_OFFSET_HOURS'})" if age is not None else "sem candles M1"
+                return True, f"conectado · {c.cfg.symbol} bid {bid:g} ask {ask:g} · fuso UTC{off:+.0f}h ({note}) · {ts_txt}"
             except Exception as e:  # noqa: BLE001
                 return False, str(e)[:160]
     tg_probe = None
@@ -11440,7 +11898,7 @@ def cmd_reaction(args: argparse.Namespace) -> int:
             if args.out:
                 with open(args.out, "a", encoding="utf-8") as f:
                     f.write("\n\n" + txt)
-        return 0
+        return 0 if (isinstance(outs["TICK"], list) or isinstance(outs["M1"], list)) else 1
     if args.action == "learn" and args.tf.upper() in ("M1", "M5", "TICK"):
         return 0 if isinstance(_reaction_learn_hires(args), list) else 1
     if args.action == "learn":
@@ -11499,7 +11957,7 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
     if "macro" in modes or "full" in modes:
         if cov.macro_pct < args.min_coverage:
             gaps.append(f"MACRO cobre {cov.macro_pct:.0%} das semanas (mínimo {args.min_coverage:.0%}) — rode `history fetch-alfred` / `fetch-te`")
-    if "full" in modes and cov.news_pct < args.min_coverage:
+    if any(m.startswith("full") for m in modes) and cov.news_pct < args.min_coverage:
         gaps.append(f"NEWS cobre {cov.news_pct:.0%} dos dias (mínimo {args.min_coverage:.0%}) — rode `history fetch-gdelt` até completar")
     if gaps:
         for g in gaps:
@@ -11583,10 +12041,17 @@ def cmd_live(args: argparse.Namespace) -> int:
         mcfg = MT5Config.from_env(env)
         if args.mt5_path:
             mcfg.path = args.mt5_path
-        source = MT5Source(mcfg, data_engine=data)
-        if mode != TradingMode.PAPER:
-            source.client.connect()
-            executor = ExecutionEngine(source.client, max_slippage=limits.max_slippage)
+        try:
+            source = MT5Source(mcfg, data_engine=data)
+            if mode != TradingMode.PAPER:
+                source.client.connect()
+                executor = ExecutionEngine(source.client)
+        except Exception as e:  # noqa: BLE001
+            if mode != TradingMode.PAPER:
+                print(f"MT5 indisponível: {e}")
+                return 1
+            print(f"MT5 indisponível ({e}); modo PAPER continua com dados web")
+            source, executor = data, None
     elif mode != TradingMode.PAPER:
         print("execução real exige --source mt5; rebaixando para PAPER")
         mode = TradingMode.PAPER
@@ -12018,7 +12483,7 @@ def main(argv: list[str] | None = None) -> int:
     cn.add_argument("--start", default="2026-01-01")
     cn.add_argument("--end", default=None)
     cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
-    cn.add_argument("--modes", default=None, help="none,macro,full (padrão: os três)")
+    cn.add_argument("--modes", default=None, help="none,macro,full,full_sem_relogio,full_sem_flow (padrão: none,macro,full; os dois últimos isolam o relógio e o fluxo)")
     cn.add_argument("--min-coverage", type=float, default=0.8, help="cobertura mínima do banco no período (macro por semana, news por dia)")
     cn.add_argument("--allow-partial", action="store_true", help="roda mesmo com banco incompleto (resultado é ensaio, não conclusão)")
     cn.add_argument("--equity", type=float, default=10000.0)

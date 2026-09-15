@@ -13,7 +13,7 @@ e de PRIORIDADE (um ciclo, uma entrada: a melhor).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from .config import EngineConfig
@@ -69,7 +69,9 @@ class MarketAIEngine:
         start_equity = mem.last_equity() or equity
         self.perf = PerformanceEngine(limits, start_equity)   # capital ÚNICO compartilhado
         if mem.last_equity() is None:
-            mem.record_equity(datetime.now(), start_equity, None, "capital inicial")
+            mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
+        else:
+            self.perf.restore(mem.account_rows(), datetime.now(timezone.utc))   # reinício não apaga perda do dia, meta nem pico
         self.engines: dict[str, LiveExecutionEngine] = {}
         for sym, spec in self.specs.items():
             cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
@@ -88,6 +90,8 @@ class MarketAIEngine:
         self.flow_engine = FlowAnomalyEngine()
         self.active_flows: dict[str, object] = {}
         self.flow_assessments: dict = {}
+        # histórico fino dos líderes (USD/YIELD) ao redor do evento: função (nome, início, fim) → [(t, valor)] (Yahoo M1 / MT5); opcional
+        self.lead_history: Optional[Callable[[str, datetime, datetime], list]] = None
 
     def _flow_anomaly(self, snaps: MarketSnapshotSet) -> None:
         """Informação implícita: movimento anormal sem explicação vira evento IMPLÍCITO no REACTION ENGINE (líder → atrasados)."""
@@ -115,6 +119,38 @@ class MarketAIEngine:
             if all(getattr(x, "kind", None) != ev.kind or getattr(x, "time", None) != ev.time for x in snaps.identified):
                 snaps.identified.append(ev)
 
+    # ------------------------------------------------------------------ comandos Telegram (carteira inteira)
+    def _handle_commands(self, snaps: MarketSnapshotSet, pc: PortfolioCycle) -> None:
+        if self.commands is None:
+            return
+        res = CycleResult(None, None)
+        pending = [c for c in getattr(self.commands, "last_cmds", []) if c.startswith("/EDGE")]   # /EDGE aplicado fora do ciclo (teste/sob demanda)
+        actions = self.commands.apply(self.commands.poll(), self.ks)
+        if pending and "EDGE" not in actions:
+            actions.append("EDGE")
+        for action in actions:
+            if action == "EDGE":
+                self.daily_edge(snaps.time, pc, force=True)
+            elif action == "STATUS":
+                self.sender.send(self.status_text())
+            elif action in ("STOP", "PAUSE", "RESUME"):
+                self.sender.send(f"🔧 comando /{action} aplicado — " + self.ks.new_entries_allowed()[1])
+            elif action == "CLOSE_REQUESTED":
+                n = sum(len(e.managed) for e in self.engines.values())
+                self.sender.send(f"⚠️ /CLOSE solicitado para {n} posição(ões) em {len(self.engines)} mercado(s). Responda /CLOSE CONFIRM para encerrar.")
+            elif action == "CLOSE_CONFIRMED":
+                for sym, eng in self.engines.items():
+                    snap = snaps.by_symbol.get(sym)
+                    eng.close_all(snaps.time, res, snap.price if snap is not None else None)
+                self.sender.send("🔴 posições encerradas por /CLOSE CONFIRM (todos os mercados)")
+        pc.messages += res.messages
+
+    # ------------------------------------------------------------------ autorização única (AUTHORIZE: uma ordem real por --authorize, não uma por mercado)
+    def _consume_authorization(self, sym: str) -> None:
+        for other, eng in self.engines.items():
+            if other != sym:
+                eng.authorized = False
+
     # ------------------------------------------------------------------ REACTION ENGINE (live)
     def _reaction_clock(self, snaps: MarketSnapshotSet) -> None:
         """A cada ciclo: relógio por mercado (evidência para o pré-movimento) + amostragem dos eventos em curso; ao fechar o
@@ -124,11 +160,6 @@ class MarketAIEngine:
         from .history import EXTRA_TRANSMISSION
 
         now = snaps.time
-        clock = ReactionClock(self.reaction_stats)
-        for sym, snap in snaps.by_symbol.items():
-            ra = clock.assess(sym, snap, snaps.identified, now)
-            snap.reaction_status, snap.reaction_pressure, snap.reaction_probability = ra.status, ra.pressure, ra.probability
-            snap.reaction_latency_min, snap.reaction_expected_min, snap.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         base = snaps.base
         for ev in snaps.identified:
             key = f"{ev.kind}:{ev.time:%Y%m%d%H%M}:{ev.name[:30]}"
@@ -139,10 +170,25 @@ class MarketAIEngine:
                 sign = ev.direction_sign or 1.0
                 self.pending_reactions[key] = {"ev": ev, "leads": {"USD": [], "YIELD": []}, "targets": {},
                                                "lead_dirs": {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}}
+                # T0 REAL: semeia líderes e alvos com histórico M1/M5 já fechado ao redor do evento (não depende do instante em que o loop viu a notícia)
+                t_from = ev.time - timedelta(minutes=15)
+                if self.lead_history is not None:
+                    for name in ("USD", "YIELD"):
+                        try:
+                            hist = self.lead_history(name, t_from, now) or []
+                        except Exception:  # noqa: BLE001
+                            hist = []
+                        self.pending_reactions[key]["leads"][name] = [(t, v) for t, v in hist if t <= now]
                 for sym, snap in snaps.by_symbol.items():
                     exp, _ = expected_direction(ev, sym)
                     if exp != 0.0 and snap.price:
-                        self.pending_reactions[key]["targets"][sym] = {"exp": exp, "atr": snap.atr or 0.0, "series": []}
+                        seed = []
+                        for tf, mins in (("M1", 1), ("M5", 5)):
+                            cs = snap.candles.get(tf) or []
+                            if cs:
+                                seed = [(c.time + timedelta(minutes=mins), c.close) for c in cs if t_from <= c.time + timedelta(minutes=mins) <= now]
+                                break
+                        self.pending_reactions[key]["targets"][sym] = {"exp": exp, "atr": snap.atr or 0.0, "series": seed}
             pr = self.pending_reactions[key]
             if base.dxy is not None:
                 pr["leads"]["USD"].append((now, base.dxy))
@@ -152,19 +198,43 @@ class MarketAIEngine:
                 snap = snaps.by_symbol.get(sym)
                 if snap is not None and snap.price:
                     tg["series"].append((now, snap.price))
+        clock = ReactionClock(self.reaction_stats)
+        # Δ dos líderes DESDE O EVENTO (não da última hora) a partir das amostras/histórico já guardados
+        lead_since: dict[str, float] = {}
+        if snaps.identified and self.pending_reactions:
+            ev0 = max(snaps.identified, key=lambda e: e.time)
+            for pr in self.pending_reactions.values():
+                if pr["ev"].time == ev0.time and pr["ev"].kind == ev0.kind:
+                    for name, pct in (("USD", True), ("YIELD", False)):
+                        ser = pr["leads"].get(name) or []
+                        base_pt = next((v for t, v in ser if t <= ev0.time), ser[0][1] if ser else None)
+                        if base_pt and ser:
+                            last = ser[-1][1]
+                            lead_since[name] = ((last / base_pt - 1) * 100) if pct else ((last - base_pt) * 100)
+                    break
+        for sym, snap in snaps.by_symbol.items():
+            ra = clock.assess(sym, snap, snaps.identified, now, lead_since or None)
+            snap.reaction_status, snap.reaction_pressure, snap.reaction_probability = ra.status, ra.pressure, ra.probability
+            snap.reaction_latency_min, snap.reaction_expected_min, snap.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
         for key in list(self.pending_reactions):
             pr = self.pending_reactions[key]
             ev = pr["ev"]
             if ev.age_min(now) < self.reaction_horizon:
                 continue
             for sym, tg in pr["targets"].items():
-                fine = snaps.by_symbol[sym].candles.get("M5") if sym in snaps.by_symbol else None
-                series = [(c.time, c.close) for c in fine if c.time >= ev.time - timedelta(minutes=10)] if fine else tg["series"]
-                first_price = next((p for t, p in tg["series"] if t <= ev.time), None)
+                cands = snaps.by_symbol[sym].candles if sym in snaps.by_symbol else {}
+                fine, res_min = None, 1
+                for tf, mins in (("M1", 1), ("M5", 5), ("M15", 15)):
+                    if cands.get(tf):
+                        fine, res_min = cands[tf], mins
+                        break
+                # candles carimbados na abertura → série no FECHO; só barras fechadas até agora
+                series = [(c.time + timedelta(minutes=res_min), c.close) for c in fine if c.time + timedelta(minutes=res_min) >= ev.time - timedelta(minutes=10)] if fine else list(tg["series"])
+                first_price = tg["series"][0][1] if tg["series"] else None      # 1ª amostra observada (alguns minutos após a publicação, nunca antes)
                 if first_price is not None and (not series or series[0][0] > ev.time):
                     series = [(ev.time, first_price)] + list(series)
                 rec = measure_reaction(key, ev.kind, ev.time, sym, tg["exp"], series, tg["atr"], pr["leads"], pr["lead_dirs"], self.reaction_horizon,
-                                       5 if fine else 1)
+                                       res_min if fine else 1)
                 if rec:
                     self.mem.save_reaction(rec)
                     self.reaction_stats.add(rec)
@@ -195,11 +265,8 @@ class MarketAIEngine:
     # ------------------------------------------------------------------ ciclo de carteira
     def run_cycle(self, snaps: MarketSnapshotSet) -> PortfolioCycle:
         pc = PortfolioCycle(snaps.time)
-        # comandos (/STOP /PAUSE /STATUS /CLOSE) tratados pelo primeiro motor, com o kill switch compartilhado
-        first = next(iter(self.engines.values()))
-        first.commands = self.commands
-        if self.commands is not None and any(c.startswith("/EDGE") for c in getattr(self.commands, "last_cmds", [])):
-            self.daily_edge(snaps.time, pc, force=True)
+        # comandos (/STOP /PAUSE /RESUME /STATUS /CLOSE /EDGE) tratados AQUI, para todos os mercados, com o kill switch compartilhado
+        self._handle_commands(snaps, pc)
         # 0) FLOW ANOMALY (informação implícita) → REACTION ENGINE (relógio por mercado + aprendizado dos eventos concluídos)
         self._flow_anomaly(snaps)
         self._reaction_clock(snaps)
@@ -238,7 +305,10 @@ class MarketAIEngine:
             if snap_c.anomalous_regime and snap_c.flow_direction != 0 and ((c.direction == Direction.ALTA) != (snap_c.flow_direction > 0)):
                 self.engines[sym].enter(r, snap_c, veto=f"REGIME ANÔMALO em {sym} — entrada contra o fluxo anômalo adiada (FLOW {snap_c.flow_score})")
                 continue
+            was_auth = self.engines[sym].authorized
             self.engines[sym].enter(r, snap_c)
+            if was_auth and not self.engines[sym].authorized:
+                self._consume_authorization(sym)
             pc.messages += [m for m in r.messages if m not in pc.messages]
             if r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")):
                 entered, pc.chosen = True, sym
