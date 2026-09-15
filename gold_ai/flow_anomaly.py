@@ -347,3 +347,72 @@ def render_propagation(assessments: dict[str, FlowAssessment], clocks: dict[str,
             continue
         lines.append("  " + chain.split("\n")[0].replace("REACTION CLOCK → ", ""))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- 5.2: REPLAY no histórico (M1) — o ledger nasce com meses de casos
+def replay_flow_anomalies(market: str, m1: Sequence, leaders: Optional[dict] = None, history=None, step_min: int = 5,
+                          window_min: int = 60, episode_min: int = 60, log: Optional[callable] = None) -> list[dict]:
+    """Percorre o M1 como se fosse ao vivo: em cada passo o detector só vê o passado (candles ≤ t, eventos publicados ≤ t);
+    a medição usa os 60 min SEGUINTES e é carimbada como conhecida em t+60. leaders: {"USD": candles M1 do índice do dólar}.
+    Devolve registros prontos para o ledger (event_id 'hist_…'), 1 por episódio de `episode_min`."""
+    from .leadlag import resample_h1
+    from .models import MarketSnapshot
+    from .technical import atr as _atr_fn
+    m1 = sorted(m1, key=lambda c: c.time)
+    if len(m1) < 26 * 60:
+        return []
+    usd = sorted((leaders or {}).get("USD") or [], key=lambda c: c.time)
+    usd_i = 0
+    engine = FlowAnomalyEngine()
+    out: list[dict] = []
+    last_episode: Optional[datetime] = None
+    atr_cache: dict = {}
+    identify = None
+    if history is not None and len(history) > 0:
+        from .news_engine import EventIdentifier
+        ident = EventIdentifier()
+
+        def identify(t):
+            events, news = history.snapshot_inputs(t)
+            return events, ident.identify(news, events, t)
+    start = 24 * 60
+    for i in range(start, len(m1), step_min):
+        c = m1[i]
+        t = c.time + timedelta(minutes=1)                       # barra conta no fechamento
+        hour_key = t.replace(minute=0, second=0, microsecond=0)
+        if hour_key not in atr_cache:
+            atr_cache[hour_key] = _atr_fn(resample_h1(m1[max(0, i - 48 * 60):i + 1])) or 0.0
+        a = atr_cache[hour_key]
+        if a <= 0:
+            continue
+        j = max(0, i - window_min)
+        s = MarketSnapshot(time=t, price=c.close)
+        s.atr = a
+        s.price_change_pct = (c.close / m1[j].close - 1) * 100 if m1[j].close else 0.0
+        s.candles = {"M1": m1[max(0, i - 120):i + 1]}
+        if usd:
+            while usd_i + 1 < len(usd) and usd[usd_i + 1].time <= c.time:
+                usd_i += 1
+            k = usd_i
+            while k > 0 and usd[k].time > c.time - timedelta(minutes=window_min):
+                k -= 1
+            if usd[usd_i].time <= c.time and usd[k].close:
+                s.dxy_change_pct = (usd[usd_i].close / usd[k].close - 1) * 100
+        identified = []
+        if identify is not None:
+            s.events, identified = identify(t)
+        fa = engine.assess(market, s, identified, t)
+        if not fa.is_anomalous:
+            continue
+        if last_episode is not None and (t - last_episode) < timedelta(minutes=episode_min):
+            continue
+        last_episode = t
+        rec = fa.ledger_record(t, s, "")
+        rec["event_id"] = "hist_" + rec["event_id"]
+        after = m1[i + 1:i + 1 + window_min + 5]
+        rec.update(measure_flow_outcome(fa.direction, c.close, a, after, t))
+        rec["medido_em"] = (t + timedelta(minutes=window_min)).isoformat()
+        out.append(rec)
+        if log and len(out) % 25 == 0:
+            log(f"  {market}: {len(out)} anomalias até {t:%d/%m %H:%M}")
+    return out

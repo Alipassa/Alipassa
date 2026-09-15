@@ -250,3 +250,50 @@ class SignalLabelTests(unittest.TestCase):
         self.assertIn("GOLD WATCH", format_signal(sig, "XAUUSD"))
         a.price = 1.15422
         self.assertIn("Preço: 1.15422", format_signal(sig, "EURUSD"))
+
+
+class FlowReplayTests(unittest.TestCase):
+    def test_replay_finds_and_measures_anomalies_point_in_time(self):
+        import math
+        from gold_ai.flow_anomaly import replay_flow_anomalies
+        from gold_ai.memory import PredictionMemory
+        from gold_ai.models import Candle
+        t0 = datetime(2026, 3, 2, 0, 0, tzinfo=UTC)
+        atr_h1, p, out = 10.0, 4300.0, []
+        step = atr_h1 / math.sqrt(60) / 2.0
+        n = 30 * 60
+        for i in range(n):
+            t = t0 + timedelta(minutes=i)
+            o = p
+            c = p + step * (1 if i % 2 else -1)
+            vol = 10.0
+            if 26 * 60 <= i < 26 * 60 + 25:                 # impulso de 2,5 ATR em 25 min com volume ×3, sem líder
+                c = p + 0.10 * atr_h1
+                vol = 30.0
+            elif 26 * 60 + 25 <= i < 26 * 60 + 90:          # continua devagar
+                c = p + 0.01 * atr_h1
+            hi, lo = max(o, c) + step, min(o, c) - step
+            if i % 60 == 0:
+                hi, lo = o + atr_h1 / 2, o - atr_h1 / 2
+            out.append(Candle(t, o, hi, lo, c, vol))
+            p = c
+        recs = replay_flow_anomalies("XAUUSD", out, {}, None, step_min=5)
+        self.assertGreaterEqual(len(recs), 1)
+        r = recs[0]
+        self.assertTrue(r["event_id"].startswith("hist_flow_XAUUSD_up"))
+        self.assertGreaterEqual(r["flow_score"], 70)
+        self.assertIn(r["resultado"], ("CONTINUOU", "INDEFINIDO", "REVERTEU", "SEM DADOS"))
+        self.assertIsNotNone(r["mfe60"])
+        t_det = datetime.fromisoformat(r["hora"])
+        self.assertGreaterEqual(t_det, t0 + timedelta(minutes=26 * 60))
+        self.assertEqual(datetime.fromisoformat(r["medido_em"]), t_det + timedelta(minutes=60))
+        # 1 por episódio de 60 min
+        times = [datetime.fromisoformat(x["hora"]) for x in recs]
+        self.assertTrue(all((b - a) >= timedelta(minutes=60) for a, b in zip(times, times[1:])))
+        # ledger: insere medido, ignora duplicata, e o live não confunde com episódio vivido
+        mem = PredictionMemory(":memory:")
+        self.assertTrue(mem.save_measured_flow_anomaly(r))
+        self.assertFalse(mem.save_measured_flow_anomaly(r))
+        self.assertEqual(len(mem.flow_anomaly_rows()), 1)
+        self.assertFalse(mem.recent_flow_anomaly("XAUUSD", t_det - timedelta(minutes=1)))
+        mem.close()

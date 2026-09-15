@@ -2304,8 +2304,17 @@ class PredictionMemory:
         self.conn.commit()
         return cur.lastrowid if cur.rowcount else None
 
+    def save_measured_flow_anomaly(self, rec: dict) -> bool:
+        """Registro já medido (replay histórico): insere completo; ignora se o event_id já existe."""
+        cols = ("event_id", "ativo", "hora", "flow_score", "atr_move", "minutos", "volume_ratio", "persistencia", "cross_market", "origem", "assinatura",
+                "leader", "regime", "direcao", "preco", "atr", "mfe5", "mae5", "mfe15", "mae15", "mfe30", "mae30", "mfe60", "mae60", "fechamento60",
+                "resultado", "confirm_min", "medido_em")
+        cur = self.conn.execute(f"INSERT OR IGNORE INTO flow_anomalies ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(rec.get(c) for c in cols))
+        self.conn.commit()
+        return bool(cur.rowcount)
+
     def recent_flow_anomaly(self, symbol: str, since: datetime) -> bool:
-        return self.conn.execute("SELECT 1 FROM flow_anomalies WHERE ativo=? AND hora>=?", (symbol, since.isoformat())).fetchone() is not None
+        return self.conn.execute("SELECT 1 FROM flow_anomalies WHERE ativo=? AND hora>=? AND event_id NOT LIKE 'hist_%'", (symbol, since.isoformat())).fetchone() is not None
 
     def pending_flow_anomalies(self, now: datetime, min_age_min: int = 60) -> list[dict]:
         cutoff = (now - timedelta(minutes=min_age_min)).isoformat()
@@ -7268,6 +7277,72 @@ def render_propagation(assessments: dict[str, FlowAssessment], clocks: dict[str,
             continue
         lines.append("  " + chain.split("\n")[0].replace("REACTION CLOCK → ", ""))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- 5.2: REPLAY no histórico (M1) — o ledger nasce com meses de casos
+def replay_flow_anomalies(market: str, m1: Sequence, leaders: Optional[dict] = None, history=None, step_min: int = 5,
+                          window_min: int = 60, episode_min: int = 60, log: Optional[callable] = None) -> list[dict]:
+    """Percorre o M1 como se fosse ao vivo: em cada passo o detector só vê o passado (candles ≤ t, eventos publicados ≤ t);
+    a medição usa os 60 min SEGUINTES e é carimbada como conhecida em t+60. leaders: {"USD": candles M1 do índice do dólar}.
+    Devolve registros prontos para o ledger (event_id 'hist_…'), 1 por episódio de `episode_min`."""
+    _atr_fn = atr
+    m1 = sorted(m1, key=lambda c: c.time)
+    if len(m1) < 26 * 60:
+        return []
+    usd = sorted((leaders or {}).get("USD") or [], key=lambda c: c.time)
+    usd_i = 0
+    engine = FlowAnomalyEngine()
+    out: list[dict] = []
+    last_episode: Optional[datetime] = None
+    atr_cache: dict = {}
+    identify = None
+    if history is not None and len(history) > 0:
+        ident = EventIdentifier()
+
+        def identify(t):
+            events, news = history.snapshot_inputs(t)
+            return events, ident.identify(news, events, t)
+    start = 24 * 60
+    for i in range(start, len(m1), step_min):
+        c = m1[i]
+        t = c.time + timedelta(minutes=1)                       # barra conta no fechamento
+        hour_key = t.replace(minute=0, second=0, microsecond=0)
+        if hour_key not in atr_cache:
+            atr_cache[hour_key] = _atr_fn(resample_h1(m1[max(0, i - 48 * 60):i + 1])) or 0.0
+        a = atr_cache[hour_key]
+        if a <= 0:
+            continue
+        j = max(0, i - window_min)
+        s = MarketSnapshot(time=t, price=c.close)
+        s.atr = a
+        s.price_change_pct = (c.close / m1[j].close - 1) * 100 if m1[j].close else 0.0
+        s.candles = {"M1": m1[max(0, i - 120):i + 1]}
+        if usd:
+            while usd_i + 1 < len(usd) and usd[usd_i + 1].time <= c.time:
+                usd_i += 1
+            k = usd_i
+            while k > 0 and usd[k].time > c.time - timedelta(minutes=window_min):
+                k -= 1
+            if usd[usd_i].time <= c.time and usd[k].close:
+                s.dxy_change_pct = (usd[usd_i].close / usd[k].close - 1) * 100
+        identified = []
+        if identify is not None:
+            s.events, identified = identify(t)
+        fa = engine.assess(market, s, identified, t)
+        if not fa.is_anomalous:
+            continue
+        if last_episode is not None and (t - last_episode) < timedelta(minutes=episode_min):
+            continue
+        last_episode = t
+        rec = fa.ledger_record(t, s, "")
+        rec["event_id"] = "hist_" + rec["event_id"]
+        after = m1[i + 1:i + 1 + window_min + 5]
+        rec.update(measure_flow_outcome(fa.direction, c.close, a, after, t))
+        rec["medido_em"] = (t + timedelta(minutes=window_min)).isoformat()
+        out.append(rec)
+        if log and len(out) % 25 == 0:
+            log(f"  {market}: {len(out)} anomalias até {t:%d/%m %H:%M}")
+    return out
 
 
 # ============================================================================
@@ -13271,11 +13346,43 @@ def cmd_flow(args: argparse.Namespace) -> int:
 
     symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
     mem = PredictionMemory(args.db)
+    if args.learn:
+        # REPLAY: o M1 do passado (dados/<SYM>_m1.csv) percorrido como se fosse ao vivo → ledger com meses de anomalias medidas
+        csv_dir = args.csv_dir or "dados"
+        history = None
+        if args.events and os.path.exists(args.events):
+            history = load_history(args.events)
+            print(f"banco histórico: {history.stats()}")
+        leaders = {}
+        lead_path = os.path.join(csv_dir, f"{args.lead_usd}_m1.csv") if args.lead_usd else ""
+        if lead_path and os.path.exists(lead_path):
+            leaders["USD"] = _read_candles_csv(lead_path)
+            print(f"líder USD: {args.lead_usd} ({len(leaders['USD'])} candles M1)")
+        total_new = 0
+        for sym in symbols:
+            path = os.path.join(csv_dir, f"{sym}_m1.csv")
+            if not os.path.exists(path):
+                print(f"{sym}: {path} não existe — rode `history prices --tf M1` (mt5 e dukascopy)")
+                continue
+            m1 = _read_candles_csv(path)
+            recs = replay_flow_anomalies(sym, m1, leaders, history, step_min=args.step, log=print)
+            new = sum(1 for r in recs if mem.save_measured_flow_anomaly(r))
+            total_new += new
+            cont = sum(1 for r in recs if r.get("resultado") == "CONTINUOU")
+            print(f"{sym}: {len(m1)} candles M1 · {len(recs)} anomalias (FLOW ≥ 70) · {new} novas no ledger · continuação {cont}/{len(recs) or 1}")
+        print()
+        rows = mem.flow_anomaly_rows()
+        print(render_flow_stats(rows))
+        hist_n = sum(1 for r in rows if str(r.get("event_id", "")).startswith("hist_"))
+        print(f"ledger: {len(rows)} medidas ({hist_n} do replay histórico, {len(rows) - hist_n} vividas) · {total_new} novas nesta execução")
+        mem.close()
+        return 0
     if args.stats:
         rows = mem.flow_anomaly_rows(measured_only=False)
         print(render_flow_stats(rows))
         pend = [r for r in rows if not r.get("resultado")]
-        print(f"registradas {len(rows)} · medidas {len(rows) - len(pend)} · aguardando medição {len(pend)}")
+        hist_n = sum(1 for r in rows if str(r.get("event_id", "")).startswith("hist_"))
+        print(f"registradas {len(rows)} · medidas {len(rows) - len(pend)} · aguardando medição {len(pend)} · do replay histórico {hist_n}")
         mem.close()
         return 0
     data = MultiMarketData(symbols, DataEngineConfig(enable_cot=False, enable_fred=not args.no_fred, enable_news=not args.no_news))
@@ -14142,6 +14249,11 @@ def _main(argv: list[str]) -> int:
     fl.add_argument("--no-fred", action="store_true")
     fl.add_argument("--no-news", action="store_true")
     fl.add_argument("--stats", action="store_true", help="5.2: o que aconteceu DEPOIS de cada anomalia registrada pelo live (continuação, MFE/MAE 5/15/30/60, confirmação)")
+    fl.add_argument("--learn", action="store_true", help="5.2: REPLAY do M1 histórico (dados/<SYM>_m1.csv) como se fosse ao vivo → ledger com meses de anomalias medidas")
+    fl.add_argument("--csv-dir", default="dados")
+    fl.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    fl.add_argument("--lead-usd", default="USDX", help="learn: símbolo do índice do dólar em <csv-dir>/<SYM>_m1.csv (líder)")
+    fl.add_argument("--step", type=int, default=5, help="learn: passo do replay em minutos")
     fl.set_defaults(func=cmd_flow)
 
     dc = sub.add_parser("doctor", help="tudo está funcionando? qual a eficiência? — painel por camada (✅ ⚠️ ❌) com ação e leitura do que está provado")

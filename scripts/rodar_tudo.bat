@@ -84,6 +84,10 @@ set "NOME=8d/8 EDGE BANK - o que funciona, onde funciona (dados\edge_bank.json)"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" edge-bank --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\edge_bank.json"
 call :passo
 
+set "NOME=8f/8 FLOW LEARN - anomalias de fluxo no M1 desde janeiro, medidas 60 min depois (ledger historico)"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" flow --learn --markets %MERCADOS% --lead-usd USDX"
+call :passo
+
 set "NOME=8e/8 AUTOTUNE - a IA procura piso/confirmacoes/limiar no passado (dados\parametros.json; o live adota so com 20 casos OOS)"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" autotune --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\parametros.json"
 call :passo

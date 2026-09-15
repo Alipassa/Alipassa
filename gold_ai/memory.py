@@ -557,8 +557,17 @@ class PredictionMemory:
         self.conn.commit()
         return cur.lastrowid if cur.rowcount else None
 
+    def save_measured_flow_anomaly(self, rec: dict) -> bool:
+        """Registro já medido (replay histórico): insere completo; ignora se o event_id já existe."""
+        cols = ("event_id", "ativo", "hora", "flow_score", "atr_move", "minutos", "volume_ratio", "persistencia", "cross_market", "origem", "assinatura",
+                "leader", "regime", "direcao", "preco", "atr", "mfe5", "mae5", "mfe15", "mae15", "mfe30", "mae30", "mfe60", "mae60", "fechamento60",
+                "resultado", "confirm_min", "medido_em")
+        cur = self.conn.execute(f"INSERT OR IGNORE INTO flow_anomalies ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(rec.get(c) for c in cols))
+        self.conn.commit()
+        return bool(cur.rowcount)
+
     def recent_flow_anomaly(self, symbol: str, since: datetime) -> bool:
-        return self.conn.execute("SELECT 1 FROM flow_anomalies WHERE ativo=? AND hora>=?", (symbol, since.isoformat())).fetchone() is not None
+        return self.conn.execute("SELECT 1 FROM flow_anomalies WHERE ativo=? AND hora>=? AND event_id NOT LIKE 'hist_%'", (symbol, since.isoformat())).fetchone() is not None
 
     def pending_flow_anomalies(self, now: datetime, min_age_min: int = 60) -> list[dict]:
         cutoff = (now - timedelta(minutes=min_age_min)).isoformat()

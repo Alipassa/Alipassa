@@ -312,6 +312,10 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
 ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
 
+**Flow learn.** `flow --learn` percorre o M1 histórico (`dados/<SYM>_m1.csv`) como se fosse ao vivo: em cada passo o detector só vê o passado, e
+cada anomalia (FLOW ≥ 70) é medida com os 60 min seguintes e carimbada como conhecida em t+60. O ledger nasce com meses de casos (`hist_…`),
+separados dos vividos; `flow --stats` e `/FLOW` mostram os dois. Etapa 8f do `rodar_tudo.bat`.
+
 **Autotune.** `autotune` percorre a grade piso de vantagem × confirmações mínimas × limiar de sinal em walk-forward: a escolha é feita só no
 treino de cada bloco e avaliada no bloco seguinte, que ela nunca viu. Grava `dados/parametros.json` com a recomendação por mercado, o n fora da amostra,
 a expectancy da política e a do padrão, o tier e `apply`. O live (`--params`) adota só o que está marcado `apply` (n OOS ≥ 20 e expectancy ≥ padrão);
