@@ -83,6 +83,7 @@ class PerformanceEngine:
     trading_stop: bool = False
     target_reached: bool = False      # 🎯 meta diária atingida: protege o ganho (sem novas entradas hoje)
     history: list[dict] = field(default_factory=list)
+    synced: bool = False              # primeira leitura do broker = linha de base (não é resultado do dia)
 
     def __post_init__(self) -> None:
         self.peak_equity = max(self.peak_equity, self.equity)
@@ -141,8 +142,15 @@ class PerformanceEngine:
         self.blocks(now)
 
     def sync_equity(self, broker_equity: float, t: datetime) -> None:
-        """Em LIVE o capital vem do broker; a variação entra como resultado do dia."""
+        """Em LIVE o capital vem do broker; a variação entra como resultado do dia.
+        A PRIMEIRA leitura só define a linha de base (capital real da conta): a diferença para o --equity de partida
+        não é lucro nem perda — sem isso, 10 000 → 50 000 viraria "meta diária atingida" no primeiro ciclo."""
         self.roll_day(t)
+        if not self.synced:
+            self.synced = True
+            self.equity = round(broker_equity, 2)
+            self.peak_equity = max(self.peak_equity, self.equity)
+            return
         delta = round(broker_equity - self.equity, 2)
         if abs(delta) > 0.005:
             self.record_result(delta, t, "sync broker")

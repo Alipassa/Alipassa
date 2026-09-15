@@ -8089,6 +8089,7 @@ class PerformanceEngine:
     trading_stop: bool = False
     target_reached: bool = False      # 🎯 meta diária atingida: protege o ganho (sem novas entradas hoje)
     history: list[dict] = field(default_factory=list)
+    synced: bool = False              # primeira leitura do broker = linha de base (não é resultado do dia)
 
     def __post_init__(self) -> None:
         self.peak_equity = max(self.peak_equity, self.equity)
@@ -8147,8 +8148,15 @@ class PerformanceEngine:
         self.blocks(now)
 
     def sync_equity(self, broker_equity: float, t: datetime) -> None:
-        """Em LIVE o capital vem do broker; a variação entra como resultado do dia."""
+        """Em LIVE o capital vem do broker; a variação entra como resultado do dia.
+        A PRIMEIRA leitura só define a linha de base (capital real da conta): a diferença para o --equity de partida
+        não é lucro nem perda — sem isso, 10 000 → 50 000 viraria "meta diária atingida" no primeiro ciclo."""
         self.roll_day(t)
+        if not self.synced:
+            self.synced = True
+            self.equity = round(broker_equity, 2)
+            self.peak_equity = max(self.peak_equity, self.equity)
+            return
         delta = round(broker_equity - self.equity, 2)
         if abs(delta) > 0.005:
             self.record_result(delta, t, "sync broker")
@@ -11611,6 +11619,8 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
                 acct = f"conta {getattr(info, 'login', '?')} · {getattr(info, 'server', '?')} · saldo {float(getattr(info, 'balance', 0.0)):,.2f} {getattr(info, 'currency', '')}"
                 kind = {0: "DEMO", 1: "CONTEST", 2: "REAL"}.get(trade_mode, "DESCONHECIDA")
                 print(f"MT5: {acct} · tipo {kind}")
+                if info is not None and float(getattr(info, "equity", 0.0)) > 0:
+                    args.equity = float(info.equity)      # capital REAL da conta: 3% de risco sobre o saldo do broker, não sobre o --equity padrão
                 if getattr(args, "demo_only", True) and trade_mode != 0:
                     print("🛑 TRAVA: modo real pedido mas a conta NÃO é demo (ou não foi possível confirmar). Use --no-demo-only apenas quando decidir operar dinheiro real.")
                     return 1

@@ -173,6 +173,8 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
                 acct = f"conta {getattr(info, 'login', '?')} · {getattr(info, 'server', '?')} · saldo {float(getattr(info, 'balance', 0.0)):,.2f} {getattr(info, 'currency', '')}"
                 kind = {0: "DEMO", 1: "CONTEST", 2: "REAL"}.get(trade_mode, "DESCONHECIDA")
                 print(f"MT5: {acct} · tipo {kind}")
+                if info is not None and float(getattr(info, "equity", 0.0)) > 0:
+                    args.equity = float(info.equity)      # capital REAL da conta: 3% de risco sobre o saldo do broker, não sobre o --equity padrão
                 if getattr(args, "demo_only", True) and trade_mode != 0:
                     print("🛑 TRAVA: modo real pedido mas a conta NÃO é demo (ou não foi possível confirmar). Use --no-demo-only apenas quando decidir operar dinheiro real.")
                     return 1

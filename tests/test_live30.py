@@ -366,3 +366,19 @@ class DailyTargetTests(unittest.TestCase):
         q = PerformanceEngine(lim, 10000.0)
         q.record_result(-300.0, t); q.record_result(-300.0, t)
         self.assertTrue(q.trading_stop)
+
+
+class BrokerSyncBaselineTests(unittest.TestCase):
+    def test_first_sync_is_baseline_not_daily_result(self):
+        from datetime import datetime, timezone
+        from gold_ai.guard import GuardLimits, PerformanceEngine
+        perf = PerformanceEngine(GuardLimits(risk_per_trade_pct=3.0, daily_target_pct=10.0), 10000.0)
+        now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+        perf.sync_equity(50000.0, now)
+        self.assertEqual(perf.equity, 50000.0)
+        self.assertEqual(perf.daily_pnl, 0.0)
+        self.assertFalse(perf.target_reached)
+        self.assertEqual(perf.blocks(now), [])
+        self.assertAlmostEqual(perf.risk_usd, 1500.0)
+        perf.sync_equity(50250.0, now)          # a partir da segunda leitura, a variação é resultado do dia
+        self.assertEqual(perf.daily_pnl, 250.0)
