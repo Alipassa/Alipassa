@@ -7136,6 +7136,47 @@ def flow_stats(rows: Sequence[dict], min_score: int = FLOW_THRESHOLD) -> list[Fl
     return out
 
 
+def _bucket_rows(rows: Sequence[dict], key: str) -> list[tuple[str, list[dict]]]:
+    """Quebras: faixa de FLOW SCORE (70–79 · 80–89 · 90+), tamanho do movimento (ATR) e sessão (hora UTC da detecção)."""
+    def score_b(r):
+        v = int(r.get("flow_score") or 0)
+        return "FLOW 70–79" if v < 80 else "FLOW 80–89" if v < 90 else "FLOW 90+"
+
+    def move_b(r):
+        v = abs(float(r.get("atr_move") or 0.0))
+        return "mov < 1,5 ATR" if v < 1.5 else "mov 1,5–2,5 ATR" if v < 2.5 else "mov ≥ 2,5 ATR"
+
+    def session_b(r):
+        try:
+            h = datetime.fromisoformat(r["hora"]).hour
+        except Exception:  # noqa: BLE001
+            return "sessão ?"
+        return "Ásia 00–07 UTC" if h < 7 else "Londres 07–13 UTC" if h < 13 else "NY 13–21 UTC" if h < 21 else "fecho 21–24 UTC"
+    fn = {"score": score_b, "move": move_b, "session": session_b}[key]
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(fn(r), []).append(r)
+    return sorted(groups.items())
+
+
+def render_flow_breakdown(rows: Sequence[dict], min_score: int = FLOW_THRESHOLD) -> str:
+    rows = [r for r in rows if r.get("resultado") in ("CONTINUOU", "REVERTEU", "INDEFINIDO") and (r.get("flow_score") or 0) >= min_score]
+    if len(rows) < 20:
+        return ""
+    lines = ["  QUEBRAS (todos os ativos): onde a continuação muda?",
+             f"  {'grupo':<20}{'n':>5}{'contin.':>8}{'revert.':>8}{'MFE60':>11}{'MAE60':>11}{'MFE−MAE':>9}"]
+    for key in ("score", "move", "session"):
+        for label, sub in _bucket_rows(rows, key):
+            n = len(sub)
+            c = sum(1 for r in sub if r["resultado"] == "CONTINUOU") / n
+            v = sum(1 for r in sub if r["resultado"] == "REVERTEU") / n
+            mfe, mae = _median([r.get("mfe60") for r in sub]) or 0.0, _median([r.get("mae60") for r in sub]) or 0.0
+            lines.append(f"  {label:<20}{n:>5}{c:>8.0%}{v:>8.0%}{mfe:>8.2f} ATR{mae:>8.2f} ATR{mfe - mae:>+9.2f}")
+        lines.append("")
+    lines.append("  leitura: um grupo só é candidato se continuação ≥ 60% E MFE60 − MAE60 > 0 com n ≥ 20; igual ao total = a quebra não separa nada.")
+    return "\n".join(lines)
+
+
 def render_flow_stats(rows: Sequence[dict]) -> str:
     stats = flow_stats(rows)
     lines = [f"🟣 FLOW ANOMALY — o que aconteceu DEPOIS de cada anomalia (FLOW ≥ {FLOW_THRESHOLD}; MFE/MAE em ATR a favor do fluxo; resultado aos 60 min)",
@@ -7144,6 +7185,9 @@ def render_flow_stats(rows: Sequence[dict]) -> str:
         lines.append("  (nenhuma anomalia medida ainda — o live registra cada FLOW ≥ 70 e mede 60 min depois)")
     lines += [g.row() for g in stats]
     lines.append(f"  leitura: continuação ≥ 60% com n ≥ 20 e MFE60 mediano ≥ {CONFIRM_ATR} ATR = candidato a edge (tiers do ciclo de vida); abaixo disso é observação.")
+    bd = render_flow_breakdown(rows)
+    if bd:
+        lines += ["", bd]
     return "\n".join(lines)
 
 

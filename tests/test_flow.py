@@ -297,3 +297,18 @@ class FlowReplayTests(unittest.TestCase):
         self.assertEqual(len(mem.flow_anomaly_rows()), 1)
         self.assertFalse(mem.recent_flow_anomaly("XAUUSD", t_det - timedelta(minutes=1)))
         mem.close()
+
+
+class FlowBreakdownTests(unittest.TestCase):
+    def test_breakdown_by_score_move_and_session(self):
+        from gold_ai.flow_anomaly import render_flow_breakdown, render_flow_stats
+        rows = []
+        for i in range(30):
+            rows.append({"ativo": "XAUUSD", "origem": "E", "flow_score": 72 + (i % 3) * 10, "atr_move": 1.0 + (i % 3), "mfe15": 0.3, "mfe60": 0.5 + (i % 3) * 0.2,
+                         "mae60": 0.5, "resultado": "CONTINUOU" if i % 2 else "REVERTEU", "confirm_min": 10.0,
+                         "hora": f"2026-03-0{1 + i % 5}T{(i * 3) % 24:02d}:00:00+00:00"})
+        txt = render_flow_breakdown(rows)
+        for label in ("FLOW 70–79", "FLOW 80–89", "FLOW 90+", "mov ≥ 2,5 ATR", "NY 13–21 UTC", "MFE−MAE"):
+            self.assertIn(label, txt)
+        self.assertIn("QUEBRAS", render_flow_stats(rows))
+        self.assertEqual(render_flow_breakdown(rows[:5]), "")           # < 20 casos: sem quebra
