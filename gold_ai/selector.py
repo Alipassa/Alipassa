@@ -205,11 +205,13 @@ class PortfolioLimits:
     max_positions: int = 3
     max_asset_exposure: int = 1
     correlation_threshold: float = 0.5   # acima disto, duas posições são "a mesma aposta"
+    max_entries_per_cycle: int = 3       # 5.2: oportunidades de CARTEIRA — até N entradas no mesmo ciclo, cada uma pelo funil + exposição
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "PortfolioLimits":
         g = lambda k, d: type(d)(env.get(k, d))  # noqa: E731
-        return cls(g("MAX_TOTAL_OPEN_RISK", 1.5), g("MAX_CORRELATED_RISK", 1.0), g("MAX_PORTFOLIO_POSITIONS", 3), g("MAX_ASSET_EXPOSURE", 1), g("CORRELATION_THRESHOLD", 0.5))
+        return cls(g("MAX_TOTAL_OPEN_RISK", 1.5), g("MAX_CORRELATED_RISK", 1.0), g("MAX_PORTFOLIO_POSITIONS", 3), g("MAX_ASSET_EXPOSURE", 1), g("CORRELATION_THRESHOLD", 0.5),
+                   g("MAX_ENTRIES_PER_CYCLE", 3))
 
 
 class PortfolioExposureEngine:
@@ -236,11 +238,12 @@ class PortfolioExposureEngine:
             reasons.append(f"posições abertas {len(open_)} ≥ MAX_PORTFOLIO_POSITIONS {self.limits.max_positions}")
         if sum(1 for o in open_ if o.symbol == symbol) >= self.limits.max_asset_exposure:
             reasons.append(f"já existe posição em {symbol} (MAX_ASSET_EXPOSURE)")
+        eps = 0.01                                      # tolerância de centavos: risco = 3,00% e teto = 3% não podem colidir por arredondamento
         total = sum(o.risk_usd for o in open_) + risk_usd
-        if total > equity * self.limits.max_total_open_risk_pct / 100.0:
+        if total > equity * self.limits.max_total_open_risk_pct / 100.0 + eps:
             reasons.append(f"risco total aberto {total / equity:.2%} > MAX_TOTAL_OPEN_RISK {self.limits.max_total_open_risk_pct}%")
         corr = self.correlated_risk(symbol, direction, risk_usd, open_)
-        if corr > equity * self.limits.max_correlated_risk_pct / 100.0:
+        if corr > equity * self.limits.max_correlated_risk_pct / 100.0 + eps:
             same = [o.symbol for o in open_ if correlation(symbol, o.symbol, self.corr_table) * (1 if o.direction == direction else -1) >= self.limits.correlation_threshold]
             reasons.append(f"risco correlacionado {corr / equity:.2%} > MAX_CORRELATED_RISK {self.limits.max_correlated_risk_pct}% (mesma aposta: {', '.join(same) or 'parcial'})")
         return reasons

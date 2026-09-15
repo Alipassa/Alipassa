@@ -367,12 +367,16 @@ class MarketAIEngine:
         # 3) ASSET SELECTOR — ordena; a melhor tenta entrar (Risk Engine + exposição validam depois)
         pc.ranked = self.selector.rank(cands, snaps.time)
         self.log(render_rank(pc.ranked, self.history))
-        entered = False
+        # 5.2 PORTFOLIO OPPORTUNITY: até N entradas por ciclo, em ordem de prioridade; cada uma passa pelo funil do seu mercado e pelo
+        # motor de exposição (risco total, risco correlacionado = mesma tese, posições). Sem N sinais não há N entradas; com N sinais
+        # da mesma tese o risco correlacionado barra a partir da segunda.
+        entered_syms: list[str] = []
+        max_entries = max(1, int(getattr(self.portfolio.limits, "max_entries_per_cycle", 1)))
         for c in pc.ranked:
             sym = c.spec.symbol
             r = pc.results[sym]
-            if entered:
-                self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — {pc.chosen} foi a melhor oportunidade do ciclo (OPP {pc.ranked[0].opportunity_score:.1f} vs {c.opportunity_score:.1f})")
+            if len(entered_syms) >= max_entries:
+                self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — limite de {max_entries} entrada(s) por ciclo atingido ({', '.join(entered_syms)}; OPP {c.opportunity_score:.1f})")
                 continue
             snap_c = snaps.by_symbol[sym]
             lc = getattr(self, "lifecycle", {}).get(sym)
@@ -388,7 +392,8 @@ class MarketAIEngine:
                 self._consume_authorization(sym)
             pc.messages += [m for m in r.messages if m not in pc.messages]
             if r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")):
-                entered, pc.chosen = True, sym
+                entered_syms.append(sym)
+                pc.chosen = sym if pc.chosen is None else f"{pc.chosen}+{sym}"
         # mercados sem candidatura: registrar a decisão (regra que bloqueou) para o Opportunity Engine
         for sym, r in pc.results.items():
             if r.assessment is not None and sym not in {c.spec.symbol for c in pc.ranked}:

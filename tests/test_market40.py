@@ -168,6 +168,7 @@ class MarketEngineTests(unittest.TestCase):
     def test_one_cycle_one_entry_best_opportunity(self):
         with tempfile.TemporaryDirectory() as d:
             eng, mem = self._engine(os.path.join(d, "t.db"))
+            eng.portfolio.limits.max_entries_per_cycle = 1          # regra antiga (1 por ciclo) para este teste
             # XAUUSD e EURUSD com o mesmo cenário forte de venda (dólar ↑): duas oportunidades; USDJPY sem sinal
             pc = eng.run_cycle(build_snapset({"EURUSD": "venda", "XAUUSD": "venda", "USDJPY": "neutro"}))
             self.assertGreaterEqual(len(pc.ranked), 1)

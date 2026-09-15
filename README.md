@@ -312,6 +312,12 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
 ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
 
+**Oportunidades de carteira.** O ciclo pode abrir até `MAX_ENTRIES_PER_CYCLE` entradas (padrão 3), em ordem de prioridade do Asset Selector, cada uma
+pelo funil do seu mercado e pelo motor de exposição: risco total (`MAX_TOTAL_OPEN_RISK`), risco correlacionado = mesma tese (`MAX_CORRELATED_RISK`,
+correlação assinada pela direção: ouro comprado + euro comprado é a mesma aposta no dólar), posições e 1 por ativo. Quatro sinais de 3% não viram
+12% de risco real: a segunda posição da mesma tese é barrada. `portfolio-sim` (etapa 8g) prova com as operações OOS se 2–4 posições simultâneas
+aumentam o retorno líquido (custo 0,05R por operação) sem drawdown desproporcional — é isso que decide o `.env`, não a vontade de operar mais.
+
 **Flow learn.** `flow --learn` percorre o M1 histórico (`dados/<SYM>_m1.csv`) como se fosse ao vivo: em cada passo o detector só vê o passado, e
 cada anomalia (FLOW ≥ 70) é medida com os 60 min seguintes e carimbada como conhecida em t+60. O ledger nasce com meses de casos (`hist_…`),
 separados dos vividos; `flow --stats` e `/FLOW` mostram os dois. Etapa 8f do `rodar_tudo.bat`.

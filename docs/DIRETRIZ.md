@@ -495,3 +495,17 @@ Um movimento anômalo não é ruído nem sinal de entrada. Ele inicia uma **inve
 7. **O histórico decide o parâmetro**, não uma regra arbitrária: a estatística de continuação por ativo × origem entra no relógio quando há ≥ 5 casos (informação) e só vira edge com amostra.
 
 Mais inteligência → mais oportunidades detectadas → mais setups qualificados → melhor captura → maior lucro potencial, **sem aumentar o risco por operação**.
+
+
+## Adendo 5.2b — PORTFOLIO OPPORTUNITY ENGINE
+
+5 mercados → medir a vantagem de cada um → identificar oportunidades simultâneas → montar uma carteira de entradas → monitorar cada posição.
+
+1. Cada entrada passa pelo seu próprio funil (WATCH → SETUP → OPPORTUNITY → EXECUTION → MONITOR → EXIT). Ter 3 ou 4 sinais não é ter 3 ou 4 entradas.
+2. O risco é conjunto: risco individual + correlação (mesma tese econômica, assinada pela direção) + exposição total + qualidade da vantagem.
+   Quatro posições a 3% não são 12% de risco independente quando ouro, dólar e juros estão no mesmo movimento — a segunda da mesma tese é barrada.
+3. Propagação: quando um ativo faz um movimento anômalo, a pergunta não é "comprar tudo", é "quais ativos historicamente respondem a este movimento
+   e ainda não o incorporaram, com expectativa positiva depois de custos?" (Reaction Clock + lead-lag + Edge Bank).
+4. Mais oportunidades não significa mais lucro: `portfolio-sim` compara 1 × 2 × 3 × 4 posições simultâneas com as operações fora da amostra,
+   líquido de spread/slippage e correlação, e só o retorno líquido com drawdown proporcional justifica subir `MAX_ENTRIES_PER_CYCLE`, `MAX_TOTAL_OPEN_RISK`
+   e `MAX_CORRELATED_RISK` no .env.

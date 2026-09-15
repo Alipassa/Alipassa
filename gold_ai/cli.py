@@ -1044,6 +1044,35 @@ def cmd_edge_bank(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portfolio_sim(args: argparse.Namespace) -> int:
+    """PORTFOLIO SIM (5.2): as operações OOS de cada mercado em carteira com 1, 2, 3 e 4 posições simultâneas — retorno líquido, DD, recusas por correlação."""
+    from .portfolio_sim import render_portfolio_sim, simulate_portfolio, trades_from_rows
+    from .selector import PortfolioLimits
+    from .telegram import load_env_file
+
+    env = load_env_file()
+    plim = PortfolioLimits.from_env(env)
+    risk = args.risk if args.risk is not None else float(env.get("RISK_PER_TRADE", 0.5))
+    results = _oos_results_for_markets(args)
+    if not results:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    rows_by = {sym: [r for res in folds for r in res.trade_rows] for sym, folds in results.items()}
+    trades = trades_from_rows(rows_by, args.strategy, cost_r=args.cost)
+    if not trades:
+        print("nenhuma operação OOS no período")
+        return 1
+    days = (trades[-1].time - trades[0].time).total_seconds() / 86400 if len(trades) > 1 else 0.0
+    sims = [simulate_portfolio(trades, n, plim, args.equity, risk) for n in (1, 2, 3, 4)]
+    txt = render_portfolio_sim(sims, args.equity, risk, plim, len(trades), days)
+    print(txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt)
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
 def cmd_autotune(args: argparse.Namespace) -> int:
     """AUTOTUNE (5.2): a IA procura piso/confirmações/limiar no passado (walk-forward) e grava dados/parametros.json; o live adota só com n OOS ≥ 20."""
     from .autotune import DEFAULT_GRID, TuneReport, autotune_market
@@ -1555,7 +1584,8 @@ def _main(argv: list[str]) -> int:
     es.set_defaults(func=cmd_estimate)
 
     for name, fn, hlp in (("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
-                          ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)")):
+                          ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)"),
+                          ("portfolio-sim", cmd_portfolio_sim, "PORTFOLIO SIM 5.2: 1 × 2 × 3 × 4 posições simultâneas com as operações OOS, líquido de custo e correlação")):
         xp = sub.add_parser(name, help=hlp)
         xp.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"), help="banco histórico point-in-time (contexto: evento, relógio, fluxo)")
         xp.add_argument("--start", default="2026-01-01")
@@ -1571,6 +1601,9 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--signal-score", type=float, default=None)
         xp.add_argument("--min-confirmations", type=int, default=None)
         xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else None))
+        xp.add_argument("--equity", type=float, default=10000.0)
+        xp.add_argument("--risk", type=float, default=None, help="portfolio-sim: risco %% por operação (padrão RISK_PER_TRADE do .env)")
+        xp.add_argument("--cost", type=float, default=0.05, help="portfolio-sim: custo por operação em R (spread+slippage), descontado do resultado")
         xp.set_defaults(func=fn)
 
     at = sub.add_parser("autotune", help="AUTOTUNE 5.2: piso × confirmações × limiar de sinal escolhidos no passado (walk-forward) → dados/parametros.json")

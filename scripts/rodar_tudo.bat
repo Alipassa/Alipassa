@@ -88,6 +88,10 @@ set "NOME=8f/8 FLOW LEARN - anomalias de fluxo no M1 desde janeiro, medidas 60 m
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" flow --learn --markets %MERCADOS% --lead-usd USDX"
 call :passo
 
+set "NOME=8g/8 PORTFOLIO SIM - 1 x 2 x 3 x 4 posicoes simultaneas com as operacoes OOS (liquido de custo e correlacao)"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" portfolio-sim --start %INICIO% --end %FIM% --markets %MERCADOS% --out portfolio_sim.txt"
+call :passo
+
 set "NOME=8e/8 AUTOTUNE - a IA procura piso/confirmacoes/limiar no passado (dados\parametros.json; o live adota so com 20 casos OOS)"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" autotune --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\parametros.json"
 call :passo
@@ -103,7 +107,7 @@ type logs\doctor.txt
 
 echo.
 echo ============================================================
-echo  CONCLUIDO. Resultados: prova.txt, teste_ab.txt, escada.txt, exit_lab.txt, estimativa_news.txt, logs\doctor.txt, dados\edge_bank.json, dados\parametros.json
+echo  CONCLUIDO. Resultados: prova.txt, teste_ab.txt, escada.txt, exit_lab.txt, estimativa_news.txt, logs\doctor.txt, portfolio_sim.txt, dados\edge_bank.json, dados\parametros.json
 echo  Log completo: %LOG%
 echo ============================================================
 echo [%date% %time%] FIM >> "%LOG%"

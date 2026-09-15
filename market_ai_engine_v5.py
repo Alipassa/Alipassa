@@ -9326,7 +9326,8 @@ class Backtester:
                 plan = mpe.plan(a, snap, sig.direction, sig.type.value)
                 sim = simulate_all(plan, xau[i + 1: min(end, i + 1 + horizon_bars + 2)], self.horizon_min)
                 row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
-                       "score": a.score, "direction": sig.direction.value, "entry": a.price}
+                       "score": a.score, "direction": sig.direction.value, "entry": a.price,
+                       "exits": {k: v.exit_time for k, v in sim["details"].items()}, "symbol": getattr(self.frame, "symbol", "XAUUSD")}
                 trade_rows.append(row)
                 if self.adaptive_exit:
                     managed.append((ManagedTrade(len(trade_rows), plan, Thesis.from_assessment(a, sig.direction)), row, i))
@@ -10167,11 +10168,13 @@ class PortfolioLimits:
     max_positions: int = 3
     max_asset_exposure: int = 1
     correlation_threshold: float = 0.5   # acima disto, duas posições são "a mesma aposta"
+    max_entries_per_cycle: int = 3       # 5.2: oportunidades de CARTEIRA — até N entradas no mesmo ciclo, cada uma pelo funil + exposição
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "PortfolioLimits":
         g = lambda k, d: type(d)(env.get(k, d))  # noqa: E731
-        return cls(g("MAX_TOTAL_OPEN_RISK", 1.5), g("MAX_CORRELATED_RISK", 1.0), g("MAX_PORTFOLIO_POSITIONS", 3), g("MAX_ASSET_EXPOSURE", 1), g("CORRELATION_THRESHOLD", 0.5))
+        return cls(g("MAX_TOTAL_OPEN_RISK", 1.5), g("MAX_CORRELATED_RISK", 1.0), g("MAX_PORTFOLIO_POSITIONS", 3), g("MAX_ASSET_EXPOSURE", 1), g("CORRELATION_THRESHOLD", 0.5),
+                   g("MAX_ENTRIES_PER_CYCLE", 3))
 
 
 class PortfolioExposureEngine:
@@ -10198,11 +10201,12 @@ class PortfolioExposureEngine:
             reasons.append(f"posições abertas {len(open_)} ≥ MAX_PORTFOLIO_POSITIONS {self.limits.max_positions}")
         if sum(1 for o in open_ if o.symbol == symbol) >= self.limits.max_asset_exposure:
             reasons.append(f"já existe posição em {symbol} (MAX_ASSET_EXPOSURE)")
+        eps = 0.01                                      # tolerância de centavos: risco = 3,00% e teto = 3% não podem colidir por arredondamento
         total = sum(o.risk_usd for o in open_) + risk_usd
-        if total > equity * self.limits.max_total_open_risk_pct / 100.0:
+        if total > equity * self.limits.max_total_open_risk_pct / 100.0 + eps:
             reasons.append(f"risco total aberto {total / equity:.2%} > MAX_TOTAL_OPEN_RISK {self.limits.max_total_open_risk_pct}%")
         corr = self.correlated_risk(symbol, direction, risk_usd, open_)
-        if corr > equity * self.limits.max_correlated_risk_pct / 100.0:
+        if corr > equity * self.limits.max_correlated_risk_pct / 100.0 + eps:
             same = [o.symbol for o in open_ if correlation(symbol, o.symbol, self.corr_table) * (1 if o.direction == direction else -1) >= self.limits.correlation_threshold]
             reasons.append(f"risco correlacionado {corr / equity:.2%} > MAX_CORRELATED_RISK {self.limits.max_correlated_risk_pct}% (mesma aposta: {', '.join(same) or 'parcial'})")
         return reasons
@@ -11772,6 +11776,127 @@ def apply_params(cfg: EngineConfig, entry: Optional[dict]) -> tuple[EngineConfig
 
 
 # ============================================================================
+# PORTFOLIO_SIM
+# ============================================================================
+
+"""PORTFOLIO SIM (5.2) — 1 × 2 × 3 × 4 posições simultâneas, com as MESMAS operações fora da amostra de cada mercado.
+
+Pergunta: permitir 2–4 posições ao mesmo tempo aumenta o retorno líquido (spread, slippage, correlação) sem drawdown
+desproporcional? As operações OOS de cada mercado (walk-forward) são postas em ordem cronológica; para cada N, a carteira
+admite uma operação só se, no instante da entrada, houver vaga (< N abertas), o risco total couber e o risco CORRELACIONADO
+(mesma tese: dólar, risco, petróleo — correlação assinada pela direção) couber. O que não coube é registrado como "recusada".
+Risco fixo em % do capital em cada operação; capital composto. Saída pela estratégia escolhida (exit_time das simulações)."""
+
+
+
+
+@dataclass
+class SimTrade:
+    time: datetime
+    symbol: str
+    direction: Direction
+    r: float
+    exit_time: datetime
+    cost_r: float = 0.0
+
+
+@dataclass
+class PortfolioResult:
+    max_positions: int
+    admitted: int
+    refused: int
+    refused_reasons: dict = field(default_factory=dict)
+    net_r: float = 0.0
+    expectancy: float = 0.0
+    win_rate: float = 0.0
+    end_equity: float = 0.0
+    max_dd_pct: float = 0.0
+    peak_concurrent: int = 0
+
+    def row(self, start_equity: float) -> str:
+        ret = (self.end_equity / start_equity - 1) * 100 if start_equity else 0.0
+        return (f"  {self.max_positions:>3}{self.admitted:>10}{self.refused:>10}{self.expectancy:>+10.2f}R{self.net_r:>+10.1f}R{self.win_rate:>8.0%}"
+                f"{ret:>+9.1f}%{self.max_dd_pct:>8.1f}%{self.peak_concurrent:>6}")
+
+
+def trades_from_rows(rows_by_symbol: dict, strategy: str = "adaptive", default: str = "3R", cost_r: float = 0.0) -> list[SimTrade]:
+    out = []
+    for sym, rows in rows_by_symbol.items():
+        for row in rows:
+            r = row["results"].get(strategy, row["results"].get(default))
+            if r is None:
+                continue
+            exits = row.get("exits") or {}
+            et = exits.get(strategy) or exits.get(default) or (row["time"] + timedelta(hours=4))
+            d = Direction.ALTA if str(row.get("direction", "ALTA")).upper().startswith("ALTA") else Direction.BAIXA
+            out.append(SimTrade(row["time"], sym, d, float(r) - cost_r, et, cost_r))
+    return sorted(out, key=lambda t: t.time)
+
+
+def simulate_portfolio(trades: Sequence[SimTrade], max_positions: int, limits: PortfolioLimits, equity: float = 10000.0, risk_pct: float = 3.0,
+                       corr_table: Optional[dict] = None) -> PortfolioResult:
+    lim = PortfolioLimits(limits.max_total_open_risk_pct, limits.max_correlated_risk_pct, max_positions, limits.max_asset_exposure, limits.correlation_threshold)
+    engine = PortfolioExposureEngine(lim, corr_table)
+    res = PortfolioResult(max_positions, 0, 0)
+    open_: list[tuple[SimTrade, float]] = []          # (trade, risco em USD)
+    eq, peak = equity, equity
+    for t in sorted(trades, key=lambda x: x.time):
+        # fecha o que já saiu antes desta entrada (resultado realizado no fechamento)
+        still = []
+        for tr, risk in sorted(open_, key=lambda x: x[0].exit_time):
+            if tr.exit_time <= t.time:
+                eq = round(eq + tr.r * risk, 2)
+                peak = max(peak, eq)
+                res.max_dd_pct = max(res.max_dd_pct, (peak - eq) / peak * 100 if peak else 0.0)
+            else:
+                still.append((tr, risk))
+        open_ = still
+        risk = eq * risk_pct / 100.0
+        reasons = engine.check(t.symbol, t.direction, risk, [OpenExposure(tr.symbol, tr.direction, rk) for tr, rk in open_], eq)
+        if reasons:
+            res.refused += 1
+            key = reasons[0].split(" ")[0] + " " + reasons[0].split(" ")[1]
+            res.refused_reasons[key] = res.refused_reasons.get(key, 0) + 1
+            continue
+        open_.append((t, risk))
+        res.admitted += 1
+        res.net_r += t.r
+        res.peak_concurrent = max(res.peak_concurrent, len(open_))
+        res.win_rate += 1 if t.r > 0 else 0
+    for tr, risk in sorted(open_, key=lambda x: x[0].exit_time):
+        eq = round(eq + tr.r * risk, 2)
+        peak = max(peak, eq)
+        res.max_dd_pct = max(res.max_dd_pct, (peak - eq) / peak * 100 if peak else 0.0)
+    res.end_equity = eq
+    res.expectancy = res.net_r / res.admitted if res.admitted else 0.0
+    res.win_rate = res.win_rate / res.admitted if res.admitted else 0.0
+    return res
+
+
+def render_portfolio_sim(results: Sequence[PortfolioResult], start_equity: float, risk_pct: float, limits: PortfolioLimits, n_trades: int, days: float) -> str:
+    lines = [f"🧺 PORTFOLIO SIM — {n_trades} operações OOS em {days:.0f} dias · risco {risk_pct:g}% por operação, composto · "
+             f"risco total ≤ {limits.max_total_open_risk_pct:g}% · correlacionado ≤ {limits.max_correlated_risk_pct:g}% · 1 posição por ativo",
+             f"  {'N':>3}{'admitidas':>10}{'recusadas':>10}{'expect.':>11}{'R líq.':>11}{'acerto':>8}{'retorno':>9}{'DD máx':>9}{'pico':>6}"]
+    lines += [r.row(start_equity) for r in results]
+    base = results[0] if results else None
+    for r in results[1:]:
+        if base is None or base.admitted == 0:
+            break
+        d_ret = (r.end_equity - base.end_equity) / start_equity * 100
+        d_dd = r.max_dd_pct - base.max_dd_pct
+        if r.admitted == base.admitted and abs(d_ret) < 1e-9:
+            verdict = "⚪ igual (nenhuma operação simultânea no período)"
+        else:
+            verdict = "🟢 vale" if d_ret > 0 and d_dd <= max(2.0, base.max_dd_pct * 0.5) else "🟡 ganho sem folga de risco" if d_ret > 0 else "🔴 não vale"
+        lines.append(f"  N={r.max_positions} vs N=1: retorno {d_ret:+.1f} pontos · DD {d_dd:+.1f} pontos · {verdict}")
+    if results and results[-1].refused_reasons:
+        top = sorted(results[-1].refused_reasons.items(), key=lambda kv: -kv[1])[:3]
+        lines.append("  recusas (N máximo): " + " · ".join(f"{k} {v}" for k, v in top))
+    lines.append(f"  leitura: mais posições só valem se o retorno líquido subir sem o drawdown subir desproporcionalmente; amostra < 20 operações = inconclusivo.")
+    return "\n".join(lines)
+
+
+# ============================================================================
 # LIVE_ENGINE
 # ============================================================================
 
@@ -12661,12 +12786,16 @@ class MarketAIEngine:
         # 3) ASSET SELECTOR — ordena; a melhor tenta entrar (Risk Engine + exposição validam depois)
         pc.ranked = self.selector.rank(cands, snaps.time)
         self.log(render_rank(pc.ranked, self.history))
-        entered = False
+        # 5.2 PORTFOLIO OPPORTUNITY: até N entradas por ciclo, em ordem de prioridade; cada uma passa pelo funil do seu mercado e pelo
+        # motor de exposição (risco total, risco correlacionado = mesma tese, posições). Sem N sinais não há N entradas; com N sinais
+        # da mesma tese o risco correlacionado barra a partir da segunda.
+        entered_syms: list[str] = []
+        max_entries = max(1, int(getattr(self.portfolio.limits, "max_entries_per_cycle", 1)))
         for c in pc.ranked:
             sym = c.spec.symbol
             r = pc.results[sym]
-            if entered:
-                self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — {pc.chosen} foi a melhor oportunidade do ciclo (OPP {pc.ranked[0].opportunity_score:.1f} vs {c.opportunity_score:.1f})")
+            if len(entered_syms) >= max_entries:
+                self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — limite de {max_entries} entrada(s) por ciclo atingido ({', '.join(entered_syms)}; OPP {c.opportunity_score:.1f})")
                 continue
             snap_c = snaps.by_symbol[sym]
             lc = getattr(self, "lifecycle", {}).get(sym)
@@ -12682,7 +12811,8 @@ class MarketAIEngine:
                 self._consume_authorization(sym)
             pc.messages += [m for m in r.messages if m not in pc.messages]
             if r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")):
-                entered, pc.chosen = True, sym
+                entered_syms.append(sym)
+                pc.chosen = sym if pc.chosen is None else f"{pc.chosen}+{sym}"
         # mercados sem candidatura: registrar a decisão (regra que bloqueou) para o Opportunity Engine
         for sym, r in pc.results.items():
             if r.assessment is not None and sym not in {c.spec.symbol for c in pc.ranked}:
@@ -13666,6 +13796,32 @@ def cmd_edge_bank(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portfolio_sim(args: argparse.Namespace) -> int:
+    """PORTFOLIO SIM (5.2): as operações OOS de cada mercado em carteira com 1, 2, 3 e 4 posições simultâneas — retorno líquido, DD, recusas por correlação."""
+
+    env = load_env_file()
+    plim = PortfolioLimits.from_env(env)
+    risk = args.risk if args.risk is not None else float(env.get("RISK_PER_TRADE", 0.5))
+    results = _oos_results_for_markets(args)
+    if not results:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    rows_by = {sym: [r for res in folds for r in res.trade_rows] for sym, folds in results.items()}
+    trades = trades_from_rows(rows_by, args.strategy, cost_r=args.cost)
+    if not trades:
+        print("nenhuma operação OOS no período")
+        return 1
+    days = (trades[-1].time - trades[0].time).total_seconds() / 86400 if len(trades) > 1 else 0.0
+    sims = [simulate_portfolio(trades, n, plim, args.equity, risk) for n in (1, 2, 3, 4)]
+    txt = render_portfolio_sim(sims, args.equity, risk, plim, len(trades), days)
+    print(txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt)
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
 def cmd_autotune(args: argparse.Namespace) -> int:
     """AUTOTUNE (5.2): a IA procura piso/confirmações/limiar no passado (walk-forward) e grava dados/parametros.json; o live adota só com n OOS ≥ 20."""
 
@@ -14150,7 +14306,8 @@ def _main(argv: list[str]) -> int:
     es.set_defaults(func=cmd_estimate)
 
     for name, fn, hlp in (("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
-                          ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)")):
+                          ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)"),
+                          ("portfolio-sim", cmd_portfolio_sim, "PORTFOLIO SIM 5.2: 1 × 2 × 3 × 4 posições simultâneas com as operações OOS, líquido de custo e correlação")):
         xp = sub.add_parser(name, help=hlp)
         xp.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"), help="banco histórico point-in-time (contexto: evento, relógio, fluxo)")
         xp.add_argument("--start", default="2026-01-01")
@@ -14166,6 +14323,9 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--signal-score", type=float, default=None)
         xp.add_argument("--min-confirmations", type=int, default=None)
         xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else None))
+        xp.add_argument("--equity", type=float, default=10000.0)
+        xp.add_argument("--risk", type=float, default=None, help="portfolio-sim: risco %% por operação (padrão RISK_PER_TRADE do .env)")
+        xp.add_argument("--cost", type=float, default=0.05, help="portfolio-sim: custo por operação em R (spread+slippage), descontado do resultado")
         xp.set_defaults(func=fn)
 
     at = sub.add_parser("autotune", help="AUTOTUNE 5.2: piso × confirmações × limiar de sinal escolhidos no passado (walk-forward) → dados/parametros.json")
