@@ -3995,7 +3995,7 @@ def rates_to_candles(rates: Any, server_offset_hours: float = 0.0) -> list[Candl
     """Converte o array de `copy_rates_from_pos` (time, open, high, low, close, tick_volume, spread, real_volume).
     O MT5 carimba no horário do SERVIDOR da corretora (Pepperstone: GMT+2/+3): `server_offset_hours` converte para UTC."""
     out: list[Candle] = []
-    for r in rates or []:
+    for r in (rates if rates is not None else []):      # numpy: "truth value of an array" — nunca `rates or []`
         t = datetime.fromtimestamp(int(r["time"]) - int(server_offset_hours * 3600), tz=timezone.utc)
         vol = float(r["real_volume"]) if _has(r, "real_volume") else 0.0
         if vol <= 0:
