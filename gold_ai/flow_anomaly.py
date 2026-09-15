@@ -55,6 +55,18 @@ class FlowAssessment:
     start_time: Optional[datetime] = None
     leaders: dict[str, str] = field(default_factory=dict)
     chain: str = ""
+    history_n: int = 0                     # anomalias medidas no histórico para este ativo/origem
+    continuation_p: Optional[float] = None # P(continuou aos 60 min) no histórico
+
+    def ledger_record(self, now: datetime, s: MarketSnapshot, regime: str = "") -> dict:
+        """Campos do registro de anomalia (5.2): o que se sabia NO MOMENTO da detecção."""
+        vr = _volume_ratio(s)
+        leader = ", ".join(k for k, v in self.leaders.items() if v in ("explica", "confirma")) or "nenhum"
+        return {"event_id": f"flow_{self.market}_{'up' if self.direction > 0 else 'down'}_{now:%Y%m%d%H%M}", "ativo": self.market, "hora": now.isoformat(),
+                "flow_score": int(self.score), "atr_move": float(self.move_atr), "minutos": self.minutes, "volume_ratio": vr,
+                "persistencia": int(self.components.get("persistência", 0)), "cross_market": int(self.components.get("cross-market", 0)),
+                "origem": self.origin, "assinatura": self.signature, "leader": leader, "regime": regime, "direcao": float(self.direction),
+                "preco": float(s.price), "atr": float(s.atr)}
 
     @property
     def is_anomalous(self) -> bool:
@@ -107,7 +119,117 @@ def _volume_ratio(s: MarketSnapshot) -> Optional[float]:
     return s.futures_volume_ratio
 
 
+# --------------------------------------------------------------------------- 5.2: cada anomalia é registrada e MEDIDA (o histórico decide o parâmetro)
+HORIZONS_MIN = (5, 15, 30, 60)
+CONTINUE_ATR = 0.3          # aos 60 min: ≥ +0,3 ATR além do preço de detecção = CONTINUOU · ≤ −0,3 = REVERTEU · senão INDEFINIDO
+CONFIRM_ATR = 0.5           # tempo até confirmação: 1º fechamento ≥ +0,5 ATR a favor
+MIN_STAT = 5                # mostra a estatística histórica no relógio a partir de 5 casos (informação); edge só com tiers do ciclo de vida
+
+
+def measure_flow_outcome(direction: float, price0: float, atr: float, candles: Sequence, t0: datetime, horizons: Sequence[int] = HORIZONS_MIN) -> dict:
+    """MFE/MAE (em ATR, a favor do fluxo) em cada horizonte após a detecção, resultado aos 60 min e minutos até confirmação.
+    candles: M1 (ou M5) com carimbo de ABERTURA; só barras fechadas depois de t0 contam (ponto no tempo)."""
+    sign = 1.0 if direction > 0 else -1.0
+    out: dict = {}
+    confirm = None
+    last_close = None
+    for h in horizons:
+        mfe = mae = 0.0
+        for c in candles:
+            if c.time <= t0 or c.time > t0 + timedelta(minutes=h):
+                continue
+            fav = (c.high - price0) * sign if sign > 0 else (price0 - c.low)
+            adv = (price0 - c.low) if sign > 0 else (c.high - price0)
+            mfe, mae = max(mfe, fav / atr), max(mae, adv / atr)
+            if h == max(horizons):
+                last_close = (c.close - price0) * sign / atr
+                if confirm is None and last_close >= CONFIRM_ATR:
+                    confirm = (c.time - t0).total_seconds() / 60.0
+        out[f"mfe{h}"], out[f"mae{h}"] = round(mfe, 3), round(mae, 3)
+    if last_close is None:
+        out["resultado"] = "SEM DADOS"
+    elif last_close >= CONTINUE_ATR:
+        out["resultado"] = "CONTINUOU"
+    elif last_close <= -CONTINUE_ATR:
+        out["resultado"] = "REVERTEU"
+    else:
+        out["resultado"] = "INDEFINIDO"
+    out["fechamento60"] = None if last_close is None else round(last_close, 3)
+    out["confirm_min"] = None if confirm is None else round(confirm, 1)
+    return out
+
+
+def _median(xs: Sequence[float]) -> Optional[float]:
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+
+
+@dataclass
+class FlowGroupStat:
+    asset: str
+    origin: str
+    n: int
+    continued: int
+    reversed_: int
+    undefined: int
+    mfe15_med: Optional[float]
+    mfe60_med: Optional[float]
+    mae60_med: Optional[float]
+    confirm_med: Optional[float]
+
+    @property
+    def p_continue(self) -> float:
+        return self.continued / self.n if self.n else 0.0
+
+    def row(self) -> str:
+        f = lambda x, u="": "n/d" if x is None else f"{x:.2f}{u}"  # noqa: E731
+        return (f"  {self.asset:<8}{self.origin:<8}{self.n:>4}{self.p_continue:>8.0%}{(self.reversed_ / self.n if self.n else 0):>8.0%}"
+                f"{(self.undefined / self.n if self.n else 0):>8.0%}{f(self.mfe15_med, ' ATR'):>11}{f(self.mfe60_med, ' ATR'):>11}{f(self.mae60_med, ' ATR'):>11}"
+                f"{('n/d' if self.confirm_med is None else f'{self.confirm_med:.0f} min'):>10}")
+
+
+def flow_stats(rows: Sequence[dict], min_score: int = FLOW_THRESHOLD) -> list[FlowGroupStat]:
+    """rows: registros MEDIDOS do ledger ({ativo, origem, flow_score, mfe15, mfe60, mae60, resultado, confirm_min}). Grupos por ativo × origem + total."""
+    rows = [r for r in rows if r.get("resultado") in ("CONTINUOU", "REVERTEU", "INDEFINIDO") and (r.get("flow_score") or 0) >= min_score]
+    out: list[FlowGroupStat] = []
+    keys = sorted({(r["ativo"], r["origem"]) for r in rows}) + sorted({(r["ativo"], "todas") for r in rows})
+    for asset, origin in keys:
+        sub = [r for r in rows if r["ativo"] == asset and (origin == "todas" or r["origem"] == origin)]
+        if not sub:
+            continue
+        out.append(FlowGroupStat(asset, origin, len(sub), sum(1 for r in sub if r["resultado"] == "CONTINUOU"), sum(1 for r in sub if r["resultado"] == "REVERTEU"),
+                                 sum(1 for r in sub if r["resultado"] == "INDEFINIDO"), _median([r.get("mfe15") for r in sub]), _median([r.get("mfe60") for r in sub]),
+                                 _median([r.get("mae60") for r in sub]), _median([r.get("confirm_min") for r in sub])))
+    return out
+
+
+def render_flow_stats(rows: Sequence[dict]) -> str:
+    stats = flow_stats(rows)
+    lines = [f"🟣 FLOW ANOMALY — o que aconteceu DEPOIS de cada anomalia (FLOW ≥ {FLOW_THRESHOLD}; MFE/MAE em ATR a favor do fluxo; resultado aos 60 min)",
+             f"  {'ativo':<8}{'origem':<8}{'n':>4}{'contin.':>8}{'revert.':>8}{'indef.':>8}{'MFE15':>11}{'MFE60':>11}{'MAE60':>11}{'confirm.':>10}"]
+    if not stats:
+        lines.append("  (nenhuma anomalia medida ainda — o live registra cada FLOW ≥ 70 e mede 60 min depois)")
+    lines += [g.row() for g in stats]
+    lines.append(f"  leitura: continuação ≥ 60% com n ≥ 20 e MFE60 mediano ≥ {CONFIRM_ATR} ATR = candidato a edge (tiers do ciclo de vida); abaixo disso é observação.")
+    return "\n".join(lines)
+
+
 class FlowAnomalyEngine:
+    def __init__(self, ledger: Optional[Sequence[dict]] = None) -> None:
+        self.ledger: list[dict] = list(ledger or [])      # anomalias já MEDIDAS (para a estatística histórica no relógio)
+
+    def history_stat(self, market: str, origin: str) -> Optional[FlowGroupStat]:
+        for g in flow_stats(self.ledger):
+            if g.asset == market and g.origin == origin and g.n >= MIN_STAT:
+                return g
+        for g in flow_stats(self.ledger):
+            if g.asset == market and g.origin == "todas" and g.n >= MIN_STAT:
+                return g
+        return None
+
     def assess(self, market: str, s: MarketSnapshot, identified: Sequence[IdentifiedEvent] = (), now: Optional[datetime] = None,
                peers: Optional[dict[str, MarketSnapshot]] = None) -> FlowAssessment:
         now = now or s.time
@@ -199,8 +321,17 @@ class FlowAnomalyEngine:
                  "  líderes: " + (" · ".join(f"{k} {v}" for k, v in leaders.items()) or "n/d") + (f" · volume ×{vr:.1f}" if vr else "") + f" · retração {retrace:.0%}"]
         if fa.is_anomalous:
             lines.append(f"  → evento IMPLÍCITO flow_{market}_{'up' if sign > 0 else 'down'} aberto no REACTION ENGINE: procurar quem ainda está atrasado")
+            g = self.history_stat(market, fa.origin)
+            if g is not None:
+                fa.history_n, fa.continuation_p = g.n, g.p_continue
+                lines.append(f"  histórico ({market} origem {g.origin}, n={g.n}): continuação {g.p_continue:.0%} · reversão {g.reversed_ / g.n:.0%} · "
+                             f"MFE60 mediano {g.mfe60_med if g.mfe60_med is not None else 0:.2f} ATR · confirmação mediana "
+                             f"{'n/d' if g.confirm_med is None else f'{g.confirm_med:.0f} min'}")
+            else:
+                lines.append(f"  histórico: ainda sem {MIN_STAT} anomalias medidas para {market} — esta será registrada e medida em 5/15/30/60 min")
         if fa.anomalous_regime:
-            lines.append(f"  → ANOMALOUS FLOW REGIME em {market}: modelo normal suspenso; entradas contra o fluxo adiadas")
+            lines.append(f"  → MODO INVESTIGAÇÃO em {market} (WATCH): origem desconhecida não é 'não operar' — entradas CONTRA o fluxo adiadas; "
+                         "a favor do fluxo ou no ativo atrasado só com vantagem validada (relógio + histórico)")
         fa.chain = "\n".join(lines)
         return fa
 

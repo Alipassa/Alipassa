@@ -694,10 +694,18 @@ def cmd_flow(args: argparse.Namespace) -> int:
 
     symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
     mem = PredictionMemory(args.db)
+    if args.stats:
+        from .flow_anomaly import render_flow_stats
+        rows = mem.flow_anomaly_rows(measured_only=False)
+        print(render_flow_stats(rows))
+        pend = [r for r in rows if not r.get("resultado")]
+        print(f"registradas {len(rows)} · medidas {len(rows) - len(pend)} · aguardando medição {len(pend)}")
+        mem.close()
+        return 0
     data = MultiMarketData(symbols, DataEngineConfig(enable_cot=False, enable_fred=not args.no_fred, enable_news=not args.no_news))
     snaps = data.collect()
     print(data.coverage())
-    fe = FlowAnomalyEngine()
+    fe = FlowAnomalyEngine(ledger=mem.flow_anomaly_rows())
     fas = {}
     for sym, snap in snaps.by_symbol.items():
         fas[sym] = fe.assess(sym, snap, snaps.identified, snaps.time, snaps.by_symbol)
@@ -1488,6 +1496,7 @@ def _main(argv: list[str]) -> int:
     fl.add_argument("--db", default="gold_ai.db")
     fl.add_argument("--no-fred", action="store_true")
     fl.add_argument("--no-news", action="store_true")
+    fl.add_argument("--stats", action="store_true", help="5.2: o que aconteceu DEPOIS de cada anomalia registrada pelo live (continuação, MFE/MAE 5/15/30/60, confirmação)")
     fl.set_defaults(func=cmd_flow)
 
     dc = sub.add_parser("doctor", help="tudo está funcionando? qual a eficiência? — painel por camada (✅ ⚠️ ❌) com ação e leitura do que está provado")

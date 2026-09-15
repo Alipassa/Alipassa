@@ -93,7 +93,7 @@ class MarketAIEngine:
         self.reaction_horizon = min(horizon_min, 240)
         # FLOW ANOMALY ENGINE (5.0): eventos implícitos ativos (mercado → IdentifiedEvent) e assinaturas do ciclo
         from .flow_anomaly import FlowAnomalyEngine
-        self.flow_engine = FlowAnomalyEngine()
+        self.flow_engine = FlowAnomalyEngine(ledger=mem.flow_anomaly_rows())     # 5.2: anomalias já medidas alimentam o relógio (histórico decide)
         self.active_flows: dict[str, object] = {}
         self.flow_assessments: dict = {}
         # histórico fino dos líderes (USD/YIELD) ao redor do evento: função (nome, início, fim) → [(t, valor)] (Yahoo M1 / MT5); opcional
@@ -112,9 +112,16 @@ class MarketAIEngine:
             if ev is not None and sym not in self.active_flows:
                 self.active_flows[sym] = ev
                 self.log(fa.chain)
+                # 5.2 — LEDGER: registrar a anomalia (1 por episódio de 60 min) para medir 5/15/30/60 min depois
+                if not self.mem.recent_flow_anomaly(sym, now - timedelta(minutes=60)):
+                    prev = getattr(getattr(self, "last_cycle", None), "results", {}).get(sym)
+                    regime = str(getattr(getattr(prev, "assessment", None), "regime", "") or "")
+                    self.mem.open_flow_anomaly(fa.ledger_record(now, snap, regime))
+                hist = f"histórico n={fa.history_n}: continuação {fa.continuation_p:.0%}" if fa.continuation_p is not None else "histórico: ainda sem 5 casos medidos"
                 self.sender.send(f"🟣 FLUXO ANÔMALO — {sym} {'↑' if fa.direction > 0 else '↓'} {fa.move_atr:+.2f} ATR · FLOW SCORE {fa.score} · origem NÃO identificada "
                                  f"(assinatura {fa.signature})\n{fa.chain.splitlines()[1] if len(fa.chain.splitlines()) > 1 else ''}\n"
-                                 "Relógio de reação aberto nos demais mercados: procurando quem ainda está atrasado.")
+                                 f"MODO INVESTIGAÇÃO (WATCH): relógio aberto nos demais mercados, procurando continuação e quem está atrasado · {hist}.")
+        self._measure_flow_anomalies(snaps)
         # expira fluxos com mais de 2 h ou revertidos
         for sym in list(self.active_flows):
             ev = self.active_flows[sym]
@@ -124,6 +131,25 @@ class MarketAIEngine:
         for ev in self.active_flows.values():
             if all(getattr(x, "kind", None) != ev.kind or getattr(x, "time", None) != ev.time for x in snaps.identified):
                 snaps.identified.append(ev)
+
+    def _measure_flow_anomalies(self, snaps: MarketSnapshotSet) -> None:
+        """60 min após cada anomalia registrada: MFE/MAE em 5/15/30/60, CONTINUOU / REVERTEU / INDEFINIDO, minutos até confirmação (M1 do broker)."""
+        from .flow_anomaly import measure_flow_outcome
+        now = snaps.time
+        for row in self.mem.pending_flow_anomalies(now, 60):
+            snap = snaps.by_symbol.get(row["ativo"])
+            candles = (snap.candles.get("M1") or snap.candles.get("M5") or []) if snap is not None else []
+            t0 = datetime.fromisoformat(row["hora"])
+            if not candles or candles[-1].time < t0 + timedelta(minutes=55):
+                if (now - t0) > timedelta(hours=6):                          # sem M1 para medir (fonte sem intradiário): fecha como SEM DADOS
+                    self.mem.close_flow_anomaly(row["id"], {"resultado": "SEM DADOS"}, now)
+                continue
+            m = measure_flow_outcome(row["direcao"], row["preco"], row["atr"], candles, t0)
+            self.mem.close_flow_anomaly(row["id"], m, now)
+            self.flow_engine.ledger = self.mem.flow_anomaly_rows()
+            self.log(f"🟣 ANOMALIA MEDIDA {row['ativo']} {t0:%H:%M} (FLOW {row['flow_score']}, origem {row['origem']}): {m['resultado']} · "
+                     f"MFE 5/15/30/60 = {m['mfe5']:.2f}/{m['mfe15']:.2f}/{m['mfe30']:.2f}/{m['mfe60']:.2f} ATR · MAE60 {m['mae60']:.2f} · "
+                     f"confirmação {'—' if m['confirm_min'] is None else str(round(m['confirm_min'])) + ' min'}")
 
     # ------------------------------------------------------------------ comandos Telegram (carteira inteira)
     def _handle_commands(self, snaps: MarketSnapshotSet, pc: PortfolioCycle) -> None:
@@ -340,7 +366,7 @@ class MarketAIEngine:
                 self.engines[sym].enter(r, snap_c, veto=f"CICLO DE VIDA — {sym} em {lc.action}: {lc.note}")
                 continue
             if snap_c.anomalous_regime and snap_c.flow_direction != 0 and ((c.direction == Direction.ALTA) != (snap_c.flow_direction > 0)):
-                self.engines[sym].enter(r, snap_c, veto=f"REGIME ANÔMALO em {sym} — entrada contra o fluxo anômalo adiada (FLOW {snap_c.flow_score})")
+                self.engines[sym].enter(r, snap_c, veto=f"MODO INVESTIGAÇÃO em {sym} — entrada CONTRA o fluxo anômalo adiada (FLOW {snap_c.flow_score}); a favor/atrasado segue o funil normal")
                 continue
             was_auth = self.engines[sym].authorized
             self.engines[sym].enter(r, snap_c)
@@ -358,6 +384,7 @@ class MarketAIEngine:
         self.log(self.portfolio.render(self.open_exposures(), self.perf.equity))
         # 🚨 LIVE EDGE — o teste definitivo, uma vez por dia (e sob demanda com /EDGE)
         self.daily_edge(snaps.time, pc)
+        self.last_cycle = pc
         return pc
 
     def edge_report(self, now: Optional[datetime] = None):
@@ -387,4 +414,8 @@ class MarketAIEngine:
             lines.append(render_table(list(self.lifecycle.values())))
         if self.edge_bank is not None and self.edge_bank.stats:
             lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))
+        rows = self.mem.flow_anomaly_rows()
+        if rows:
+            from .flow_anomaly import render_flow_stats
+            lines.append(render_flow_stats(rows))
         return "\n".join(lines)

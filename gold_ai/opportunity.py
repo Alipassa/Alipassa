@@ -124,7 +124,8 @@ def opportunity_level(a, sig, entered: bool, raw_min_score: float = 15.0) -> str
         return "EXECUTION"
     direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
     if direction == Direction.LATERAL or abs(a.score) < raw_min_score:
-        return "NONE"
+        # 5.2: fluxo anômalo = MODO INVESTIGAÇÃO — o mercado entra em WATCH mesmo sem oportunidade bruta (origem desconhecida ≠ não operar)
+        return "WATCH" if str(getattr(a, "flow_status", "")) in ("FLUXO ANÔMALO", "REGIME ANÔMALO") else "NONE"
     if sig is not None and sig.direction != Direction.LATERAL:
         return "OPPORTUNITY"
     if a.has_edge:

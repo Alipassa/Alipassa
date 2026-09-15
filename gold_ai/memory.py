@@ -117,6 +117,14 @@ CREATE TABLE IF NOT EXISTS reactions (
     lead_usd REAL, lead_yield REAL, horizonte INTEGER, resolucao INTEGER, conhecido_em TEXT,
     UNIQUE(evento_id, ativo)
 );
+CREATE TABLE IF NOT EXISTS flow_anomalies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT UNIQUE, ativo TEXT, hora TEXT, flow_score INTEGER, atr_move REAL, minutos REAL, volume_ratio REAL,
+    persistencia INTEGER, cross_market INTEGER, origem TEXT, assinatura TEXT, leader TEXT, regime TEXT, direcao REAL,
+    preco REAL, atr REAL,
+    mfe5 REAL, mae5 REAL, mfe15 REAL, mae15 REAL, mfe30 REAL, mae30 REAL, mfe60 REAL, mae60 REAL,
+    fechamento60 REAL, resultado TEXT, confirm_min REAL, medido_em TEXT
+);
 CREATE TABLE IF NOT EXISTS trade_monitor (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_id INTEGER NOT NULL,
@@ -540,6 +548,33 @@ class PredictionMemory:
                                  {"USD": r["lead_usd"], "YIELD": r["lead_yield"]}, r["horizonte"] or 240, r["resolucao"] or 5)
             out.append(rec)
         return out
+
+    # ------------------------------------------------------------------ 5.2: FLOW ANOMALY ledger (registrar → medir → aprender)
+    def open_flow_anomaly(self, rec: dict) -> Optional[int]:
+        cols = ("event_id", "ativo", "hora", "flow_score", "atr_move", "minutos", "volume_ratio", "persistencia", "cross_market", "origem", "assinatura",
+                "leader", "regime", "direcao", "preco", "atr")
+        cur = self.conn.execute(f"INSERT OR IGNORE INTO flow_anomalies ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(rec.get(c) for c in cols))
+        self.conn.commit()
+        return cur.lastrowid if cur.rowcount else None
+
+    def recent_flow_anomaly(self, symbol: str, since: datetime) -> bool:
+        return self.conn.execute("SELECT 1 FROM flow_anomalies WHERE ativo=? AND hora>=?", (symbol, since.isoformat())).fetchone() is not None
+
+    def pending_flow_anomalies(self, now: datetime, min_age_min: int = 60) -> list[dict]:
+        cutoff = (now - timedelta(minutes=min_age_min)).isoformat()
+        return [dict(r) for r in self.conn.execute("SELECT * FROM flow_anomalies WHERE resultado IS NULL AND hora<=? ORDER BY id", (cutoff,)).fetchall()]
+
+    def close_flow_anomaly(self, row_id: int, measures: dict, now: datetime) -> None:
+        keys = ("mfe5", "mae5", "mfe15", "mae15", "mfe30", "mae30", "mfe60", "mae60", "fechamento60", "resultado", "confirm_min")
+        self.conn.execute(f"UPDATE flow_anomalies SET {', '.join(f'{k}=?' for k in keys)}, medido_em=? WHERE id=?",
+                          tuple(measures.get(k) for k in keys) + (now.isoformat(), row_id))
+        self.conn.commit()
+
+    def flow_anomaly_rows(self, symbol: Optional[str] = None, measured_only: bool = True) -> list[dict]:
+        where, params = self._where_symbol(symbol)
+        if measured_only:
+            where = (where + " AND " if where else "WHERE ") + "resultado IS NOT NULL"
+        return [dict(r) for r in self.conn.execute(f"SELECT * FROM flow_anomalies {where} ORDER BY hora", params).fetchall()]
 
     def has_reaction(self, event_id: str, symbol: str) -> bool:
         return self.conn.execute("SELECT 1 FROM reactions WHERE evento_id=? AND ativo=?", (event_id, symbol)).fetchone() is not None

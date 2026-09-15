@@ -307,6 +307,11 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 | **Exit Lab** | MFE/MAE das operações OOS (mediana, P75, P90) → expectancy por saída (1R…4R, trailing, 2R+trailing, adaptive) e **política walk-forward** (escolhida só com o passado). Recomenda com n ≥ 20; nunca muda a saída ao vivo sozinho. | `exit-lab` |
 | **Edge Bank** | Contexto (regime, evento, banda VWAP × regime, relógio, fluxo) × ativo → R por operação, potencial, tier. **Aprendizado cruzado**: casos próprios + evidência transferida ponderada (0,5 × similaridade de fatores × n do outro) — o n próprio fica separado e define o tier. Lista "quando NÃO operar" (n ≥ 20 e expectancy < 0). Ao vivo só n próprio ≥ 30 ajusta a prioridade (×0,9 / ×1,1). | `edge-bank` → `dados/edge_bank.json` → `live --edge-bank` |
 
+**Flow anomaly = modo de investigação, não bloqueio.** Origem desconhecida vira WATCH: relógio aberto nos demais mercados (evento implícito
+`flow_<ATIVO>_<up|down>`), entrada *contra* o fluxo adiada, a favor ou no atrasado só com vantagem validada. Cada anomalia (FLOW ≥ 70) é registrada no
+SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
+ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
+
 Banda VWAP (H1, em ATR): B1 < 0,5 · B2 < 1 · B3 < 1,5 · B4 ≥ 1,5 — o mesmo B1 é *pullback* em tendência e *nada* em range; é o Edge Bank
 que mede qual combinação regime × banda paga, em vez de o código decidir. Risco continua percentual fixo: cresce capital → risco em $ → lote; nunca risco após perda.
 

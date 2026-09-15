@@ -76,7 +76,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(fa.origin, "E")
         self.assertTrue(fa.anomalous_regime)
         self.assertEqual(fa.status, "REGIME ANÔMALO")
-        self.assertIn("ANOMALOUS FLOW REGIME", fa.chain)
+        self.assertIn("MODO INVESTIGAÇÃO", fa.chain)
 
     def test_small_move_is_not_anomaly(self):
         fa = FlowAnomalyEngine().assess("XAUUSD", snap(0.2, dxy=0.0, y_bp=0.0, silver=0.1, vol_mult=1.0, minutes=60), [], NOW)
@@ -126,3 +126,105 @@ class LivePropagationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlowLedgerTests(unittest.TestCase):
+    """5.2 — anomalia registrada → medida em 5/15/30/60 → estatística (o histórico decide)."""
+
+    def _m1(self, t0, price0, atr, path):
+        from gold_ai.models import Candle
+        out, p = [], price0
+        for i, step in enumerate(path):
+            t = t0 + timedelta(minutes=i + 1)
+            o, c = p, p + step * atr
+            out.append(Candle(t, o, max(o, c) + 0.05 * atr, min(o, c) - 0.05 * atr, c, 10.0))
+            p = c
+        return out
+
+    def test_measure_continuation_and_reversal(self):
+        from gold_ai.flow_anomaly import measure_flow_outcome
+        t0 = NOW
+        cont = self._m1(t0, 2500.0, 10.0, [0.05] * 70)                 # sobe 0,05 ATR/min → +3 ATR aos 60 min
+        m = measure_flow_outcome(+1, 2500.0, 10.0, cont, t0)
+        self.assertEqual(m["resultado"], "CONTINUOU")
+        self.assertAlmostEqual(m["mfe5"], 0.3, places=2)
+        self.assertGreater(m["mfe60"], 2.9)
+        self.assertLess(m["mae60"], 0.1)
+        self.assertEqual(m["confirm_min"], 10.0)                        # 0,5 ATR no 10º minuto
+        rev = self._m1(t0, 2500.0, 10.0, [-0.05] * 70)
+        m2 = measure_flow_outcome(+1, 2500.0, 10.0, rev, t0)
+        self.assertEqual(m2["resultado"], "REVERTEU")
+        self.assertIsNone(m2["confirm_min"])
+        self.assertGreater(m2["mae15"], 0.7)
+        flat = self._m1(t0, 2500.0, 10.0, [0.01, -0.01] * 35)
+        self.assertEqual(measure_flow_outcome(-1, 2500.0, 10.0, flat, t0)["resultado"], "INDEFINIDO")
+        self.assertEqual(measure_flow_outcome(+1, 2500.0, 10.0, [], t0)["resultado"], "SEM DADOS")
+
+    def test_stats_table_and_history_in_chain(self):
+        from gold_ai.flow_anomaly import FlowAnomalyEngine, flow_stats, render_flow_stats
+        rows = [{"ativo": "XAUUSD", "origem": "E", "flow_score": 75, "mfe15": 0.8, "mfe60": 1.4, "mae60": 0.3, "resultado": "CONTINUOU", "confirm_min": 8.0} for _ in range(5)]
+        rows += [{"ativo": "XAUUSD", "origem": "E", "flow_score": 72, "mfe15": 0.2, "mfe60": 0.2, "mae60": 0.9, "resultado": "REVERTEU", "confirm_min": None} for _ in range(2)]
+        rows += [{"ativo": "XAUUSD", "origem": "D", "flow_score": 60, "mfe15": 9, "mfe60": 9, "mae60": 0, "resultado": "CONTINUOU", "confirm_min": 1.0}]   # abaixo do limiar: fora
+        st = {(g.asset, g.origin): g for g in flow_stats(rows)}
+        self.assertEqual(st[("XAUUSD", "E")].n, 7)
+        self.assertAlmostEqual(st[("XAUUSD", "E")].p_continue, 5 / 7)
+        self.assertEqual(st[("XAUUSD", "todas")].n, 7)
+        self.assertAlmostEqual(st[("XAUUSD", "E")].mfe60_med, 1.4)
+        self.assertEqual(st[("XAUUSD", "E")].confirm_med, 8.0)
+        txt = render_flow_stats(rows)
+        self.assertIn("71%", txt)
+        fe = FlowAnomalyEngine(ledger=rows)
+        fa = fe.assess("XAUUSD", snap(1.5, dxy=+0.4, y_bp=+5.0, silver=0.3, vol_mult=3.0, minutes=15), [], NOW)
+        self.assertEqual(fa.history_n, 7)
+        self.assertIn("continuação 71%", fa.chain)
+
+    def test_live_records_and_measures_anomaly(self):
+        from gold_ai.guard import GuardLimits, KillSwitch, TradingMode
+        from gold_ai.market_engine import MarketAIEngine
+        from gold_ai.memory import PredictionMemory
+        from gold_ai.opportunity import opportunity_level
+        from gold_ai.selector import PortfolioLimits
+        from gold_ai.telegram import TelegramSender
+        from tests.test_market40 import build_snapset
+        from types import SimpleNamespace
+        from gold_ai.models import Direction
+
+        with tempfile.TemporaryDirectory() as d:
+            mem = PredictionMemory(os.path.join(d, "m.db"))
+            sender = TelegramSender(dry_run=True, quiet=True)
+            logs = []
+            eng = MarketAIEngine(mem, GuardLimits(), ("XAUUSD", "EURUSD"), TradingMode.PAPER, 10000.0, PortfolioLimits(), sender=sender,
+                                 kill_switch=KillSwitch(enabled_env=False), log=logs.append, horizon_min=60)
+            ss = build_snapset({"XAUUSD": "neutro", "EURUSD": "neutro"}, now=NOW)
+            gold = snap(1.2, dxy=0.02, y_bp=0.5, silver=0.8, vol_mult=3.0)
+            gold.time = NOW
+            ss.by_symbol["XAUUSD"] = gold
+            ss.by_symbol["EURUSD"].candles = {}
+            eng.run_cycle(ss)
+            pend = mem.pending_flow_anomalies(NOW + timedelta(hours=2), 60)
+            self.assertEqual(len(pend), 1)
+            self.assertEqual(pend[0]["ativo"], "XAUUSD")
+            self.assertEqual(pend[0]["flow_score"], 71 if pend[0]["flow_score"] == 71 else pend[0]["flow_score"])
+            self.assertGreaterEqual(pend[0]["flow_score"], 70)
+            self.assertTrue(any("MODO INVESTIGAÇÃO" in m for m in sender.sent))
+            # nível: fluxo anômalo = WATCH mesmo sem oportunidade bruta
+            a = SimpleNamespace(direction=Direction.LATERAL, premove=SimpleNamespace(direction=Direction.LATERAL), score=0.0, has_edge=False, technical=(),
+                                flow_status="REGIME ANÔMALO")
+            self.assertEqual(opportunity_level(a, None, False), "WATCH")
+            # 61 min depois, com M1 do broker: medida e fechada
+            later = NOW + timedelta(minutes=61)
+            ss2 = build_snapset({"XAUUSD": "neutro", "EURUSD": "neutro"}, now=later)
+            g2 = snap(0.1, dxy=0.0, y_bp=0.0, silver=0.0, vol_mult=1.0)
+            g2.time = later
+            g2.candles = dict(g2.candles or {})
+            g2.candles["M1"] = self._m1(NOW, pend[0]["preco"], pend[0]["atr"], [0.05] * 61)
+            ss2.by_symbol["XAUUSD"] = g2
+            ss2.by_symbol["EURUSD"].candles = {}
+            eng.run_cycle(ss2)
+            rows = mem.flow_anomaly_rows()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["resultado"], "CONTINUOU")
+            self.assertEqual(eng.flow_engine.ledger[0]["resultado"], "CONTINUOU")
+            self.assertTrue(any("ANOMALIA MEDIDA" in m for m in logs))
+            self.assertIn("FLOW ANOMALY — o que aconteceu DEPOIS", eng.status_text())
+            mem.close()

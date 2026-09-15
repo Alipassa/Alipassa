@@ -477,3 +477,21 @@ núcleo 4.0 (risco, MT5, monitor, Telegram, OOS, walk-forward, funil, selector) 
 13. **CICLO DE VIDA DE PARÂMETROS** `[lifecycle]`: nada vira parâmetro com menos de 20 casos fora da amostra (30 operacional,
     50 validado); 3 perdas seguidas alertam, 4 protegem, 5 suspendem e obrigam a revalidar nos últimos 30/50/total; só a
     deterioração do edge quebra; o parâmetro quebrado vai para sombra (PAPER) e nunca é apagado.
+
+
+## Adendo 5.2 — FLOW + REACTION + CAPTURA: ANALISAR MUITO, DECIDIR SIMPLES
+
+Um movimento anômalo não é ruído nem sinal de entrada. Ele inicia uma **investigação de fluxo e reação**.
+
+`FLOW ANOMALY = MODO DE INVESTIGAÇÃO + WATCH`, não bloqueio absoluto.
+
+1. **Não operar contra** um fluxo anômalo sem confirmação (a entrada contra o fluxo é adiada, não proibida para sempre).
+2. **Não bloquear** o fluxo anômalo: `ORIGEM DESCONHECIDA` ≠ `NO TRADE`. Significa WATCH → buscar explicação → observar propagação → confirmar ou descartar.
+3. **Investigar a origem**: notícia, macro, líderes (USD, yields), outros ativos, técnica/VWAP, ticks/volume (assinaturas A/B/C, origens A–E).
+4. **Abrir o relógio de reação**: evento implícito `flow_<ATIVO>_<up|down>` no REACTION ENGINE — quem foi o primeiro líder, quem ainda está atrasado, tempo histórico de propagação.
+5. **Registrar e medir cada anomalia** (`FLOW SCORE ≥ 70`): ativo, hora, score, ATR do movimento, volume, persistência, cross-market, origem, assinatura, líder, regime, direção;
+   60 min depois: MFE/MAE em 5/15/30/60 min, CONTINUOU / REVERTEU / INDEFINIDO, minutos até confirmação. `flow --stats` mostra a tabela; o status do live também.
+6. **A entrada só ocorre** quando continuação, direção e/ou propagação ao ativo atrasado tiverem vantagem estatística validada (tiers do ciclo de vida: 20 candidato · 30 operacional · 50 validado).
+7. **O histórico decide o parâmetro**, não uma regra arbitrária: a estatística de continuação por ativo × origem entra no relógio quando há ≥ 5 casos (informação) e só vira edge com amostra.
+
+Mais inteligência → mais oportunidades detectadas → mais setups qualificados → melhor captura → maior lucro potencial, **sem aumentar o risco por operação**.
