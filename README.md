@@ -312,6 +312,11 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
 ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
 
+**Autotune.** `autotune` percorre a grade piso de vantagem × confirmações mínimas × limiar de sinal em walk-forward: a escolha é feita só no
+treino de cada bloco e avaliada no bloco seguinte, que ela nunca viu. Grava `dados/parametros.json` com a recomendação por mercado, o n fora da amostra,
+a expectancy da política e a do padrão, o tier e `apply`. O live (`--params`) adota só o que está marcado `apply` (n OOS ≥ 20 e expectancy ≥ padrão);
+o resto fica em sombra e é mostrado no arranque. Etapa 8e do `rodar_tudo.bat`. O ciclo de vida continua valendo depois.
+
 Banda VWAP (H1, em ATR): B1 < 0,5 · B2 < 1 · B3 < 1,5 · B4 ≥ 1,5 — o mesmo B1 é *pullback* em tendência e *nada* em range; é o Edge Bank
 que mede qual combinação regime × banda paga, em vez de o código decidir. Risco continua percentual fixo: cresce capital → risco em $ → lote; nunca risco após perda.
 

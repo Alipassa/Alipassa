@@ -207,8 +207,10 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     bank = EdgeBank.load(args.edge_bank) if getattr(args, "edge_bank", None) else None
     if bank is not None and bank.stats:
         print(f"EDGE BANK carregado: {len(bank.stats)} contextos ({args.edge_bank}) — só contextos com n próprio ≥ 30 ajustam a prioridade")
+    from .autotune import load_params
+    learned = load_params(getattr(args, "params", None) or "")
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
-                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None))
+                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None), params=learned)
     # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
     from .data import HttpClient as _Http
     from .data.yahoo import YahooCollector as _Yahoo
@@ -1008,6 +1010,43 @@ def cmd_edge_bank(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_autotune(args: argparse.Namespace) -> int:
+    """AUTOTUNE (5.2): a IA procura piso/confirmações/limiar no passado (walk-forward) e grava dados/parametros.json; o live adota só com n OOS ≥ 20."""
+    from .autotune import DEFAULT_GRID, TuneReport, autotune_market
+    from .config import EngineConfig
+    from .evaluation import Backtester
+    from .markets import get_market
+    from .telegram import load_env_file
+
+    if getattr(args, "events", None) and not os.path.exists(args.events):
+        print(f"(banco histórico {args.events} não encontrado — funil sem evento/relógio/fluxo)")
+        args.events = None
+    frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+    if not frames:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    grid = dict(DEFAULT_GRID)
+    if args.floors:
+        grid["min_edge_score"] = tuple(float(x) for x in args.floors.split(","))
+    if args.confirmations:
+        grid["min_confirmations"] = tuple(int(x) for x in args.confirmations.split(","))
+    if args.signals:
+        grid["signal_score"] = tuple(int(x) for x in args.signals.split(","))
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    rep = TuneReport(args.start, args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    for sym, frame in frames.items():
+        cfg = EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym)
+        bt = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
+        rep.markets.append(autotune_market(sym, bt, grid, n_folds=args.folds, strategy=args.strategy, equity=args.equity, risk_pct=risk,
+                                           log=(print if args.verbose else None)))
+        print(rep.markets[-1].render() + "\n")
+    print(rep.render())
+    if args.out:
+        rep.save(args.out)
+        print(f"\nparâmetros salvos em {args.out} — o live lê com --params e adota só o que está marcado 'apply'")
+    return 0
+
+
 def cmd_sweep(args: argparse.Namespace) -> int:
     """SWEEP DE PISO: testa vários |score| mínimos de vantagem no walk-forward, escolhendo o piso NO TREINO de cada fold."""
     from .evaluation import Backtester
@@ -1457,6 +1496,7 @@ def _main(argv: list[str]) -> int:
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.add_argument("--reaction-edge", default=os.path.join("dados", "reaction_edge.json"), help="veredito do REACTION EDGE por ativo ('' = ignorar)")
     lv.add_argument("--edge-bank", default=os.path.join("dados", "edge_bank.json"), help="EDGE BANK (5.2) gerado por `edge-bank` ('' = ignorar)")
+    lv.add_argument("--params", default=os.path.join("dados", "parametros.json"), help="parâmetros aprendidos por `autotune` ('' = ignorar); só 'apply' é adotado")
     lv.set_defaults(func=cmd_live)
 
     es = sub.add_parser("estimate", help="estimativa de lucro num período histórico (walk-forward OOS, custo, bootstrap)")
@@ -1498,6 +1538,25 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--min-confirmations", type=int, default=None)
         xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else None))
         xp.set_defaults(func=fn)
+
+    at = sub.add_parser("autotune", help="AUTOTUNE 5.2: piso × confirmações × limiar de sinal escolhidos no passado (walk-forward) → dados/parametros.json")
+    at.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    at.add_argument("--start", default="2026-01-01")
+    at.add_argument("--end", default=None)
+    at.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    at.add_argument("--csv-dir", default=None)
+    at.add_argument("--floors", default=None, help="pisos de vantagem, ex.: 15,25,35 (padrão)")
+    at.add_argument("--confirmations", default=None, help="confirmações mínimas, ex.: 2,3 (padrão)")
+    at.add_argument("--signals", default=None, help="limiar de sinal, ex.: 40,50 (padrão)")
+    at.add_argument("--strategy", default="adaptive")
+    at.add_argument("--folds", type=int, default=4)
+    at.add_argument("--step", type=int, default=1)
+    at.add_argument("--horizon", type=int, default=240)
+    at.add_argument("--equity", type=float, default=10000.0)
+    at.add_argument("--risk", type=float, default=None)
+    at.add_argument("-v", "--verbose", action="store_true")
+    at.add_argument("--out", default=os.path.join("dados", "parametros.json"))
+    at.set_defaults(func=cmd_autotune)
 
     sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
     sw.add_argument("--csv", default=None)

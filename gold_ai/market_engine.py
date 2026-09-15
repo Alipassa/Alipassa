@@ -58,8 +58,9 @@ class MarketAIEngine:
                  equity: float = 10000.0, portfolio: Optional[PortfolioLimits] = None, executors: Optional[dict] = None,
                  sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None, commands: Optional[TelegramCommands] = None,
                  horizon_min: int = 240, log: Callable[[str], None] = print, authorized: bool = False,
-                 selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None) -> None:
+                 selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None, params: Optional[dict] = None) -> None:
         self.mem = mem
+        self.params = params or {}                                    # autotune (5.2): {mercado: {"params", "apply", ...}}
         self.edge_bank = edge_bank                                    # edge_bank.EdgeBank (5.2) — opcional
         self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
         self.mode, self.limits = mode, limits
@@ -79,8 +80,12 @@ class MarketAIEngine:
                 log(f"[conta] {fixed} registro(s) antigo(s) de 'sync broker' reclassificados como linha de base (não eram resultado do dia)")
             self.perf.restore(mem.account_rows(), datetime.now(timezone.utc))   # reinício não apaga perda do dia, meta nem pico
         self.engines: dict[str, LiveExecutionEngine] = {}
+        from .autotune import apply_params
         for sym, spec in self.specs.items():
             cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
+            cfg, note = apply_params(cfg, self.params.get(sym))
+            if self.params:
+                log(f"🧠 PARÂMETROS {sym}: {note}")
             brain = GoldAIEngine(cfg, calibrator=calibrator)
             self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,
                                                     horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)

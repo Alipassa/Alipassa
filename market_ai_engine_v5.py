@@ -11518,6 +11518,183 @@ def records_from_episode(rows: Sequence[EpisodeRow], t0: datetime, leader: str, 
 
 
 # ============================================================================
+# AUTOTUNE
+# ============================================================================
+
+"""AUTOTUNE (5.2) — a IA procura os parâmetros do funil no passado e o robô só os adota com amostra.
+
+Walk-forward por mercado: em cada bloco cronológico, a grade (piso de vantagem, confirmações mínimas, limiar de sinal,
+probabilidade mínima) é avaliada só no TREINO (blocos anteriores); a melhor combinação pelo objetivo expectancy·√n é então
+aplicada no bloco de TESTE, que ela nunca viu. A soma dos testes é o resultado fora da amostra da POLÍTICA de escolha — o que
+uma IA que escolhe parâmetros no passado teria rendido de fato. A combinação mais votada nos blocos vira a recomendação.
+
+O arquivo `dados/parametros.json` guarda, por mercado: parâmetros, n fora da amostra, expectancy OOS da política e do padrão,
+tier do ciclo de vida e `apply` (True só com n ≥ 20 casos OOS e expectancy ≥ padrão). O live lê o arquivo e aplica apenas o
+que está marcado; o resto fica em sombra (registrado, não operado). Regra central preservada: o histórico decide o parâmetro,
+nunca uma regra arbitrária nem a impaciência."""
+
+from collections import Counter
+from itertools import product
+
+
+MIN_APPLY = 20            # candidato: n OOS mínimo para o live adotar
+DEFAULT_GRID: dict[str, Sequence] = {"min_edge_score": (15.0, 25.0, 35.0), "min_confirmations": (2, 3), "signal_score": (40, 50)}
+PARAM_KEYS = ("min_edge_score", "min_confirmations", "signal_score", "min_edge_probability", "min_edge_confidence")
+
+
+def cfg_with(base: EngineConfig, params: dict) -> EngineConfig:
+    d = {**base.__dict__, "weights": dict(base.weights), "factor_signs": dict(base.factor_signs)}
+    for k, v in params.items():
+        if k == "signal_score":
+            d["buy"], d["sell"] = int(v), -int(v)
+        elif k in PARAM_KEYS:
+            d[k] = v
+    return EngineConfig(**d)
+
+
+def default_params(cfg: EngineConfig) -> dict:
+    return {"min_edge_score": float(cfg.min_edge_score), "min_confirmations": int(cfg.min_confirmations), "signal_score": int(cfg.buy)}
+
+
+def _label(p: dict) -> str:
+    return " · ".join(f"{k.replace('min_edge_score', 'piso').replace('min_confirmations', 'conf').replace('signal_score', 'sinal').replace('min_edge_probability', 'prob')} {v:g}"
+                      for k, v in p.items())
+
+
+@dataclass
+class FoldPick:
+    fold: int
+    params: dict
+    train: FloorMetrics
+    test: FloorMetrics
+
+
+@dataclass
+class MarketTune:
+    market: str
+    picks: list[FoldPick] = field(default_factory=list)
+    policy_oos: Optional[FloorMetrics] = None        # soma dos blocos de teste com o parâmetro escolhido no treino
+    default_oos: Optional[FloorMetrics] = None       # mesmos blocos com o parâmetro padrão
+    recommended: dict = field(default_factory=dict)  # combinação mais votada
+    default: dict = field(default_factory=dict)
+
+    @property
+    def n_oos(self) -> int:
+        return self.policy_oos.n if self.policy_oos else 0
+
+    @property
+    def tier(self) -> str:
+        return tier(self.n_oos)
+
+    @property
+    def apply(self) -> bool:
+        if self.policy_oos is None or self.n_oos < MIN_APPLY:
+            return False
+        if self.default_oos is not None and self.default_oos.n >= 5 and self.policy_oos.expectancy < self.default_oos.expectancy:
+            return False
+        return self.policy_oos.expectancy > 0
+
+    def to_dict(self) -> dict:
+        m = lambda x: None if x is None else {"n": x.n, "expectancy": round(x.expectancy, 3), "win_rate": round(x.win_rate, 3),  # noqa: E731
+                                              "profit_factor": (None if x.profit_factor in (None, float("inf")) else round(x.profit_factor, 2)), "max_dd_pct": round(x.max_dd_pct, 2)}
+        return {"params": self.recommended, "default": self.default, "n_oos": self.n_oos, "tier": self.tier, "apply": self.apply,
+                "policy_oos": m(self.policy_oos), "default_oos": m(self.default_oos),
+                "folds": [{"fold": p.fold, "params": p.params, "train_n": p.train.n, "train_expectancy": round(p.train.expectancy, 3),
+                           "test_n": p.test.n, "test_expectancy": round(p.test.expectancy, 3)} for p in self.picks]}
+
+    def render(self) -> str:
+        lines = [f"{self.market}: recomendado {_label(self.recommended)}  (padrão {_label(self.default)})"]
+        for p in self.picks:
+            lines.append(f"  bloco {p.fold}: treino escolheu {_label(p.params)} (n={p.train.n}, E={p.train.expectancy:+.2f}R) → teste n={p.test.n} E={p.test.expectancy:+.2f}R")
+        if self.policy_oos is not None:
+            d = self.default_oos
+            lines.append(f"  POLÍTICA OOS: n={self.policy_oos.n} E={self.policy_oos.expectancy:+.2f}R acerto {self.policy_oos.win_rate:.0%} DD {self.policy_oos.max_dd_pct:.1f}%"
+                         + (f"   ·   PADRÃO OOS: n={d.n} E={d.expectancy:+.2f}R" if d is not None else ""))
+        verdict = ("🟢 ADOTAR no live" if self.apply else
+                   f"⚪ SOMBRA — n OOS {self.n_oos} < {MIN_APPLY}" if self.n_oos < MIN_APPLY else "🟡 SOMBRA — não supera o padrão fora da amostra")
+        lines.append(f"  tier {self.tier} · {verdict}")
+        return "\n".join(lines)
+
+
+def autotune_market(market: str, bt: Backtester, grid: Optional[dict] = None, n_folds: int = 4, train_folds: int = 2,
+                    strategy: str = "adaptive", equity: float = 10000.0, risk_pct: float = 0.5, log: Optional[Callable[[str], None]] = None) -> MarketTune:
+    grid = grid or DEFAULT_GRID
+    base = bt.cfg
+    combos = [dict(zip(grid.keys(), vals)) for vals in product(*grid.values())]
+    dflt = default_params(base)
+    tune = MarketTune(market, default=dflt)
+    n = len(bt.frame.xau)
+    fold_len = (n - bt.warmup) // (n_folds + train_folds)
+    policy_runs: list[BacktestResult] = []
+    default_runs: list[BacktestResult] = []
+    for k in range(n_folds):
+        train_end = bt.warmup + (train_folds + k) * fold_len
+        train_start = train_end - train_folds * fold_len
+        test_end = min(n, train_end + fold_len)
+        table = []
+        for p in combos:
+            r = bt.run(train_start, train_end, cfg_with(base, p))
+            table.append((p, _metrics([r], p.get("min_edge_score", base.min_edge_score), strategy, equity, risk_pct)))
+            if log:
+                log(f"{market} bloco {k + 1} treino {_label(p)}: n={table[-1][1].n} E={table[-1][1].expectancy:+.2f}R")
+        best_p, best_m = max(table, key=lambda t: objective(t[1]))
+        if objective(best_m) <= 0:                                   # sem edge no treino → mantém o padrão, não escolhe ao acaso
+            best_p, best_m = next(((p, m) for p, m in table if p == dflt), (dflt, best_m))
+        test = bt.run(train_end, test_end, cfg_with(base, best_p))
+        policy_runs.append(test)
+        default_runs.append(test if best_p == dflt else bt.run(train_end, test_end, cfg_with(base, dflt)))
+        tune.picks.append(FoldPick(k + 1, dict(best_p), best_m, _metrics([test], best_p.get("min_edge_score", 0.0), strategy, equity, risk_pct)))
+    tune.policy_oos = _metrics(policy_runs, float("nan"), strategy, equity, risk_pct)
+    tune.default_oos = _metrics(default_runs, float("nan"), strategy, equity, risk_pct)
+    votes = Counter(json.dumps(p.params, sort_keys=True) for p in tune.picks)
+    tune.recommended = json.loads(votes.most_common(1)[0][0]) if votes else dict(dflt)
+    return tune
+
+
+@dataclass
+class TuneReport:
+    start: str
+    end: str
+    markets: list[MarketTune] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"generated": datetime.now(timezone.utc).isoformat(), "start": self.start, "end": self.end, "min_apply": MIN_APPLY,
+                "markets": {t.market: t.to_dict() for t in self.markets}}
+
+    def save(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False, indent=1)
+
+    def render(self) -> str:
+        head = [f"🧠 AUTOTUNE — parâmetros do funil escolhidos no PASSADO, avaliados fora da amostra · {self.start} → {self.end}",
+                "grade: piso de vantagem × confirmações mínimas × limiar de sinal; escolha só no treino de cada bloco; política = o que a escolha rendeu no teste", ""]
+        body = [t.render() for t in self.markets]
+        tail = ["", f"REGRA: o live adota um parâmetro só com n OOS ≥ {MIN_APPLY} (candidato) e expectancy ≥ padrão; abaixo disso fica em SOMBRA.",
+                "       O ciclo de vida continua valendo depois: 3 perdas alertam, 5 suspendem e revalidam; nada é apagado."]
+        return "\n".join(head + ["\n".join([b, ""]) for b in body] + tail)
+
+
+def load_params(path: str) -> dict:
+    """{mercado: {"params", "apply", "n_oos", "tier", ...}} — vazio se o arquivo não existe."""
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("markets", {})
+
+
+def apply_params(cfg: EngineConfig, entry: Optional[dict]) -> tuple[EngineConfig, str]:
+    """Aplica ao EngineConfig do mercado só se `apply` for verdadeiro; devolve (cfg, nota para o log)."""
+    if not entry:
+        return cfg, "padrão (sem autotune)"
+    p = entry.get("params") or {}
+    if not entry.get("apply"):
+        return cfg, f"SOMBRA: mantém padrão — {_label(p)} tem n OOS {entry.get('n_oos', 0)} ({entry.get('tier', '?')})"
+    return cfg_with(cfg, p), f"APRENDIDO: {_label(p)} (n OOS {entry.get('n_oos', 0)}, {entry.get('tier', '?')})"
+
+
+# ============================================================================
 # LIVE_ENGINE
 # ============================================================================
 
@@ -12107,8 +12284,9 @@ class MarketAIEngine:
                  equity: float = 10000.0, portfolio: Optional[PortfolioLimits] = None, executors: Optional[dict] = None,
                  sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None, commands: Optional[TelegramCommands] = None,
                  horizon_min: int = 240, log: Callable[[str], None] = print, authorized: bool = False,
-                 selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None) -> None:
+                 selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None, params: Optional[dict] = None) -> None:
         self.mem = mem
+        self.params = params or {}                                    # autotune (5.2): {mercado: {"params", "apply", ...}}
         self.edge_bank = edge_bank                                    # edge_bank.EdgeBank (5.2) — opcional
         self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
         self.mode, self.limits = mode, limits
@@ -12130,6 +12308,9 @@ class MarketAIEngine:
         self.engines: dict[str, LiveExecutionEngine] = {}
         for sym, spec in self.specs.items():
             cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
+            cfg, note = apply_params(cfg, self.params.get(sym))
+            if self.params:
+                log(f"🧠 PARÂMETROS {sym}: {note}")
             brain = GoldAIEngine(cfg, calibrator=calibrator)
             self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,
                                                     horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)
@@ -12640,8 +12821,9 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     bank = EdgeBank.load(args.edge_bank) if getattr(args, "edge_bank", None) else None
     if bank is not None and bank.stats:
         print(f"EDGE BANK carregado: {len(bank.stats)} contextos ({args.edge_bank}) — só contextos com n próprio ≥ 30 ajustam a prioridade")
+    learned = load_params(getattr(args, "params", None) or "")
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
-                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None))
+                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None), params=learned)
     # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
     _Http = HttpClient
     _Yahoo = YahooCollector
@@ -13371,6 +13553,38 @@ def cmd_edge_bank(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_autotune(args: argparse.Namespace) -> int:
+    """AUTOTUNE (5.2): a IA procura piso/confirmações/limiar no passado (walk-forward) e grava dados/parametros.json; o live adota só com n OOS ≥ 20."""
+
+    if getattr(args, "events", None) and not os.path.exists(args.events):
+        print(f"(banco histórico {args.events} não encontrado — funil sem evento/relógio/fluxo)")
+        args.events = None
+    frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+    if not frames:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    grid = dict(DEFAULT_GRID)
+    if args.floors:
+        grid["min_edge_score"] = tuple(float(x) for x in args.floors.split(","))
+    if args.confirmations:
+        grid["min_confirmations"] = tuple(int(x) for x in args.confirmations.split(","))
+    if args.signals:
+        grid["signal_score"] = tuple(int(x) for x in args.signals.split(","))
+    risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
+    rep = TuneReport(args.start, args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    for sym, frame in frames.items():
+        cfg = EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym)
+        bt = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
+        rep.markets.append(autotune_market(sym, bt, grid, n_folds=args.folds, strategy=args.strategy, equity=args.equity, risk_pct=risk,
+                                           log=(print if args.verbose else None)))
+        print(rep.markets[-1].render() + "\n")
+    print(rep.render())
+    if args.out:
+        rep.save(args.out)
+        print(f"\nparâmetros salvos em {args.out} — o live lê com --params e adota só o que está marcado 'apply'")
+    return 0
+
+
 def cmd_sweep(args: argparse.Namespace) -> int:
     """SWEEP DE PISO: testa vários |score| mínimos de vantagem no walk-forward, escolhendo o piso NO TREINO de cada fold."""
 
@@ -13798,6 +14012,7 @@ def _main(argv: list[str]) -> int:
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.add_argument("--reaction-edge", default=os.path.join("dados", "reaction_edge.json"), help="veredito do REACTION EDGE por ativo ('' = ignorar)")
     lv.add_argument("--edge-bank", default=os.path.join("dados", "edge_bank.json"), help="EDGE BANK (5.2) gerado por `edge-bank` ('' = ignorar)")
+    lv.add_argument("--params", default=os.path.join("dados", "parametros.json"), help="parâmetros aprendidos por `autotune` ('' = ignorar); só 'apply' é adotado")
     lv.set_defaults(func=cmd_live)
 
     es = sub.add_parser("estimate", help="estimativa de lucro num período histórico (walk-forward OOS, custo, bootstrap)")
@@ -13839,6 +14054,25 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--min-confirmations", type=int, default=None)
         xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else None))
         xp.set_defaults(func=fn)
+
+    at = sub.add_parser("autotune", help="AUTOTUNE 5.2: piso × confirmações × limiar de sinal escolhidos no passado (walk-forward) → dados/parametros.json")
+    at.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    at.add_argument("--start", default="2026-01-01")
+    at.add_argument("--end", default=None)
+    at.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    at.add_argument("--csv-dir", default=None)
+    at.add_argument("--floors", default=None, help="pisos de vantagem, ex.: 15,25,35 (padrão)")
+    at.add_argument("--confirmations", default=None, help="confirmações mínimas, ex.: 2,3 (padrão)")
+    at.add_argument("--signals", default=None, help="limiar de sinal, ex.: 40,50 (padrão)")
+    at.add_argument("--strategy", default="adaptive")
+    at.add_argument("--folds", type=int, default=4)
+    at.add_argument("--step", type=int, default=1)
+    at.add_argument("--horizon", type=int, default=240)
+    at.add_argument("--equity", type=float, default=10000.0)
+    at.add_argument("--risk", type=float, default=None)
+    at.add_argument("-v", "--verbose", action="store_true")
+    at.add_argument("--out", default=os.path.join("dados", "parametros.json"))
+    at.set_defaults(func=cmd_autotune)
 
     sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
     sw.add_argument("--csv", default=None)

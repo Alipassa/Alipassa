@@ -84,6 +84,10 @@ set "NOME=8d/8 EDGE BANK - o que funciona, onde funciona (dados\edge_bank.json)"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" edge-bank --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\edge_bank.json"
 call :passo
 
+set "NOME=8e/8 AUTOTUNE - a IA procura piso/confirmacoes/limiar no passado (dados\parametros.json; o live adota so com 20 casos OOS)"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" autotune --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\parametros.json"
+call :passo
+
 set "NOME=extra - estimativa de lucro com noticias"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" estimate --start %INICIO% --end %FIM% --markets %MERCADOS% --equity 10000 --risk 3 --events dados\noticias_historicas.csv --news-mode full --out estimativa_news.txt"
 call :passo
@@ -95,7 +99,7 @@ type logs\doctor.txt
 
 echo.
 echo ============================================================
-echo  CONCLUIDO. Resultados: prova.txt, teste_ab.txt, escada.txt, exit_lab.txt, estimativa_news.txt, logs\doctor.txt, dados\edge_bank.json
+echo  CONCLUIDO. Resultados: prova.txt, teste_ab.txt, escada.txt, exit_lab.txt, estimativa_news.txt, logs\doctor.txt, dados\edge_bank.json, dados\parametros.json
 echo  Log completo: %LOG%
 echo ============================================================
 echo [%date% %time%] FIM >> "%LOG%"

@@ -37,3 +37,38 @@ class SweepTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutotuneTests(unittest.TestCase):
+    def test_walk_forward_grid_and_apply_rule(self):
+        import json
+        import os
+        import tempfile
+        from gold_ai.autotune import MIN_APPLY, TuneReport, apply_params, autotune_market, cfg_with, load_params
+        from gold_ai.config import EngineConfig
+        f = HistoryFrame(xau=make_candles("H1", 900, 2500, 0.4, 6.0, NOW, seed=3),
+                         dxy=make_candles("H1", 900, 104, -0.002, 0.08, NOW, seed=4),
+                         us10y=make_candles("H1", 900, 4.2, -0.0005, 0.02, NOW, seed=5))
+        bt = Backtester(f, warmup=230, step=6)
+        tune = autotune_market("XAUUSD", bt, {"min_edge_score": (15.0, 25.0), "min_confirmations": (2, 3)}, n_folds=2)
+        self.assertEqual(len(tune.picks), 2)
+        self.assertIn(tune.recommended["min_edge_score"], (15.0, 25.0))
+        self.assertIn("POLÍTICA OOS", tune.render())
+        self.assertIn("SOMBRA", tune.render())              # amostra sintética pequena: nunca 'ADOTAR' sem 20 casos
+        rep = TuneReport("2026-01-01", "2026-09-13", [tune])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "parametros.json")
+            rep.save(path)
+            learned = load_params(path)
+            self.assertIn("XAUUSD", learned)
+            self.assertFalse(learned["XAUUSD"]["apply"])
+            cfg, note = apply_params(EngineConfig(symbol="XAUUSD"), learned["XAUUSD"])
+            self.assertEqual(cfg.min_edge_score, 25.0)     # sombra: padrão intacto
+            self.assertIn("SOMBRA", note)
+            # com amostra e edge, o live adota
+            learned["XAUUSD"]["apply"], learned["XAUUSD"]["n_oos"] = True, MIN_APPLY + 5
+            learned["XAUUSD"]["params"] = {"min_edge_score": 15.0, "min_confirmations": 2, "signal_score": 40}
+            cfg2, note2 = apply_params(EngineConfig(symbol="XAUUSD"), learned["XAUUSD"])
+            self.assertEqual((cfg2.min_edge_score, cfg2.min_confirmations, cfg2.buy, cfg2.sell), (15.0, 2, 40, -40))
+            self.assertIn("APRENDIDO", note2)
+        self.assertEqual(cfg_with(EngineConfig(), {"signal_score": 45}).sell, -45)
