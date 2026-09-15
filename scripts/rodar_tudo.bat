@@ -3,15 +3,17 @@ REM ============================================================================
 REM  MARKET AI ENGINE - pipeline completa sem acompanhamento (Windows)
 REM  Coloque este arquivo na MESMA pasta de market_ai_engine_v5.py e do .env.
 REM  Requisitos: MT5 aberto e logado (para as exportacoes MT5); internet.
-REM  Tudo fica em logs\ ; resultados: prova.txt, teste_ab.txt, estimativa_news.txt
+REM  A saida aparece NESTA JANELA e tambem em logs\pipeline_*.log ; resultados: prova.txt, teste_ab.txt, estimativa_news.txt
 REM ============================================================================
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 chcp 65001 > nul
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
+set "PYTHONUNBUFFERED=1"
 if not exist logs mkdir logs
 set "PY=python"
+REM  saida NA TELA e no log ao mesmo tempo (--log-file)
 set "ENGINE=market_ai_engine_v5.py"
 set "MERCADOS=XAUUSD,US500,EURUSD,USDJPY,WTI"
 set "INICIO=2026-01-01"
@@ -24,19 +26,19 @@ echo [%date% %time%] INICIO DA PIPELINE > "%LOG%"
 echo Log: %LOG%
 
 set "NOME=1/8 ALFRED - macro point-in-time"
-set "CMD=%PY% %ENGINE% history fetch-alfred --start %INICIO%"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" history fetch-alfred --start %INICIO%"
 call :passo
 
 set "NOME=2/8 GDELT - manchetes, pula se ja cobre 80%, senao ate 10 min"
-set "CMD=%PY% %ENGINE% history fetch-gdelt --start %INICIO% --pace 12 --max-minutes 10 --skip-if-covered 0.8"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" history fetch-gdelt --start %INICIO% --pace 12 --max-minutes 10 --skip-if-covered 0.8"
 call :passo
 
 set "NOME=3/8 MT5 ticks desde junho"
-set "CMD=%PY% %ENGINE% history prices --source mt5 --tf TICK --markets %MERCADOS% --extra USDX --start 2026-06-01"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" history prices --source mt5 --tf TICK --markets %MERCADOS% --extra USDX --start 2026-06-01"
 call :passo
 
 set "NOME=4/8 MT5 M1 desde janeiro"
-set "CMD=%PY% %ENGINE% history prices --source mt5 --tf M1 --markets %MERCADOS% --extra USDX --start %INICIO%"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" history prices --source mt5 --tf M1 --markets %MERCADOS% --extra USDX --start %INICIO%"
 call :passo
 
 echo.
@@ -45,7 +47,7 @@ set /a TENTATIVA=0
 :duka
 set /a TENTATIVA+=1
 echo [%time%] Dukascopy tentativa !TENTATIVA! >> "%LOG%"
-%PY% %ENGINE% history prices --markets %MERCADOS% --extra USDX --start %INICIO% >> "%LOG%" 2>&1
+%PY% %ENGINE% --log-file "%LOG%" history prices --markets %MERCADOS% --extra USDX --start %INICIO%
 set "RC=!errorlevel!"
 if "!RC!"=="2" if !TENTATIVA! LSS 12 (
     echo   horas faltando - aguardando 90s e repetindo !TENTATIVA!/12
@@ -55,23 +57,23 @@ if "!RC!"=="2" if !TENTATIVA! LSS 12 (
 if "!RC!"=="0" (echo   ok) else (echo   [aviso] terminou com codigo !RC! - veja o log)
 
 set "NOME=6/8 Cobertura do banco"
-set "CMD=%PY% %ENGINE% history stats --start %INICIO% --end %FIM%"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" history stats --start %INICIO% --end %FIM%"
 call :passo
 
 set "NOME=7/8 PROVA do REACTION CLOCK - TICK e M1"
-set "CMD=%PY% %ENGINE% reaction learn --tf BOTH --markets %MERCADOS% --lead-usd USDX --out prova.txt"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" reaction learn --tf BOTH --markets %MERCADOS% --lead-usd USDX --out prova.txt"
 call :passo
 
 set "NOME=8/8 TESTE A/B preco x macro x news"
-set "CMD=%PY% %ENGINE% compare-news --start %INICIO% --end %FIM% --markets %MERCADOS% --out teste_ab.txt"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" compare-news --start %INICIO% --end %FIM% --markets %MERCADOS% --out teste_ab.txt"
 call :passo
 
 set "NOME=extra - estimativa de lucro com noticias"
-set "CMD=%PY% %ENGINE% estimate --start %INICIO% --end %FIM% --markets %MERCADOS% --equity 10000 --risk 3 --events dados\noticias_historicas.csv --news-mode full --out estimativa_news.txt"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" estimate --start %INICIO% --end %FIM% --markets %MERCADOS% --equity 10000 --risk 3 --events dados\noticias_historicas.csv --news-mode full --out estimativa_news.txt"
 call :passo
 
 set "NOME=DOCTOR - tudo funcionando? eficiencia?"
-set "CMD=%PY% %ENGINE% doctor --mt5 --out logs\doctor.txt"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" doctor --mt5 --out logs\doctor.txt"
 call :passo
 type logs\doctor.txt
 
@@ -90,7 +92,7 @@ echo === !NOME! ===
 echo. >> "%LOG%"
 echo [%time%] === !NOME! === >> "%LOG%"
 echo   comando: !CMD! >> "%LOG%"
-!CMD! >> "%LOG%" 2>&1
+!CMD!
 set "RC=!errorlevel!"
 if "!RC!"=="0" (echo   ok) else (echo   [aviso] terminou com codigo !RC! - veja o log)
 exit /b 0
