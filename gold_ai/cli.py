@@ -396,8 +396,17 @@ def cmd_history(args: argparse.Namespace) -> int:
                     n = save_ticks(rows, os.path.join(out_dir, f"{sym}_ticks.csv"))
                     print(f"{sym} ({broker}): {n} ticks → {out_dir}/{sym}_ticks.csv")
                 else:
-                    cs = client.rates_range(broker, args.tf.upper(), t0, t1)
-                    n = save_candles(cs, os.path.join(out_dir, f"{sym}_{args.tf.lower()}.csv"))
+                    cs, t = [], t0
+                    while t < t1:                      # candles em blocos de 14 dias: pedido único de meses de M1 excede o limite do terminal ("Invalid params")
+                        tt = min(t + timedelta(days=14), t1)
+                        cs += client.rates_range(broker, args.tf.upper(), t, tt)
+                        t = tt
+                    seen, uniq = set(), []
+                    for c in cs:                       # bordas dos blocos podem repetir a barra do limite
+                        if c.time not in seen:
+                            seen.add(c.time)
+                            uniq.append(c)
+                    n = save_candles(uniq, os.path.join(out_dir, f"{sym}_{args.tf.lower()}.csv"))
                     print(f"{sym} ({broker}): {n} candles {args.tf.upper()} → {out_dir}/{sym}_{args.tf.lower()}.csv")
             except MT5Error as e:
                 print(f"{sym} ({broker}): FALHOU — {e}")

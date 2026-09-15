@@ -77,3 +77,57 @@ class LogFileTeeTests(unittest.TestCase):
                 content = f.read()
             self.assertTrue(content.strip())
             self.assertIn(out.getvalue().strip(), content)
+
+
+class Mt5PricesExportTests(unittest.TestCase):
+    def test_m1_export_requests_in_blocks(self):
+        """copy_rates_range de meses de M1 numa chamada só devolve (-2, 'Invalid params'): o export pede em blocos de ≤ 14 dias."""
+        import os, tempfile
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from unittest import mock
+        from gold_ai import cli
+        from gold_ai.data import mt5 as mt5mod
+        from tests.test_mt5 import NumpyLike
+
+        class Fake:
+            TIMEFRAME_M1 = 1
+            asked = []
+
+            def initialize(self, **kw):
+                return True
+
+            def last_error(self):
+                return (-2, "Terminal: Invalid params")
+
+            def symbol_select(self, s, e):
+                return True
+
+            def symbol_info_tick(self, s):
+                return SimpleNamespace(bid=1.0, ask=1.1, time=int(datetime.now(timezone.utc).timestamp()))
+
+            def shutdown(self):
+                pass
+
+            def copy_rates_range(self, symbol, tf, start, end):
+                self.asked.append((start, end))
+                if end - start > timedelta(days=14, minutes=1):
+                    return None
+                rows, t = [], start
+                while t < end:
+                    rows.append({"time": int(t.timestamp()), "open": 1, "high": 2, "low": 0, "close": 1, "tick_volume": 1, "spread": 1, "real_volume": 0})
+                    t += timedelta(hours=6)
+                return NumpyLike(rows)
+
+        fake = Fake()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mt5mod, "_mt5", fake), \
+                mock.patch.dict(os.environ, {"MT5_UTC_OFFSET_HOURS": "0", "GOLD_AI_OFFSET_CACHE": os.path.join(d, "off.json")}):
+            rc = cli.main(["history", "prices", "--source", "mt5", "--tf", "M1", "--markets", "XAUUSD", "--start", "2026-01-01", "--end", "2026-03-01",
+                           "--out-dir", d, "--file", os.path.join(d, "none.csv")])
+            self.assertEqual(rc, 0)
+            self.assertGreaterEqual(len(fake.asked), 4)
+            with open(os.path.join(d, "XAUUSD_m1.csv"), encoding="utf-8") as f:
+                lines = f.read().strip().splitlines()
+            times = [ln.split(",")[0] for ln in lines[1:]]
+            self.assertEqual(len(times), len(set(times)), "barras duplicadas nas bordas dos blocos")
+            self.assertGreater(len(times), 200)
