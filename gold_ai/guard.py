@@ -242,6 +242,8 @@ class TelegramCommands:
                 actions.append("RESUME")
             elif c.startswith("/STATUS"):
                 actions.append("STATUS")
+            elif c.startswith("/FLOW"):
+                actions.append("FLOW")
             elif c.startswith("/CLOSE"):
                 if "CONFIRM" in c or self.pending_close:
                     self.pending_close = False

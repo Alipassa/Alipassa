@@ -174,6 +174,11 @@ class MarketAIEngine:
                 self.daily_edge(snaps.time, pc, force=True)
             elif action == "STATUS":
                 self.sender.send(self.status_text())
+            elif action == "FLOW":
+                from .flow_anomaly import render_flow_stats
+                rows = self.mem.flow_anomaly_rows(measured_only=False)
+                pend = sum(1 for r in rows if not r.get("resultado"))
+                self.sender.send(render_flow_stats(rows) + f"\nregistradas {len(rows)} · medidas {len(rows) - pend} · aguardando medição {pend}")
             elif action in ("STOP", "PAUSE", "RESUME"):
                 self.sender.send(f"🔧 comando /{action} aplicado — " + self.ks.new_entries_allowed()[1])
             elif action == "CLOSE_REQUESTED":

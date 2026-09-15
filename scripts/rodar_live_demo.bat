@@ -5,7 +5,7 @@ REM  Coloque na MESMA pasta de market_ai_engine_v5.py e do .env. MT5 aberto e lo
 REM  TRAVA: o programa confere no MT5 se a conta e demo; em conta real ele se recusa a rodar.
 REM  A saida aparece NESTA JANELA e tambem em logs\live_demo.log. Reinicia sozinho se cair.
 REM  Para desligar: feche esta janela ou crie o arquivo STOP_TRADING nesta pasta.
-REM  /STOP no Telegram bloqueia novas entradas; /CLOSE + /CLOSE CONFIRM fecha tudo; /STATUS mostra a carteira.
+REM  Telegram: /STATUS carteira e aprendizado · /FLOW anomalias medidas · /EDGE edge do dia · /STOP bloqueia entradas · /CLOSE + /CLOSE CONFIRM fecha tudo.
 REM ============================================================================
 cd /d "%~dp0"
 chcp 65001 > nul

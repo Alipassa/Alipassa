@@ -188,7 +188,7 @@ class GuardTests(unittest.TestCase):
         cmds = TelegramCommands(None, None)
         self.assertEqual(cmds.apply(["/STOP"], ks), ["STOP"])
         self.assertFalse(ks.new_entries_allowed()[0])
-        self.assertEqual(cmds.apply(["/RESUME", "/STATUS"], ks), ["RESUME", "STATUS"])
+        self.assertEqual(cmds.apply(["/RESUME", "/STATUS", "/FLOW"], ks), ["RESUME", "STATUS", "FLOW"])
         self.assertTrue(ks.new_entries_allowed()[0])
         self.assertEqual(cmds.apply(["/CLOSE"], ks), ["CLOSE_REQUESTED"])
         self.assertEqual(cmds.apply(["/CLOSE CONFIRM"], ks), ["CLOSE_CONFIRMED"])
