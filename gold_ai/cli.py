@@ -149,6 +149,11 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     ks = KillSwitch.from_env(env, file_path=args.kill_switch_file)
     dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot, enable_fred=not args.no_fred, enable_news=not args.no_news)
     mt5_client, executors = None, {}
+
+    def stage(msg: str) -> None:
+        print(f"[{datetime.now(timezone.utc):%H:%M:%S} UTC] {msg}", flush=True)
+
+    stage(f"MARKET AI ENGINE {__version__} iniciando · modo {mode.value} · mercados {', '.join(symbols)}")
     if args.source == "mt5":
         from .data.mt5 import MT5Client, MT5Config
         from .execution import ExecutionEngine
@@ -157,8 +162,10 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         if args.mt5_path:
             mcfg.path = args.mt5_path
         try:
+            stage("conectando ao MetaTrader 5…")
             mt5_client = MT5Client(mcfg)
             mt5_client.connect()
+            stage(f"MT5 conectado · fuso do servidor {getattr(mt5_client, 'server_offset_hours', 0):+.1f}h ({getattr(mt5_client, 'offset_note', '')})")
             if mode != TradingMode.PAPER:
                 # TRAVA DE CONTA: com --demo-only (padrão) o modo real só roda em conta DEMO da corretora
                 info = mt5_client.mt5.account_info()
@@ -207,12 +214,19 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     engine.lead_history = lead_history
     print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
     print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
+    stage("coletando dados (Yahoo/MT5/FRED/CFTC/RSS) — o PRIMEIRO ciclo pode levar alguns minutos; depois cada ciclo leva segundos")
+    cycle = 0
     try:
         while True:
+            cycle += 1
+            t0 = time.monotonic()
             snaps = data.collect()
+            t1 = time.monotonic()
             print(data.coverage())
             pc = engine.run_cycle(snaps)
             print(pc.render())
+            stage(f"ciclo {cycle} · coleta {t1 - t0:.0f}s · análise {time.monotonic() - t1:.0f}s · próximo em {args.interval}s · "
+                  f"entradas são raras por desenho (o robô só entra em oportunidade estatisticamente válida)")
             if args.once:
                 break
             time.sleep(args.interval)
@@ -1143,8 +1157,52 @@ def _utf8_console() -> None:
             pass
 
 
+class _Tee:
+    """Escreve na tela E no arquivo de log (para os .bat mostrarem progresso sem perder o registro)."""
+
+    def __init__(self, stream, path: str) -> None:
+        self.stream, self.path = stream, path
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self.f = open(path, "a", encoding="utf-8", errors="replace")
+
+    def write(self, data: str) -> int:
+        self.stream.write(data)
+        self.stream.flush()
+        self.f.write(data)
+        self.f.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        self.stream.flush()
+        self.f.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8_console()
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--log-file" in argv:
+        i = argv.index("--log-file")
+        if i + 1 < len(argv):
+            log_path, argv = argv[i + 1], argv[:i] + argv[i + 2:]
+            old_out, old_err = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = _Tee(old_out, log_path), _Tee(old_err, log_path)
+            try:
+                return _main(argv)
+            finally:
+                for t in (sys.stdout, sys.stderr):
+                    try:
+                        t.f.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                sys.stdout, sys.stderr = old_out, old_err
+    return _main(argv)
+
+
+def _main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="gold-ai", description="GOLD AI ENGINE — inteligência preditiva do ouro (XAU/USD)")
     sub = p.add_subparsers(dest="cmd", required=True)
 

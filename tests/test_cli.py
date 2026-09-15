@@ -56,3 +56,24 @@ class DemoOnlyGuardTests(unittest.TestCase):
         self.assertFalse(p.parse_args(["--no-demo-only"]).demo_only)
         with self.assertRaises(SystemExit):
             main(["live", "--help"])
+
+
+class LogFileTeeTests(unittest.TestCase):
+    def test_log_file_writes_screen_and_file(self):
+        import io, os, sys, tempfile
+        from gold_ai import cli
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "logs", "x.log")
+            out = io.StringIO()
+            old_out, old_err = sys.stdout, sys.stderr
+            sys.stdout = out
+            try:
+                rc = cli.main(["--log-file", log, "history", "template", "--file", os.path.join(d, "t.csv")])
+            finally:
+                sys.stdout, sys.stderr = old_out, old_err
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(log))
+            with open(log, encoding="utf-8") as f:
+                content = f.read()
+            self.assertTrue(content.strip())
+            self.assertIn(out.getvalue().strip(), content)
