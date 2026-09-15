@@ -231,7 +231,7 @@ class HistoryFrame:
     breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
     symbol: str = "XAUUSD"                                     # mercado (para o NEWS ENGINE por mercado)
     events: Optional[object] = None                            # history.EventHistory (banco point-in-time de eventos/notícias)
-    news_mode: str = "full"                                    # none | macro | full | full_sem_relogio | full_sem_flow — o que o cérebro pode ver
+    news_mode: str = "full"                                    # none | macro | news (manchetes sem relógio/fluxo) | full | full_sem_relogio | full_sem_flow
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -291,7 +291,7 @@ class HistoryFrame:
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
         self._attach_events(s, t)
-        if self.news_mode != "full_sem_flow":
+        if self.news_mode not in ("full_sem_flow", "news"):
             from .flow_anomaly import FlowAnomalyEngine
             fa = FlowAnomalyEngine().assess(self.symbol, s, getattr(self, "_last_identified", []) if self.events is not None and self.news_mode != "none" else [], t)
             s.flow_score, s.flow_status, s.flow_origin, s.flow_direction, s.anomalous_regime, s.flow_chain = fa.score, fa.status, fa.origin, fa.direction, fa.anomalous_regime, fa.chain
@@ -328,7 +328,7 @@ class HistoryFrame:
         events, news = self.events.snapshot_inputs(t)
         if self.news_mode == "macro":
             news = []
-        use_clock = self.news_mode != "full_sem_relogio"
+        use_clock = self.news_mode not in ("full_sem_relogio", "news")
         s.events = events
         identified = EventIdentifier().identify(news, events, t)
         self._last_identified = identified
@@ -348,7 +348,7 @@ class HistoryFrame:
             ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t, lead or None)
             s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
             s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
-        if self.news_mode == "full":
+        if self.news_mode in ("full", "news", "full_sem_relogio", "full_sem_flow"):
             tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
             if tones:
                 s.sentiment = max(-1.0, min(1.0, sum(tones) / len(tones) / 10.0))
@@ -367,6 +367,7 @@ class BacktestResult:
     entries: list = field(default_factory=list)
     funnel: Optional[object] = None       # opportunity.Funnel
     factor_coverage: Optional[float] = None   # fração média do peso dos fatores com dado disponível
+    capture: Optional[object] = None      # opportunity.CaptureFunnel (5.2): movimentos relevantes → nível alcançado
 
     def render(self) -> str:
         cov = f" · cobertura de fatores {self.factor_coverage:.0%}" if self.factor_coverage is not None else ""
@@ -377,6 +378,8 @@ class BacktestResult:
             out += "\n\n" + self.opportunity.render()
         if self.funnel is not None:
             out += "\n\n" + self.funnel.render()
+        if self.capture is not None:
+            out += "\n\n" + self.capture.render()
         return out
 
 
@@ -408,7 +411,7 @@ class Backtester:
         managed: list[tuple[ManagedTrade, dict, int]] = []   # (trade, row, índice de abertura)
         horizon_bars = self.horizon_min // 60
         prev_i = start - 1
-        from .opportunity import DecisionRecord, Funnel, funnel_stage, hypothetical_trade
+        from .opportunity import DecisionRecord, Funnel, funnel_stage, hypothetical_trade, opportunity_level, vwap_band
         decisions: list[DecisionRecord] = []
         entries: list[tuple] = []
         funnel = Funnel()
@@ -422,10 +425,20 @@ class Backtester:
             rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL_GATE")   # com vantagem mas barrada pelo gate = analisada
             # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
             decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
-            funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
+            is_raw, stage = funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg)
+            funnel.add(is_raw, stage)
             coverage_sum += sum(f.max_score for f in a.factors if f.available) / max(1.0, sum(f.max_score for f in a.factors))
             coverage_n += 1
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
+            # 5.2 — nível alcançado + contexto (Edge Bank): regime, evento identificado mais recente (≤ 4 h), banda VWAP, relógio, fluxo
+            rec.level, rec.stage = opportunity_level(a, sig, entered), (stage if is_raw else "NONE")
+            rec.regime, rec.setup = str(getattr(a, "regime", "") or ""), vwap_band(a)
+            last_ev = getattr(self.frame, "_last_identified", None) or []
+            if last_ev:
+                ev0 = max(last_ev, key=lambda e: e.time)
+                if a.time - ev0.time <= timedelta(hours=4):
+                    rec.event_kind = str(getattr(ev0, "kind", "") or "")
+            rec.reaction, rec.flow = str(getattr(a, "reaction_status", "") or ""), str(getattr(a, "flow_status", "") or "")
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: min(end, i + 1 + self.horizon_min // 60 + 2)], self.horizon_min)
             decisions.append(rec)
@@ -464,12 +477,15 @@ class Backtester:
             row["results"]["adaptive"] = tr.result_r
         path = [(c.time, c.close) for c in xau[start:end]]
         threshold = self.threshold_atr * (_atr(xau[max(0, start - 20):end]) or 1.0)   # do caminho, não dos sinais (comparável entre configs)
-        from .opportunity import opportunity_report
+        from .opportunity import capture_funnel, opportunity_report
         curve_rows = [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         opp = opportunity_report(decisions, path, entries, threshold, self.horizon_min, curve_rows)
         res = BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
         res.factor_coverage = round(coverage_sum / coverage_n, 3) if coverage_n else None
+        from .trading import DEFAULT_STRATEGY
+        entry_r = {row["time"]: row["results"].get("adaptive", row["results"].get(DEFAULT_STRATEGY)) for row in trade_rows}
+        res.capture = capture_funnel(decisions, path, threshold, self.horizon_min, entry_r)
         return res
 
 

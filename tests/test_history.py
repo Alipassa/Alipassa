@@ -411,6 +411,14 @@ class BacktestIntegrationTests(unittest.TestCase):
         macro = next(r for r in rep.results if r.mode == "macro")
         self.assertGreater(macro.steps_with_info, 0)
         self.assertIsNone(frame.events)          # a ablação devolve o frame como estava
+        # ESCADA 5.2: A→E com funil de captura por camada
+        lad = compare_information({"XAUUSD": frame}, hist, frame.xau[0].time, end, n_folds=2, step=8, warmup=240, ladder=True)
+        self.assertEqual([r.mode for r in lad.results], ["none", "macro", "news", "full_sem_relogio", "full"])
+        self.assertTrue(all(r.capture is not None for r in lad.results))
+        txt = lad.render()
+        for label in ("A preço/técnica", "C +news", "E +reaction clock", "FUNIL DE CAPTURA por camada", "ESCADA A→E"):
+            self.assertIn(label, txt)
+        self.assertIsNone(frame.events)
 
 
 if __name__ == "__main__":

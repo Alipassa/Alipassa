@@ -8836,7 +8836,7 @@ class HistoryFrame:
     breakeven_daily: list[tuple[datetime, float]] = field(default_factory=list)   # FRED T10YIE (%)
     symbol: str = "XAUUSD"                                     # mercado (para o NEWS ENGINE por mercado)
     events: Optional[object] = None                            # history.EventHistory (banco point-in-time de eventos/notícias)
-    news_mode: str = "full"                                    # none | macro | full | full_sem_relogio | full_sem_flow — o que o cérebro pode ver
+    news_mode: str = "full"                                    # none | macro | news (manchetes sem relógio/fluxo) | full | full_sem_relogio | full_sem_flow
 
     @staticmethod
     def _at(series: list[Candle], t: datetime) -> Optional[int]:
@@ -8895,7 +8895,7 @@ class HistoryFrame:
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
         self._attach_events(s, t)
-        if self.news_mode != "full_sem_flow":
+        if self.news_mode not in ("full_sem_flow", "news"):
             fa = FlowAnomalyEngine().assess(self.symbol, s, getattr(self, "_last_identified", []) if self.events is not None and self.news_mode != "none" else [], t)
             s.flow_score, s.flow_status, s.flow_origin, s.flow_direction, s.anomalous_regime, s.flow_chain = fa.score, fa.status, fa.origin, fa.direction, fa.anomalous_regime, fa.chain
         return s
@@ -8929,7 +8929,7 @@ class HistoryFrame:
         events, news = self.events.snapshot_inputs(t)
         if self.news_mode == "macro":
             news = []
-        use_clock = self.news_mode != "full_sem_relogio"
+        use_clock = self.news_mode not in ("full_sem_relogio", "news")
         s.events = events
         identified = EventIdentifier().identify(news, events, t)
         self._last_identified = identified
@@ -8948,7 +8948,7 @@ class HistoryFrame:
             ra = ReactionClock(self.reaction_stats()).assess(self.symbol, s, identified, t, lead or None)
             s.reaction_status, s.reaction_pressure, s.reaction_probability = ra.status, ra.pressure, ra.probability
             s.reaction_latency_min, s.reaction_expected_min, s.reaction_chain = ra.latency_min, ra.expected_min, ra.chain
-        if self.news_mode == "full":
+        if self.news_mode in ("full", "news", "full_sem_relogio", "full_sem_flow"):
             tones = [e.tone for e in self.events.available_at(t, 6.0) if e.tone is not None]
             if tones:
                 s.sentiment = max(-1.0, min(1.0, sum(tones) / len(tones) / 10.0))
@@ -8967,6 +8967,7 @@ class BacktestResult:
     entries: list = field(default_factory=list)
     funnel: Optional[object] = None       # opportunity.Funnel
     factor_coverage: Optional[float] = None   # fração média do peso dos fatores com dado disponível
+    capture: Optional[object] = None      # opportunity.CaptureFunnel (5.2): movimentos relevantes → nível alcançado
 
     def render(self) -> str:
         cov = f" · cobertura de fatores {self.factor_coverage:.0%}" if self.factor_coverage is not None else ""
@@ -8977,6 +8978,8 @@ class BacktestResult:
             out += "\n\n" + self.opportunity.render()
         if self.funnel is not None:
             out += "\n\n" + self.funnel.render()
+        if self.capture is not None:
+            out += "\n\n" + self.capture.render()
         return out
 
 
@@ -9019,10 +9022,20 @@ class Backtester:
             rule = "ENTRADA" if entered else ("SEM_VANTAGEM" if not a.has_edge else "SEM_SINAL_GATE")   # com vantagem mas barrada pelo gate = analisada
             # FUNIL: primeira etapa em que a oportunidade caiu (no backtest a entrada = sinal operacional)
             decision_text = "🟢 PAPER OPEN" if entered else ("" if sig is None else f"NO_TRADE — sinal {sig.type.value} não é operacional")
-            funnel.add(*funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg))
+            is_raw, stage = funnel_stage(a, sig, engine.gate.last_reason, decision_text, cfg)
+            funnel.add(is_raw, stage)
             coverage_sum += sum(f.max_score for f in a.factors if f.available) / max(1.0, sum(f.max_score for f in a.factors))
             coverage_n += 1
             rec = DecisionRecord(a.time, a.price, a.score, d_dir.value, rule, "", snap.atr or 0.0, None, int(a.evidence_level), a.confidence)
+            # 5.2 — nível alcançado + contexto (Edge Bank): regime, evento identificado mais recente (≤ 4 h), banda VWAP, relógio, fluxo
+            rec.level, rec.stage = opportunity_level(a, sig, entered), (stage if is_raw else "NONE")
+            rec.regime, rec.setup = str(getattr(a, "regime", "") or ""), vwap_band(a)
+            last_ev = getattr(self.frame, "_last_identified", None) or []
+            if last_ev:
+                ev0 = max(last_ev, key=lambda e: e.time)
+                if a.time - ev0.time <= timedelta(hours=4):
+                    rec.event_kind = str(getattr(ev0, "kind", "") or "")
+            rec.reaction, rec.flow = str(getattr(a, "reaction_status", "") or ""), str(getattr(a, "flow_status", "") or "")
             if abs(a.score) >= 15 and d_dir != Direction.LATERAL:
                 rec.hypothetical_r = hypothetical_trade(rec, xau[i + 1: min(end, i + 1 + self.horizon_min // 60 + 2)], self.horizon_min)
             decisions.append(rec)
@@ -9066,6 +9079,8 @@ class Backtester:
         res = BacktestResult(evaluate(signals, path, threshold, self.horizon_min), signals, len(range(start, end, self.step)), cfg,
                              r_stats(trade_rows) if self.simulate_trades else None, trade_rows, opp, decisions, entries, funnel)
         res.factor_coverage = round(coverage_sum / coverage_n, 3) if coverage_n else None
+        entry_r = {row["time"]: row["results"].get("adaptive", row["results"].get(DEFAULT_STRATEGY)) for row in trade_rows}
+        res.capture = capture_funnel(decisions, path, threshold, self.horizon_min, entry_r)
         return res
 
 
@@ -9302,6 +9317,167 @@ class DecisionRecord:
     hypothetical_r: Optional[float] = None   # o que teria acontecido com a hipótese 3R (stop 1.2 ATR)
     evidence_level: int = 0
     confidence: float = 0.0
+    level: str = "NONE"            # NONE | WATCH | SETUP | OPPORTUNITY | EXECUTION (5.2 — nível alcançado neste passo)
+    stage: Optional[str] = None    # etapa do funil em que caiu (None = entrou)
+    regime: str = ""               # contexto (Edge Bank): regime do cérebro
+    event_kind: str = ""           # evento identificado mais recente (cpi, nfp, fomc_hawkish…) ou ""
+    setup: str = ""                # posição vs VWAP de sessão em ATR: B1 (<0,5) · B2 (<1) · B3 (<1,5) · B4 (≥1,5)
+    reaction: str = ""             # estado do REACTION CLOCK
+    flow: str = ""                 # estado do FLOW ANOMALY
+
+    @property
+    def context_tags(self) -> list[str]:
+        """Etiquetas de contexto que o Edge Bank acumula (cada uma é uma 'situação' com estatística própria)."""
+        return context_tags(self.regime, self.setup, self.event_kind, self.reaction, self.flow)
+
+
+def context_tags(regime: str, setup: str, event_kind: str, reaction: str, flow: str) -> list[str]:
+    tags = []
+    if regime:
+        tags.append(f"regime:{regime}")
+    if regime and setup:
+        tags.append(f"vwap:{regime}·{setup}")
+    if event_kind:
+        tags.append(f"evento:{event_kind}")
+    if reaction and reaction not in ("SEM EVENTO", ""):
+        tags.append(f"relogio:{reaction}")
+    if flow and flow not in ("SEM ANOMALIA", ""):
+        tags.append(f"flow:{flow}")
+    return tags
+
+
+def live_context_tags(a, identified: Sequence, now: datetime) -> list[str]:
+    """Mesmas etiquetas ao vivo (Asset Selector): regime, banda VWAP, evento identificado ≤ 4 h, relógio, fluxo."""
+    kind = ""
+    if identified:
+        ev0 = max(identified, key=lambda e: e.time)
+        if now - ev0.time <= timedelta(hours=4):
+            kind = str(getattr(ev0, "kind", "") or "")
+    return context_tags(str(getattr(a, "regime", "") or ""), vwap_band(a), kind, str(getattr(a, "reaction_status", "") or ""), str(getattr(a, "flow_status", "") or ""))
+
+
+# --------------------------------------------------------------------------- NÍVEIS (5.2): WATCH → SETUP → OPPORTUNITY → EXECUTION
+LEVELS: tuple[str, ...] = ("NONE", "WATCH", "SETUP", "OPPORTUNITY", "EXECUTION")
+LEVEL_RANK = {lv: i for i, lv in enumerate(LEVELS)}
+
+
+def opportunity_level(a, sig, entered: bool, raw_min_score: float = 15.0) -> str:
+    """Nível que a análise alcançou, mapeado 1:1 nas portas do motor (nada novo é inventado):
+    WATCH = oportunidade bruta (|score| ≥ 15 com direção) · SETUP = vantagem estatística (score/prob/confiança mínimos) ·
+    OPPORTUNITY = sinal produzido (limiar ±50 + confirmações + estágio) · EXECUTION = entrada."""
+
+    if entered:
+        return "EXECUTION"
+    direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
+    if direction == Direction.LATERAL or abs(a.score) < raw_min_score:
+        return "NONE"
+    if sig is not None and sig.direction != Direction.LATERAL:
+        return "OPPORTUNITY"
+    if a.has_edge:
+        return "SETUP"
+    return "WATCH"
+
+
+def vwap_band(a) -> str:
+    """Banda da posição vs VWAP de sessão (H1, em ATR): o significado muda com o regime (pullback em tendência × extremo em range)."""
+    for r in getattr(a, "technical", ()):
+        if r.timeframe == "H1" and r.vwap_position is not None:
+            d = abs(r.vwap_position)
+            return "B1" if d < 0.5 else "B2" if d < 1.0 else "B3" if d < 1.5 else "B4"
+    return ""
+
+
+@dataclass
+class CaptureFunnel:
+    """Denominador REAL: movimentos relevantes do mercado (≥ threshold no horizonte). Para cada um, o melhor nível que o sistema
+    alcançou NA DIREÇÃO CERTA antes de o movimento ficar evidente — e, quando parou antes da entrada, em que etapa parou."""
+    threshold: float
+    horizon_min: int
+    n_moves: int = 0
+    reached: dict[str, int] = field(default_factory=dict)        # nível → nº de movimentos cujo melhor nível foi ≥ este
+    wrong_direction: int = 0                                      # movimentos em que só houve nível ≥ WATCH na direção contrária
+    lost_at: dict[str, dict[str, int]] = field(default_factory=dict)   # melhor nível → {etapa do funil: n}
+    execution_results: list[float] = field(default_factory=list)  # R das entradas que capturaram movimento
+    hours: float = 0.0
+    entries_total: int = 0                                         # todas as entradas do período (capturaram ou não)
+
+    def rate(self, level: str) -> Optional[float]:
+        return (self.reached.get(level, 0) / self.n_moves) if self.n_moves else None
+
+    def merge(self, other: "CaptureFunnel") -> "CaptureFunnel":
+        f = CaptureFunnel(self.threshold, self.horizon_min, self.n_moves + other.n_moves, dict(self.reached), self.wrong_direction + other.wrong_direction,
+                          {k: dict(v) for k, v in self.lost_at.items()}, list(self.execution_results) + list(other.execution_results),
+                          self.hours + other.hours, self.entries_total + other.entries_total)
+        for k, v in other.reached.items():
+            f.reached[k] = f.reached.get(k, 0) + v
+        for lv, d in other.lost_at.items():
+            for k, v in d.items():
+                f.lost_at.setdefault(lv, {})[k] = f.lost_at.get(lv, {}).get(k, 0) + v
+        return f
+
+    @property
+    def qualified_per_day(self) -> Optional[float]:
+        """Oportunidades qualificadas (OPPORTUNITY ou EXECUTION) por dia — a meta natural é 1–2/dia no CONJUNTO dos mercados."""
+        return (self.reached.get("OPPORTUNITY", 0) / (self.hours / 24.0)) if self.hours else None
+
+    def render(self, title: str = "FUNIL DE CAPTURA") -> str:
+        w = 44
+        lines = [f"🎯 {title} — movimentos ≥ {self.threshold:g} em {self.horizon_min} min · {self.hours / 24:.0f} dias",
+                 f"{'MOVIMENTOS RELEVANTES:':<{w}}{self.n_moves:>6}"]
+        for lv in LEVELS[1:]:
+            n = self.reached.get(lv, 0)
+            pct = f"{n / self.n_moves:>5.0%}" if self.n_moves else ""
+            lines.append(f"  {lv + ' (direção certa, antes de ficar evidente)':<{w - 2}}{n:>6}  {pct}")
+        if self.wrong_direction:
+            lines.append(f"  {'só na direção contrária':<{w - 2}}{self.wrong_direction:>6}")
+        if self.execution_results:
+            rs = self.execution_results
+            wins = sum(1 for x in rs if x > 0)
+            lines.append(f"  {'resultado das capturas (EXECUTION)':<{w - 2}}{'':>6}  acerto {wins / len(rs):.0%} · {sum(rs) / len(rs):+.2f}R")
+        lines.append(f"{'ENTRADAS NO PERÍODO (todas):':<{w}}{self.entries_total:>6}")
+        qd = self.qualified_per_day
+        if qd is not None:
+            lines.append(f"{'OPORTUNIDADES QUALIFICADAS / DIA:':<{w}}{qd:>6.2f}")
+        if self.lost_at:
+            lines.append("Onde os movimentos se perderam (melhor nível alcançado → etapa em que parou):")
+            for lv in LEVELS[:-1]:
+                d = self.lost_at.get(lv)
+                if not d:
+                    continue
+                top = sorted(d.items(), key=lambda kv: -kv[1])[:4]
+                lines.append(f"  {lv:<12}" + " · ".join(f"{STAGE_LABEL.get(k, k) if k != 'NONE' else 'sem oportunidade bruta'} {n}" for k, n in top))
+        return "\n".join(lines)
+
+
+def capture_funnel(decisions: Sequence[DecisionRecord], prices: Sequence[tuple[datetime, float]], threshold: float, horizon_min: int = 240,
+                   entry_results: Optional[dict] = None) -> CaptureFunnel:
+    """entry_results: {time da decisão de ENTRADA: R obtido} (opcional) para o resultado das capturas."""
+    prices = sorted(prices)
+    cf = CaptureFunnel(round(threshold, 4), horizon_min)
+    cf.hours = (prices[-1][0] - prices[0][0]).total_seconds() / 3600 if len(prices) > 1 else 0.0
+    cf.entries_total = sum(1 for d in decisions if d.action == "ENTRADA")
+    moves = detect_moves(prices, threshold, horizon_min) if len(prices) > 1 else []
+    cf.n_moves = len(moves)
+    decs = sorted(decisions, key=lambda d: d.time)
+    for mv in moves:
+        lo, hi = mv.evident_at - timedelta(minutes=horizon_min), mv.evident_at
+        window = [d for d in decs if lo <= d.time < hi]
+        same = [d for d in window if d.direction == mv.direction and d.level != "NONE"]
+        best = max(same, key=lambda d: LEVEL_RANK[d.level], default=None)
+        if best is None:
+            if any(d.level != "NONE" for d in window):
+                cf.wrong_direction += 1
+            cf.lost_at.setdefault("NONE", {})["NONE"] = cf.lost_at.get("NONE", {}).get("NONE", 0) + 1
+            continue
+        for lv in LEVELS[1:LEVEL_RANK[best.level] + 1]:
+            cf.reached[lv] = cf.reached.get(lv, 0) + 1
+        if best.level == "EXECUTION":
+            if entry_results and best.time in entry_results and entry_results[best.time] is not None:
+                cf.execution_results.append(float(entry_results[best.time]))
+        else:
+            key = best.stage or "OUTROS"
+            cf.lost_at.setdefault(best.level, {})[key] = cf.lost_at.get(best.level, {}).get(key, 0) + 1
+    return cf
 
 
 def hypothetical_trade(rec: DecisionRecord, candles: Sequence[Candle], horizon_min: int, stop_atr: float = 1.2) -> Optional[float]:
@@ -9682,6 +9858,7 @@ class AssetSelector:
             raw = raw * (1.0 - self.REACTION_WEIGHT) + comp["reaction"] * self.REACTION_WEIGHT * 100.0
         c.components = {k: round(v, 3) for k, v in comp.items()}
         raw *= getattr(c, "lifecycle_multiplier", 1.0)      # ALERTA (3 perdas seguidas) reduz confiança, não quebra o parâmetro
+        raw *= getattr(c, "edge_multiplier", 1.0)           # EDGE BANK: contexto com n próprio ≥ 30 e expectancy provada (×0,9 / ×1,1)
         c.opportunity_score = round(raw * (0.5 + 0.5 * c.decay), 1)
         c.status = "🟢" if c.opportunity_score >= 60 else "🟡" if c.opportunity_score >= 45 else "🟠"
         return c
@@ -10234,7 +10411,14 @@ Se a informação cria a oportunidade, entradas e expectancy sobem SEM mexer no 
 
 
 MODES: tuple[tuple[str, str], ...] = (("none", "Preço somente"), ("macro", "Preço + Macro (A)"), ("full", "Preço + Macro + News (B)"),
-                                      ("full_sem_relogio", "B sem REACTION CLOCK"), ("full_sem_flow", "B sem FLOW ANOMALY"))
+                                      ("full_sem_relogio", "B sem REACTION CLOCK"), ("full_sem_flow", "B sem FLOW ANOMALY"),
+                                      ("news", "C: +News (sem relógio/fluxo)"))
+# ESCADA (5.2): cada degrau acrescenta UMA camada à anterior — A preço · B +macro · C +news · D +flow · E +reaction clock.
+# F (+leader/lagger no Asset Selector, reaction_edge.json) e G (+aprendizado cruzado, Edge Bank) só existem na carteira multi-mercado:
+# são medidos por `reaction learn` e `edge-bank`, não neste backtest por ativo.
+LADDER: tuple[tuple[str, str], ...] = (("none", "A preço/técnica"), ("macro", "B +macro"), ("news", "C +news"),
+                                       ("full_sem_relogio", "D +flow"), ("full", "E +reaction clock"))
+LADDER_LABELS = dict(LADDER)
 
 
 @dataclass
@@ -10246,10 +10430,22 @@ class ModeResult:
     steps: int
     steps_with_info: int
     news_known_steps: int
+    capture: Optional[object] = None      # opportunity.CaptureFunnel somado nos folds OOS (5.2)
 
     @property
     def info_share(self) -> float:
         return self.steps_with_info / self.steps if self.steps else 0.0
+
+    def capture_row(self) -> str:
+        c = self.capture
+        if c is None or not c.n_moves:
+            return f"{self.market:<8}{self.label:<27}{'sem movimentos':>14}"
+        f = lambda lv: f"{c.rate(lv):>7.0%}"  # noqa: E731
+        qd = c.qualified_per_day
+        res = c.execution_results
+        r = f"{sum(res) / len(res):>+7.2f}R" if res else f"{'n/d':>8}"
+        return (f"{self.market:<8}{self.label:<27}{c.n_moves:>6}{f('WATCH')}{f('SETUP')}{f('OPPORTUNITY')}{f('EXECUTION')}"
+                f"{(qd if qd is not None else 0.0):>9.2f}{r}")
 
     def row(self) -> str:
         m = self.metrics
@@ -10266,6 +10462,7 @@ class AblationReport:
     history_stats: str
     results: list[ModeResult] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    ladder: bool = False
 
     def by_market(self) -> dict[str, dict[str, ModeResult]]:
         out: dict[str, dict[str, ModeResult]] = {}
@@ -10279,10 +10476,13 @@ class AblationReport:
             base = modes.get("none")
             if base is None:
                 continue
-            for mode, label in MODES[1:]:
+            prev = base
+            for mode, label in (LADDER[1:] if self.ladder else MODES[1:]):
                 r = modes.get(mode)
                 if r is None:
                     continue
+                if self.ladder:                                   # escada: cada degrau compara com o anterior
+                    base = prev
                 if r.steps_with_info == 0:
                     lines.append(f"{mkt} · {label}: banco sem cobertura neste período (0 passos com informação) — nada a concluir; rode `history stats`.")
                     continue
@@ -10290,8 +10490,12 @@ class AblationReport:
                 d_n = r.metrics.n - base.metrics.n
                 n = min(r.metrics.n, base.metrics.n)
                 strength = "⚪ inconclusivo (amostra < 30)" if n < 30 else ("🟢 melhora" if d_exp > 0.05 else "🔴 piora" if d_exp < -0.05 else "🟡 sem diferença")
-                lines.append(f"{mkt} · {label}: entradas {base.metrics.n} → {r.metrics.n} ({d_n:+d}), expectancy {base.metrics.expectancy:+.2f}R → "
-                             f"{r.metrics.expectancy:+.2f}R ({d_exp:+.2f}R), cobertura {r.info_share:.0%} dos passos · {strength}")
+                cap = ""
+                if r.capture is not None and base.capture is not None and r.capture.n_moves and base.capture.n_moves:
+                    cap = f", captura EXEC {base.capture.rate('EXECUTION'):.0%} → {r.capture.rate('EXECUTION'):.0%}"
+                lines.append(f"{mkt} · {r.label}: entradas {base.metrics.n} → {r.metrics.n} ({d_n:+d}), expectancy {base.metrics.expectancy:+.2f}R → "
+                             f"{r.metrics.expectancy:+.2f}R ({d_exp:+.2f}R){cap}, cobertura {r.info_share:.0%} dos passos · {strength}")
+                prev = r
         return lines
 
     def render(self) -> str:
@@ -10299,7 +10503,12 @@ class AblationReport:
                 f"banco histórico: {self.history_stats}\n\n"
                 f"{'mercado':<8}{'modo':<27}{'passos':>7}{'c/info':>8}{'entradas':>9}{'ent/dia':>8}{'capture':>9}{'expectancy':>13}{'PF':>7}{'DD':>8}{'acerto':>7}")
         rows = [r.row() for r in self.results]
-        out = [head] + rows + ["", "LEITURA (Preço somente = referência):"] + [f"  • {v}" for v in self.verdicts()]
+        out = [head] + rows
+        if any(r.capture is not None for r in self.results):
+            out += ["", "🎯 FUNIL DE CAPTURA por camada — movimentos relevantes do mercado e o melhor nível alcançado na direção certa (OOS):",
+                    f"{'mercado':<8}{'modo':<27}{'movs':>6}{'WATCH':>7}{'SETUP':>7}{'OPP':>7}{'EXEC':>7}{'qual/dia':>9}{'R capt.':>8}"]
+            out += [r.capture_row() for r in self.results]
+        out += ["", "LEITURA (Preço somente = referência):"] + [f"  • {v}" for v in self.verdicts()]
         if self.notes:
             out += ["", "NOTAS:"] + [f"  • {n}" for n in self.notes]
         out += ["", "REGRA: se a informação cria entradas com expectancy ≥ referência, ela fica; o funil só é recalibrado depois (`sweep`).",
@@ -10326,9 +10535,14 @@ def _info_steps(results, hist: EventHistory, mode: str) -> tuple[int, int]:
 def compare_information(frames: dict[str, HistoryFrame], hist: EventHistory, start: datetime, end: datetime, equity: float = 10000.0, risk_pct: float = 0.5,
                         n_folds: int = 4, step: int = 1, warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive",
                         cfg_factory: Optional[Callable[[str], EngineConfig]] = None, modes: tuple[str, ...] = ("none", "macro", "full"),
-                        log: Optional[Callable[[str], None]] = None) -> AblationReport:
+                        log: Optional[Callable[[str], None]] = None, ladder: bool = False) -> AblationReport:
     rep = AblationReport(f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}", hist.stats())
     labels = dict(MODES)
+    if ladder:
+        modes = tuple(m for m, _ in LADDER)
+        rep.ladder = True
+        rep.notes.append("ESCADA A→E: cada degrau compara com o anterior. F (+leader/lagger) e G (+aprendizado cruzado) agem no Asset Selector da carteira: "
+                         "ver `reaction learn` (reaction_edge.json) e `edge-bank` (dados/edge_bank.json).")
     for symbol, frame in frames.items():
         spec = get_market(symbol)
         for mode in modes:
@@ -10339,7 +10553,11 @@ def compare_information(frames: dict[str, HistoryFrame], hist: EventHistory, sta
             results = [res for _, res in wf.folds]
             m = _metrics(results, cfg.min_edge_score, strategy, equity, risk_pct)
             steps, with_info = _info_steps(results, hist, mode)
-            rep.results.append(ModeResult(symbol, mode, labels[mode], m, steps, with_info, with_info))
+            cap = None
+            for res in results:
+                if getattr(res, "capture", None) is not None:
+                    cap = res.capture if cap is None else cap.merge(res.capture)
+            rep.results.append(ModeResult(symbol, mode, (LADDER_LABELS.get(mode, labels[mode]) if ladder else labels[mode]), m, steps, with_info, with_info, cap))
             if log:
                 log(f"{symbol} · {labels[mode]}: {m.n} entradas OOS, expectancy {m.expectancy:+.2f}R")
         frame.events, frame.news_mode = None, "full"
@@ -10665,6 +10883,337 @@ def render_table(states: Sequence[ParameterState]) -> str:
     lines.append("  níveis: <10 não é parâmetro · 10–19 observação · 20 candidato · 30 operacional · 50 validado · 100 alta confiança")
     lines.append("  sequência: 3 alerta · 4 proteção · 5 suspensão + revalidação (últimos 30 / 50 / total); deterioração por blocos quebra antes")
     return "\n".join(lines)
+
+
+# ============================================================================
+# EXIT_LAB
+# ============================================================================
+
+"""EXIT LAB (5.2) — a saída com maior expectancy FORA DA AMOSTRA, não o maior alvo.
+
+O sistema já registra, para cada operação simulada, a trajetória com o stop inicial (MFE/MAE em R) e o resultado de cada
+estratégia de saída (1R, 2R, 3R, 4R, trailing, 2R+trailing, adaptive). Aqui:
+  • distribuição de MFE (mediana, P75, P90) e MAE — até onde o preço costuma ir a favor antes de estopar;
+  • expectancy / PF / acerto por estratégia;
+  • escolha WALK-FORWARD: em cada bloco cronológico a estratégia é escolhida só com os blocos anteriores e avaliada no bloco —
+    a linha "escolhida OOS" é o que uma política de seleção teria rendido de fato;
+  • recomendação apenas com n ≥ 20 casos OOS (ciclo de vida: candidato → operacional 30 → validado 50).
+Nunca altera a saída ao vivo sozinho: recomenda; adotar é decisão com amostra."""
+
+
+MIN_OOS = 20
+
+
+def _percentile(xs: Sequence[float], p: float) -> Optional[float]:
+    if not xs:
+        return None
+    ys = sorted(xs)
+    k = (len(ys) - 1) * p
+    i = int(k)
+    if i + 1 < len(ys):
+        return ys[i] + (ys[i + 1] - ys[i]) * (k - i)
+    return ys[i]
+
+
+@dataclass
+class StrategyLine:
+    name: str
+    n: int
+    expectancy: float
+    win_rate: float
+    profit_factor: Optional[float]
+
+    def row(self) -> str:
+        pf = "n/d" if self.profit_factor is None else ("∞" if self.profit_factor == float("inf") else f"{self.profit_factor:.2f}")
+        return f"  {self.name:<14}{self.n:>5}{self.expectancy:>+9.2f}R{self.win_rate:>8.0%}{pf:>7}"
+
+
+def strategy_line(name: str, rs: Sequence[float]) -> StrategyLine:
+    wins, losses = [x for x in rs if x > 0], [x for x in rs if x <= 0]
+    pf = (sum(wins) / -sum(losses)) if losses and sum(losses) < 0 else (float("inf") if wins else None)
+    return StrategyLine(name, len(rs), statistics.fmean(rs) if rs else 0.0, (len(wins) / len(rs)) if rs else 0.0, pf)
+
+
+@dataclass
+class ExitLabReport:
+    market: str
+    n: int
+    mfe_median: Optional[float]
+    mfe_p75: Optional[float]
+    mfe_p90: Optional[float]
+    mae_median: Optional[float]
+    reach: dict[str, float] = field(default_factory=dict)          # "1R" → fração que alcançou
+    strategies: list[StrategyLine] = field(default_factory=list)
+    chosen_oos: Optional[StrategyLine] = None                       # política walk-forward
+    choices: list[tuple[int, str, int]] = field(default_factory=list)   # (bloco, estratégia escolhida no treino, n do bloco)
+    recommendation: str = ""
+
+    def render(self) -> str:
+        f = lambda x: "n/d" if x is None else f"{x:.2f}R"  # noqa: E731
+        lines = [f"🔬 EXIT LAB — {self.market} · {self.n} operações (stop 1R)",
+                 f"MFE (até onde foi a favor antes do stop): mediana {f(self.mfe_median)} · P75 {f(self.mfe_p75)} · P90 {f(self.mfe_p90)} · MAE mediana {f(self.mae_median)}"]
+        if self.reach:
+            lines.append("Alcançou: " + " · ".join(f"{k} {v:.0%}" for k, v in self.reach.items()))
+        lines.append(f"  {'saída':<14}{'n':>5}{'expect.':>10}{'acerto':>8}{'PF':>7}")
+        lines += [s.row() for s in self.strategies]
+        if self.chosen_oos is not None:
+            lines.append(self.chosen_oos.row() + "   ◀ política walk-forward (escolhida só com o passado)")
+            lines.append("  escolhas por bloco: " + ", ".join(f"{b}:{name} (n={n})" for b, name, n in self.choices))
+        lines.append(self.recommendation)
+        return "\n".join(lines)
+
+
+def exit_lab(market: str, rows: Sequence[dict], n_blocks: int = 4, default: str = "3R") -> ExitLabReport:
+    """rows: {"time", "profile": ExcursionProfile, "results": {estratégia: R}} — ordenadas no tempo aqui."""
+    rows = sorted(rows, key=lambda r: r["time"])
+    mfe = [float(r["profile"].max_r_before_stop) for r in rows if r.get("profile") is not None]
+    mae = [float(getattr(r["profile"], "mae_r", 0.0)) for r in rows if r.get("profile") is not None]
+    rep = ExitLabReport(market, len(rows), _percentile(mfe, 0.5), _percentile(mfe, 0.75), _percentile(mfe, 0.9), _percentile(mae, 0.5))
+    if mfe:
+        rep.reach = {f"{k}R": sum(1 for x in mfe if x >= k) / len(mfe) for k in (1, 2, 3, 4)}
+    names = sorted({k for r in rows for k in r["results"]})
+    for name in names:
+        rep.strategies.append(strategy_line(name, [r["results"][name] for r in rows if name in r["results"]]))
+    rep.strategies.sort(key=lambda s: -s.expectancy)
+    # walk-forward: bloco k avaliado com a estratégia que venceu nos blocos < k (o 1º bloco usa a hipótese padrão)
+    if len(rows) >= 2 * n_blocks and names:
+        size = len(rows) // n_blocks
+        oos: list[float] = []
+        for b in range(n_blocks):
+            test = rows[b * size:(b + 1) * size] if b < n_blocks - 1 else rows[b * size:]
+            train = rows[:b * size]
+            if train:
+                best = max(names, key=lambda nm: statistics.fmean([r["results"][nm] for r in train if nm in r["results"]] or [0.0]))
+            else:
+                best = default if default in names else names[0]
+            rep.choices.append((b + 1, best, len(test)))
+            oos += [r["results"][best] for r in test if best in r["results"]]
+        rep.chosen_oos = strategy_line("escolhida OOS", oos)
+    top = rep.strategies[0] if rep.strategies else None
+    if top is None or rep.n < MIN_OOS:
+        rep.recommendation = f"⚪ amostra {rep.n} < {MIN_OOS}: sem recomendação — a saída padrão ({default}) continua; medir mais."
+    else:
+        base = next((s for s in rep.strategies if s.name == default), None)
+        gain = (top.expectancy - base.expectancy) if base else 0.0
+        oos_txt = f" · política walk-forward {rep.chosen_oos.expectancy:+.2f}R" if rep.chosen_oos else ""
+        if base is not None and top.name != default and gain > 0.10:
+            rep.recommendation = (f"🟢 candidata: {top.name} ({top.expectancy:+.2f}R) supera {default} ({base.expectancy:+.2f}R) em {gain:+.2f}R{oos_txt}. "
+                                  f"Adotar só se a política walk-forward também superar {default} (n ≥ {MIN_OOS}).")
+        else:
+            rep.recommendation = f"🟡 {default} continua adequada (melhor {top.name} {top.expectancy:+.2f}R, diferença {gain:+.2f}R){oos_txt}."
+    return rep
+
+
+# ============================================================================
+# EDGE_BANK
+# ============================================================================
+
+"""EDGE BANK (5.2) — memória estatística do que funciona, onde funciona e quanto pode ser emprestado a outro ativo.
+
+Cada situação (contexto) recebe uma etiqueta: regime, evento (cpi, fomc_hawkish…), banda VWAP × regime, estado do relógio de
+reação, estado do fluxo. Para cada (ativo, etiqueta) o banco guarda os R:
+  • OPERADO  — resultado real das entradas (backtest OOS ou vivido em PAPER/LIVE);
+  • POTENCIAL — o que a hipótese padrão teria rendido nas oportunidades ≥ SETUP (para aprender quando NÃO operar).
+Aprendizado cruzado: CASOS PRÓPRIOS + EVIDÊNCIA TRANSFERIDA PONDERADA (similaridade entre ativos × 0,5) — o n próprio fica
+separado e é ele que define o tier do ciclo de vida. 50 XAU + 30 US500 nunca viram 80 casos de EURUSD.
+Regra de uso ao vivo: só contextos com n PRÓPRIO ≥ 30 (operacional) ajustam a prioridade do Asset Selector (×0,9 / ×1,1); abaixo
+disso o banco é conhecimento exibido, não regra."""
+
+
+
+TRANSFER_WEIGHT = 0.5      # fração da evidência alheia que pode ser emprestada (× similaridade)
+MIN_OWN_NEGATIVE = 20      # "quando NÃO operar": só com n próprio ≥ 20 e expectancy < 0
+MIN_OWN_LIVE = 30          # ajuste de prioridade ao vivo: só tier operacional
+
+
+def similarity(a: str, b: str) -> float:
+    """Cosseno dos vetores de sinais de fatores (MarketSpec.factor_signs), truncado em 0: ativos que reagem ao mesmo conjunto
+    de forças no mesmo sentido são parecidos; sentido oposto (USDJPY × XAUUSD) vale 0, nunca negativo."""
+    if a == b:
+        return 1.0
+    sa, sb = MARKETS.get(a), MARKETS.get(b)
+    if sa is None or sb is None:
+        return 0.0
+    keys = sorted(set(sa.factor_signs) | set(sb.factor_signs))
+    va, vb = [float(sa.factor_signs.get(k, 0)) for k in keys], [float(sb.factor_signs.get(k, 0)) for k in keys]
+    na, nb = math.sqrt(sum(x * x for x in va)), math.sqrt(sum(x * x for x in vb))
+    if not na or not nb:
+        return 0.0
+    return max(0.0, sum(x * y for x, y in zip(va, vb)) / (na * nb))
+
+
+@dataclass
+class ContextStat:
+    asset: str
+    tag: str
+    own: list[float] = field(default_factory=list)          # OPERADO
+    potential: list[float] = field(default_factory=list)    # POTENCIAL (hipótese padrão nas oportunidades ≥ SETUP)
+    transfer_n: float = 0.0                                  # n efetivo emprestado
+    transfer_sum: float = 0.0                                # Σ w·n·média dos outros
+    sources: list[str] = field(default_factory=list)
+
+    @property
+    def n_own(self) -> int:
+        return len(self.own)
+
+    @property
+    def expectancy(self) -> Optional[float]:
+        return statistics.fmean(self.own) if self.own else None
+
+    @property
+    def potential_expectancy(self) -> Optional[float]:
+        return statistics.fmean(self.potential) if self.potential else None
+
+    @property
+    def blended(self) -> Optional[float]:
+        """Casos próprios + evidência transferida ponderada; None se não há nada."""
+        tot = self.n_own + self.transfer_n
+        if tot <= 0:
+            return None
+        return (sum(self.own) + self.transfer_sum) / tot
+
+    @property
+    def tier(self) -> str:
+        return tier(self.n_own)
+
+    @property
+    def profit_factor(self) -> Optional[float]:
+        wins, losses = [x for x in self.own if x > 0], [x for x in self.own if x <= 0]
+        if not self.own:
+            return None
+        return (sum(wins) / -sum(losses)) if losses and sum(losses) < 0 else (float("inf") if wins else 0.0)
+
+    def row(self) -> str:
+        e = "n/d" if self.expectancy is None else f"{self.expectancy:+.2f}R"
+        b = "" if (self.blended is None or self.transfer_n <= 0) else f"  c/ transferência {self.blended:+.2f}R (n_ef +{self.transfer_n:.1f} de {', '.join(self.sources)})"
+        p = "" if self.potential_expectancy is None else f"  potencial {self.potential_expectancy:+.2f}R (n={len(self.potential)})"
+        return f"  {self.tag:<32}{self.n_own:>4}  {e:>8}  {self.tier:<14}{b}{p}"
+
+
+class EdgeBank:
+    def __init__(self) -> None:
+        self.stats: dict[tuple[str, str], ContextStat] = {}
+        self.note: str = ""
+
+    # ------------------------------------------------------------------ alimentação
+    def get(self, asset: str, tag: str) -> ContextStat:
+        key = (asset, tag)
+        if key not in self.stats:
+            self.stats[key] = ContextStat(asset, tag)
+        return self.stats[key]
+
+    def add_trade(self, asset: str, tags: Sequence[str], r: float) -> None:
+        for tag in tags:
+            self.get(asset, tag).own.append(float(r))
+
+    def add_potential(self, asset: str, tags: Sequence[str], r: float) -> None:
+        for tag in tags:
+            self.get(asset, tag).potential.append(float(r))
+
+    def add_backtest(self, asset: str, decisions: Sequence, trade_rows: Sequence[dict], strategy: str = "adaptive", default: str = "3R",
+                     min_level: str = "SETUP") -> int:
+        """decisions: opportunity.DecisionRecord (com level/context_tags); trade_rows: operações simuladas (R por estratégia)."""
+        by_time = {row["time"]: row["results"].get(strategy, row["results"].get(default)) for row in trade_rows}
+        n = 0
+        for d in decisions:
+            tags = d.context_tags
+            if not tags:
+                continue
+            if d.action == "ENTRADA":
+                r = by_time.get(d.time)
+                if r is not None:
+                    self.add_trade(asset, tags, r)
+                    n += 1
+            elif LEVEL_RANK.get(d.level, 0) >= LEVEL_RANK[min_level] and d.hypothetical_r is not None:
+                self.add_potential(asset, tags, d.hypothetical_r)
+        return n
+
+    # ------------------------------------------------------------------ aprendizado cruzado
+    def apply_transfer(self, weight: float = TRANSFER_WEIGHT) -> None:
+        assets = sorted({a for a, _ in self.stats})
+        for (asset, tag), st in self.stats.items():
+            st.transfer_n, st.transfer_sum, st.sources = 0.0, 0.0, []
+            for other in assets:
+                if other == asset:
+                    continue
+                o = self.stats.get((other, tag))
+                if o is None or not o.own:
+                    continue
+                w = weight * similarity(asset, other)
+                if w <= 0:
+                    continue
+                st.transfer_n += w * o.n_own
+                st.transfer_sum += w * sum(o.own)
+                st.sources.append(f"{other}×{w:.2f}")
+
+    # ------------------------------------------------------------------ leitura
+    def for_asset(self, asset: str, min_n: int = 1) -> list[ContextStat]:
+        rows = [s for (a, _), s in self.stats.items() if a == asset and (s.n_own >= min_n or s.transfer_n > 0 or s.potential)]
+        return sorted(rows, key=lambda s: (-(s.expectancy if s.expectancy is not None else -9.0), -s.n_own))
+
+    def negative_contexts(self, min_own: int = MIN_OWN_NEGATIVE) -> list[ContextStat]:
+        """Aprender quando NÃO operar: o próprio histórico decide (n próprio ≥ 20 e expectancy < 0)."""
+        out = [s for s in self.stats.values() if s.n_own >= min_own and (s.expectancy or 0.0) < 0]
+        out += [s for s in self.stats.values() if s.n_own < min_own and len(s.potential) >= min_own and (s.potential_expectancy or 0.0) < -0.1 and s not in out]
+        return sorted(out, key=lambda s: (s.asset, s.expectancy if s.expectancy is not None else s.potential_expectancy or 0.0))
+
+    def multiplier(self, asset: str, tags: Sequence[str], min_own: int = MIN_OWN_LIVE) -> tuple[float, str]:
+        """Ajuste de prioridade no Asset Selector: ×1,1 se o contexto atual tem edge operacional positivo, ×0,9 se negativo;
+        1,0 sem amostra própria suficiente (o banco informa, não decide)."""
+        best, note = 1.0, ""
+        for tag in tags:
+            st = self.stats.get((asset, tag))
+            if st is None or st.n_own < min_own or st.expectancy is None:
+                continue
+            m = 1.1 if st.expectancy > 0.1 else 0.9 if st.expectancy < -0.1 else 1.0
+            if m != 1.0 and (best == 1.0 or abs(m - 1) > abs(best - 1)):
+                best, note = m, f"{tag} {st.expectancy:+.2f}R (n={st.n_own})"
+        return best, note
+
+    def render(self, assets: Optional[Sequence[str]] = None, min_n: int = 1, top: int = 12) -> str:
+        assets = list(assets) if assets else sorted({a for a, _ in self.stats})
+        lines = ["🏦 EDGE BANK — o que funciona, onde funciona (R por operação; n = casos PRÓPRIOS do ativo)",
+                 "tiers: " + " · ".join(f"{k}={v}" for k, v in TIERS)]
+        for a in assets:
+            rows = self.for_asset(a, min_n)[:top]
+            lines.append(f"{a}")
+            lines.append("─" * 60)
+            if not rows:
+                lines.append("  (sem casos)")
+            lines += [r.row() for r in rows]
+        neg = self.negative_contexts()
+        if neg:
+            lines.append("")
+            lines.append("🚫 QUANDO NÃO OPERAR (o histórico decide — n próprio ≥ 20 com expectancy < 0, ou potencial negativo com amostra):")
+            for s in neg:
+                e = s.expectancy if s.expectancy is not None else s.potential_expectancy
+                lines.append(f"  {s.asset:<8}{s.tag:<32} {e:+.2f}R  (n={s.n_own}, potencial n={len(s.potential)})")
+        if self.note:
+            lines.append(self.note)
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ persistência
+    def to_dict(self) -> dict:
+        return {"note": self.note, "stats": [{"asset": s.asset, "tag": s.tag, "own": s.own, "potential": s.potential} for s in self.stats.values()]}
+
+    def save(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, path: str) -> "EdgeBank":
+        bank = cls()
+        if not os.path.exists(path):
+            return bank
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        bank.note = data.get("note", "")
+        for row in data.get("stats", []):
+            st = bank.get(row["asset"], row["tag"])
+            st.own, st.potential = [float(x) for x in row.get("own", [])], [float(x) for x in row.get("potential", [])]
+        bank.apply_transfer()
+        return bank
 
 
 # ============================================================================
@@ -11245,8 +11794,9 @@ class PortfolioCycle:
             if a is None:
                 lines.append(f"  {sym:<7} sem dados")
                 continue
+            level = opportunity_level(a, r.signal, r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")))
             lines.append(f"  {sym:<7} score {a.score:+4.0f} prob {max(a.prob_up, a.prob_down):.0%} {a.regime:<8} {a.premove.stage.value:<14} "
-                         f"{'sinal ' + r.signal.type.value if r.signal else 'sem sinal'} → {r.decision}")
+                         f"nível {level:<11} {'sinal ' + r.signal.type.value if r.signal else 'sem sinal'} → {r.decision}")
         lines.append(f"DECISÃO: {self.decision}")
         return "\n".join(lines)
 
@@ -11256,8 +11806,9 @@ class MarketAIEngine:
                  equity: float = 10000.0, portfolio: Optional[PortfolioLimits] = None, executors: Optional[dict] = None,
                  sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None, commands: Optional[TelegramCommands] = None,
                  horizon_min: int = 240, log: Callable[[str], None] = print, authorized: bool = False,
-                 selector: Optional[AssetSelector] = None, calibrator=None) -> None:
+                 selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None) -> None:
         self.mem = mem
+        self.edge_bank = edge_bank                                    # edge_bank.EdgeBank (5.2) — opcional
         self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
         self.mode, self.limits = mode, limits
         self.portfolio = PortfolioExposureEngine(portfolio or PortfolioLimits())
@@ -11506,6 +12057,11 @@ class MarketAIEngine:
             c = Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0))
             lc = getattr(self, "lifecycle", {}).get(sym)
             c.lifecycle_multiplier = lc.confidence_multiplier if lc is not None else 1.0
+            c.edge_multiplier, c.edge_note = 1.0, ""
+            if self.edge_bank is not None:
+                c.edge_multiplier, c.edge_note = self.edge_bank.multiplier(sym, live_context_tags(a, getattr(snaps, "identified", []) or [], snaps.time))
+                if c.edge_note:
+                    self.log(f"🏦 EDGE BANK {sym}: contexto {c.edge_note} → prioridade ×{c.edge_multiplier:.1f}")
             cands.append(c)
         for sym in self.specs:
             if sym not in {c.spec.symbol for c in cands}:
@@ -11569,6 +12125,8 @@ class MarketAIEngine:
             lines.append(f"  {sym:<7} {h.render()}")
         if getattr(self, "lifecycle", None):
             lines.append(render_table(list(self.lifecycle.values())))
+        if self.edge_bank is not None and self.edge_bank.stats:
+            lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))
         return "\n".join(lines)
 
 
@@ -11745,8 +12303,11 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     edge = load_reaction_edge(args.reaction_edge) if getattr(args, "reaction_edge", None) else {}
     if edge:
         print("REACTION EDGE carregado (Asset Selector): " + ", ".join(f"{k} {v:.2f}" for k, v in edge.items()))
+    bank = EdgeBank.load(args.edge_bank) if getattr(args, "edge_bank", None) else None
+    if bank is not None and bank.stats:
+        print(f"EDGE BANK carregado: {len(bank.stats)} contextos ({args.edge_bank}) — só contextos com n próprio ≥ 30 ajustam a prioridade")
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
-                            selector=AssetSelector(reaction_edge=edge))
+                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None))
     # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
     _Http = HttpClient
     _Yahoo = YahooCollector
@@ -12318,6 +12879,8 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
     risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
     modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
+    if args.ladder:
+        modes = tuple(m for m, _ in LADDER)
     cov = coverage(hist, start.date(), end.date())
     print(cov.render() + "\n")
     gaps = []
@@ -12340,12 +12903,71 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
         return 1
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
     rep = compare_information(frames, hist, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon,
-                              strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None))
+                              strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None), ladder=args.ladder)
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(rep.render())
         print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def _oos_results_for_markets(args: argparse.Namespace) -> dict:
+    """Walk-forward OOS por mercado (mesmo motor do compare-news) → {símbolo: [BacktestResult por fold]}."""
+
+    if getattr(args, "events", None) and not os.path.exists(args.events):
+        print(f"(banco histórico {args.events} não encontrado — contexto sem evento/relógio/fluxo)")
+        args.events = None
+    frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+    out = {}
+    for sym, frame in frames.items():
+        cfg = _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)
+        bt = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
+        wf = walk_forward(bt, n_folds=args.folds)
+        out[sym] = [res for _, res in wf.folds]
+    return out
+
+
+def cmd_exit_lab(args: argparse.Namespace) -> int:
+    """EXIT LAB (5.2): MFE/MAE das operações OOS → expectancy por saída (1R/2R/3R/trailing…) e política walk-forward; recomenda com n ≥ 20."""
+
+    results = _oos_results_for_markets(args)
+    if not results:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    reports = []
+    for sym, folds in results.items():
+        rows = [r for res in folds for r in res.trade_rows]
+        reports.append(exit_lab(sym, rows, n_blocks=args.blocks))
+    txt = "\n\n".join(r.render() for r in reports)
+    txt += "\n\nREGRA: a saída ao vivo não muda sozinha. Adote a candidata só quando a política walk-forward também superar a padrão com n ≥ 20 (ciclo de vida)."
+    print(txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt)
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def cmd_edge_bank(args: argparse.Namespace) -> int:
+    """EDGE BANK (5.2): contextos (regime, evento, banda VWAP, relógio, fluxo) × ativo → R por operação OOS, potencial, tier e transferência ponderada."""
+
+    results = _oos_results_for_markets(args)
+    if not results:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    bank = EdgeBank()
+    n = 0
+    for sym, folds in results.items():
+        for res in folds:
+            n += bank.add_backtest(sym, res.decisions, res.trade_rows, args.strategy)
+    bank.apply_transfer()
+    bank.note = (f"fonte: walk-forward OOS {args.start} → {args.end or 'hoje'} · {n} operações · saída '{args.strategy}' · "
+                 "transferência = 0,5 × similaridade (fatores) × n do outro ativo; o n próprio define o tier")
+    print(bank.render(list(results)))
+    if args.out:
+        bank.save(args.out)
+        print(f"\nbanco salvo em {args.out} (o live carrega com --edge-bank; só n próprio ≥ 30 ajusta prioridade)")
     return 0
 
 
@@ -12775,6 +13397,7 @@ def _main(argv: list[str]) -> int:
     lv.add_argument("-v", "--verbose", action="store_true")
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.add_argument("--reaction-edge", default=os.path.join("dados", "reaction_edge.json"), help="veredito do REACTION EDGE por ativo ('' = ignorar)")
+    lv.add_argument("--edge-bank", default=os.path.join("dados", "edge_bank.json"), help="EDGE BANK (5.2) gerado por `edge-bank` ('' = ignorar)")
     lv.set_defaults(func=cmd_live)
 
     es = sub.add_parser("estimate", help="estimativa de lucro num período histórico (walk-forward OOS, custo, bootstrap)")
@@ -12797,6 +13420,25 @@ def _main(argv: list[str]) -> int:
     es.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
     es.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     es.set_defaults(func=cmd_estimate)
+
+    for name, fn, hlp in (("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
+                          ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)")):
+        xp = sub.add_parser(name, help=hlp)
+        xp.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"), help="banco histórico point-in-time (contexto: evento, relógio, fluxo)")
+        xp.add_argument("--start", default="2026-01-01")
+        xp.add_argument("--end", default=None)
+        xp.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+        xp.add_argument("--csv-dir", default=None, help="pasta com <SYM>_h1.csv (senão Yahoo)")
+        xp.add_argument("--strategy", default="adaptive")
+        xp.add_argument("--folds", type=int, default=4)
+        xp.add_argument("--step", type=int, default=1)
+        xp.add_argument("--horizon", type=int, default=240)
+        xp.add_argument("--blocks", type=int, default=4, help="exit-lab: blocos cronológicos da política walk-forward")
+        xp.add_argument("--edge-score", type=float, default=None)
+        xp.add_argument("--signal-score", type=float, default=None)
+        xp.add_argument("--min-confirmations", type=int, default=None)
+        xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else None))
+        xp.set_defaults(func=fn)
 
     sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
     sw.add_argument("--csv", default=None)
@@ -12898,6 +13540,7 @@ def _main(argv: list[str]) -> int:
     cn.add_argument("--end", default=None)
     cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     cn.add_argument("--modes", default=None, help="none,macro,full,full_sem_relogio,full_sem_flow (padrão: none,macro,full; os dois últimos isolam o relógio e o fluxo)")
+    cn.add_argument("--ladder", action="store_true", help="ESCADA 5.2: A preço · B +macro · C +news · D +flow · E +reaction clock, com funil de captura por camada")
     cn.add_argument("--min-coverage", type=float, default=0.8, help="cobertura mínima do banco no período (macro por semana, news por dia)")
     cn.add_argument("--allow-partial", action="store_true", help="roda mesmo com banco incompleto (resultado é ensaio, não conclusão)")
     cn.add_argument("--equity", type=float, default=10000.0)

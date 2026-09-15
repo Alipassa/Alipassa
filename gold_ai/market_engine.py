@@ -40,13 +40,15 @@ class PortfolioCycle:
 
     def render(self) -> str:
         lines = [f"🌎 MARKET AI — ciclo {self.time:%Y-%m-%d %H:%M} UTC"]
+        from .opportunity import opportunity_level
         for sym, r in self.results.items():
             a = r.assessment
             if a is None:
                 lines.append(f"  {sym:<7} sem dados")
                 continue
+            level = opportunity_level(a, r.signal, r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")))
             lines.append(f"  {sym:<7} score {a.score:+4.0f} prob {max(a.prob_up, a.prob_down):.0%} {a.regime:<8} {a.premove.stage.value:<14} "
-                         f"{'sinal ' + r.signal.type.value if r.signal else 'sem sinal'} → {r.decision}")
+                         f"nível {level:<11} {'sinal ' + r.signal.type.value if r.signal else 'sem sinal'} → {r.decision}")
         lines.append(f"DECISÃO: {self.decision}")
         return "\n".join(lines)
 
@@ -56,8 +58,9 @@ class MarketAIEngine:
                  equity: float = 10000.0, portfolio: Optional[PortfolioLimits] = None, executors: Optional[dict] = None,
                  sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None, commands: Optional[TelegramCommands] = None,
                  horizon_min: int = 240, log: Callable[[str], None] = print, authorized: bool = False,
-                 selector: Optional[AssetSelector] = None, calibrator=None) -> None:
+                 selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None) -> None:
         self.mem = mem
+        self.edge_bank = edge_bank                                    # edge_bank.EdgeBank (5.2) — opcional
         self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
         self.mode, self.limits = mode, limits
         self.portfolio = PortfolioExposureEngine(portfolio or PortfolioLimits())
@@ -311,6 +314,12 @@ class MarketAIEngine:
             c = Candidate(self.specs[sym], a, sig, snaps.by_symbol[sym], self.history[sym], opp.capture_rate, snaps.data_quality.get(sym, 1.0))
             lc = getattr(self, "lifecycle", {}).get(sym)
             c.lifecycle_multiplier = lc.confidence_multiplier if lc is not None else 1.0
+            c.edge_multiplier, c.edge_note = 1.0, ""
+            if self.edge_bank is not None:
+                from .opportunity import live_context_tags
+                c.edge_multiplier, c.edge_note = self.edge_bank.multiplier(sym, live_context_tags(a, getattr(snaps, "identified", []) or [], snaps.time))
+                if c.edge_note:
+                    self.log(f"🏦 EDGE BANK {sym}: contexto {c.edge_note} → prioridade ×{c.edge_multiplier:.1f}")
             cands.append(c)
         for sym in self.specs:
             if sym not in {c.spec.symbol for c in cands}:
@@ -376,4 +385,6 @@ class MarketAIEngine:
         if getattr(self, "lifecycle", None):
             from .lifecycle import render_table
             lines.append(render_table(list(self.lifecycle.values())))
+        if self.edge_bank is not None and self.edge_bank.stats:
+            lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))
         return "\n".join(lines)

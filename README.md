@@ -295,6 +295,21 @@ cada etapa da inicialização (conexão MT5, conta/tipo, fuso do servidor, colet
 O primeiro ciclo é o mais lento (baixa H1/H4/D1 de 5 mercados + FRED + CFTC + RSS); os seguintes usam cache e levam segundos.
 Poucas ou nenhuma entrada nas primeiras horas é o comportamento esperado (< 1 entrada/dia/mercado no histórico); `/STATUS` no Telegram mostra o estado.
 
+## 5.2 — CAPTURA: encontrar mais movimentos bons e capturá-los melhor (medir antes de mudar regra)
+
+Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se perdem e o que o histórico diz sobre cada situação.
+
+| Peça | O que faz | Comando |
+|---|---|---|
+| **Níveis** WATCH → SETUP → OPPORTUNITY → EXECUTION | Mapeados 1:1 nas portas do motor: bruta (\|score\| ≥ 15) → vantagem estatística → sinal (±50 + confirmações) → entrada. Aparecem em cada ciclo do live (`nível SETUP`). | live |
+| **Funil de captura** | Denominador REAL: movimentos relevantes do mercado (≥ 1 ATR no horizonte). Para cada um, o melhor nível alcançado na direção certa antes de ficar evidente e a etapa em que parou. Meta natural: ~1–2 qualificadas/dia no conjunto. | `backtest`, `compare-news` |
+| **Escada A→E** | A preço · B +macro · C +news · D +flow · E +reaction clock; cada degrau compara com o anterior, com expectancy, PF, DD e captura. F (+leader/lagger) e G (+cruzado) vivem no Asset Selector: `reaction learn` e `edge-bank`. | `compare-news --ladder` |
+| **Exit Lab** | MFE/MAE das operações OOS (mediana, P75, P90) → expectancy por saída (1R…4R, trailing, 2R+trailing, adaptive) e **política walk-forward** (escolhida só com o passado). Recomenda com n ≥ 20; nunca muda a saída ao vivo sozinho. | `exit-lab` |
+| **Edge Bank** | Contexto (regime, evento, banda VWAP × regime, relógio, fluxo) × ativo → R por operação, potencial, tier. **Aprendizado cruzado**: casos próprios + evidência transferida ponderada (0,5 × similaridade de fatores × n do outro) — o n próprio fica separado e define o tier. Lista "quando NÃO operar" (n ≥ 20 e expectancy < 0). Ao vivo só n próprio ≥ 30 ajusta a prioridade (×0,9 / ×1,1). | `edge-bank` → `dados/edge_bank.json` → `live --edge-bank` |
+
+Banda VWAP (H1, em ATR): B1 < 0,5 · B2 < 1 · B3 < 1,5 · B4 ≥ 1,5 — o mesmo B1 é *pullback* em tendência e *nada* em range; é o Edge Bank
+que mede qual combinação regime × banda paga, em vez de o código decidir. Risco continua percentual fixo: cresce capital → risco em $ → lote; nunca risco após perda.
+
 ## Entrypoint único
 
 Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.0:

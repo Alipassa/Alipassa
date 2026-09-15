@@ -22,7 +22,14 @@ from .markets import get_market
 from .sweep import FloorMetrics, _metrics
 
 MODES: tuple[tuple[str, str], ...] = (("none", "Preço somente"), ("macro", "Preço + Macro (A)"), ("full", "Preço + Macro + News (B)"),
-                                      ("full_sem_relogio", "B sem REACTION CLOCK"), ("full_sem_flow", "B sem FLOW ANOMALY"))
+                                      ("full_sem_relogio", "B sem REACTION CLOCK"), ("full_sem_flow", "B sem FLOW ANOMALY"),
+                                      ("news", "C: +News (sem relógio/fluxo)"))
+# ESCADA (5.2): cada degrau acrescenta UMA camada à anterior — A preço · B +macro · C +news · D +flow · E +reaction clock.
+# F (+leader/lagger no Asset Selector, reaction_edge.json) e G (+aprendizado cruzado, Edge Bank) só existem na carteira multi-mercado:
+# são medidos por `reaction learn` e `edge-bank`, não neste backtest por ativo.
+LADDER: tuple[tuple[str, str], ...] = (("none", "A preço/técnica"), ("macro", "B +macro"), ("news", "C +news"),
+                                       ("full_sem_relogio", "D +flow"), ("full", "E +reaction clock"))
+LADDER_LABELS = dict(LADDER)
 
 
 @dataclass
@@ -34,10 +41,22 @@ class ModeResult:
     steps: int
     steps_with_info: int
     news_known_steps: int
+    capture: Optional[object] = None      # opportunity.CaptureFunnel somado nos folds OOS (5.2)
 
     @property
     def info_share(self) -> float:
         return self.steps_with_info / self.steps if self.steps else 0.0
+
+    def capture_row(self) -> str:
+        c = self.capture
+        if c is None or not c.n_moves:
+            return f"{self.market:<8}{self.label:<27}{'sem movimentos':>14}"
+        f = lambda lv: f"{c.rate(lv):>7.0%}"  # noqa: E731
+        qd = c.qualified_per_day
+        res = c.execution_results
+        r = f"{sum(res) / len(res):>+7.2f}R" if res else f"{'n/d':>8}"
+        return (f"{self.market:<8}{self.label:<27}{c.n_moves:>6}{f('WATCH')}{f('SETUP')}{f('OPPORTUNITY')}{f('EXECUTION')}"
+                f"{(qd if qd is not None else 0.0):>9.2f}{r}")
 
     def row(self) -> str:
         m = self.metrics
@@ -54,6 +73,7 @@ class AblationReport:
     history_stats: str
     results: list[ModeResult] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    ladder: bool = False
 
     def by_market(self) -> dict[str, dict[str, ModeResult]]:
         out: dict[str, dict[str, ModeResult]] = {}
@@ -67,10 +87,13 @@ class AblationReport:
             base = modes.get("none")
             if base is None:
                 continue
-            for mode, label in MODES[1:]:
+            prev = base
+            for mode, label in (LADDER[1:] if self.ladder else MODES[1:]):
                 r = modes.get(mode)
                 if r is None:
                     continue
+                if self.ladder:                                   # escada: cada degrau compara com o anterior
+                    base = prev
                 if r.steps_with_info == 0:
                     lines.append(f"{mkt} · {label}: banco sem cobertura neste período (0 passos com informação) — nada a concluir; rode `history stats`.")
                     continue
@@ -78,8 +101,12 @@ class AblationReport:
                 d_n = r.metrics.n - base.metrics.n
                 n = min(r.metrics.n, base.metrics.n)
                 strength = "⚪ inconclusivo (amostra < 30)" if n < 30 else ("🟢 melhora" if d_exp > 0.05 else "🔴 piora" if d_exp < -0.05 else "🟡 sem diferença")
-                lines.append(f"{mkt} · {label}: entradas {base.metrics.n} → {r.metrics.n} ({d_n:+d}), expectancy {base.metrics.expectancy:+.2f}R → "
-                             f"{r.metrics.expectancy:+.2f}R ({d_exp:+.2f}R), cobertura {r.info_share:.0%} dos passos · {strength}")
+                cap = ""
+                if r.capture is not None and base.capture is not None and r.capture.n_moves and base.capture.n_moves:
+                    cap = f", captura EXEC {base.capture.rate('EXECUTION'):.0%} → {r.capture.rate('EXECUTION'):.0%}"
+                lines.append(f"{mkt} · {r.label}: entradas {base.metrics.n} → {r.metrics.n} ({d_n:+d}), expectancy {base.metrics.expectancy:+.2f}R → "
+                             f"{r.metrics.expectancy:+.2f}R ({d_exp:+.2f}R){cap}, cobertura {r.info_share:.0%} dos passos · {strength}")
+                prev = r
         return lines
 
     def render(self) -> str:
@@ -87,7 +114,12 @@ class AblationReport:
                 f"banco histórico: {self.history_stats}\n\n"
                 f"{'mercado':<8}{'modo':<27}{'passos':>7}{'c/info':>8}{'entradas':>9}{'ent/dia':>8}{'capture':>9}{'expectancy':>13}{'PF':>7}{'DD':>8}{'acerto':>7}")
         rows = [r.row() for r in self.results]
-        out = [head] + rows + ["", "LEITURA (Preço somente = referência):"] + [f"  • {v}" for v in self.verdicts()]
+        out = [head] + rows
+        if any(r.capture is not None for r in self.results):
+            out += ["", "🎯 FUNIL DE CAPTURA por camada — movimentos relevantes do mercado e o melhor nível alcançado na direção certa (OOS):",
+                    f"{'mercado':<8}{'modo':<27}{'movs':>6}{'WATCH':>7}{'SETUP':>7}{'OPP':>7}{'EXEC':>7}{'qual/dia':>9}{'R capt.':>8}"]
+            out += [r.capture_row() for r in self.results]
+        out += ["", "LEITURA (Preço somente = referência):"] + [f"  • {v}" for v in self.verdicts()]
         if self.notes:
             out += ["", "NOTAS:"] + [f"  • {n}" for n in self.notes]
         out += ["", "REGRA: se a informação cria entradas com expectancy ≥ referência, ela fica; o funil só é recalibrado depois (`sweep`).",
@@ -114,9 +146,14 @@ def _info_steps(results, hist: EventHistory, mode: str) -> tuple[int, int]:
 def compare_information(frames: dict[str, HistoryFrame], hist: EventHistory, start: datetime, end: datetime, equity: float = 10000.0, risk_pct: float = 0.5,
                         n_folds: int = 4, step: int = 1, warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive",
                         cfg_factory: Optional[Callable[[str], EngineConfig]] = None, modes: tuple[str, ...] = ("none", "macro", "full"),
-                        log: Optional[Callable[[str], None]] = None) -> AblationReport:
+                        log: Optional[Callable[[str], None]] = None, ladder: bool = False) -> AblationReport:
     rep = AblationReport(f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}", hist.stats())
     labels = dict(MODES)
+    if ladder:
+        modes = tuple(m for m, _ in LADDER)
+        rep.ladder = True
+        rep.notes.append("ESCADA A→E: cada degrau compara com o anterior. F (+leader/lagger) e G (+aprendizado cruzado) agem no Asset Selector da carteira: "
+                         "ver `reaction learn` (reaction_edge.json) e `edge-bank` (dados/edge_bank.json).")
     for symbol, frame in frames.items():
         spec = get_market(symbol)
         for mode in modes:
@@ -127,7 +164,11 @@ def compare_information(frames: dict[str, HistoryFrame], hist: EventHistory, sta
             results = [res for _, res in wf.folds]
             m = _metrics(results, cfg.min_edge_score, strategy, equity, risk_pct)
             steps, with_info = _info_steps(results, hist, mode)
-            rep.results.append(ModeResult(symbol, mode, labels[mode], m, steps, with_info, with_info))
+            cap = None
+            for res in results:
+                if getattr(res, "capture", None) is not None:
+                    cap = res.capture if cap is None else cap.merge(res.capture)
+            rep.results.append(ModeResult(symbol, mode, (LADDER_LABELS.get(mode, labels[mode]) if ladder else labels[mode]), m, steps, with_info, with_info, cap))
             if log:
                 log(f"{symbol} · {labels[mode]}: {m.n} entradas OOS, expectancy {m.expectancy:+.2f}R")
         frame.events, frame.news_mode = None, "full"

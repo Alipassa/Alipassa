@@ -203,8 +203,12 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     edge = load_reaction_edge(args.reaction_edge) if getattr(args, "reaction_edge", None) else {}
     if edge:
         print("REACTION EDGE carregado (Asset Selector): " + ", ".join(f"{k} {v:.2f}" for k, v in edge.items()))
+    from .edge_bank import EdgeBank
+    bank = EdgeBank.load(args.edge_bank) if getattr(args, "edge_bank", None) else None
+    if bank is not None and bank.stats:
+        print(f"EDGE BANK carregado: {len(bank.stats)} contextos ({args.edge_bank}) — só contextos com n próprio ≥ 30 ajustam a prioridade")
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
-                            selector=AssetSelector(reaction_edge=edge))
+                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None))
     # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
     from .data import HttpClient as _Http
     from .data.yahoo import YahooCollector as _Yahoo
@@ -834,6 +838,9 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else datetime.now(timezone.utc)
     risk = args.risk if args.risk is not None else float(load_env_file().get("RISK_PER_TRADE", 0.5))
     modes = tuple(m.strip() for m in args.modes.split(",")) if args.modes else ("none", "macro", "full")
+    if args.ladder:
+        from .ablation import LADDER
+        modes = tuple(m for m, _ in LADDER)
     cov = coverage(hist, start.date(), end.date())
     print(cov.render() + "\n")
     gaps = []
@@ -856,12 +863,76 @@ def cmd_compare_news(args: argparse.Namespace) -> int:
         return 1
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
     rep = compare_information(frames, hist, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon,
-                              strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None))
+                              strategy=args.strategy, cfg_factory=factory, modes=modes, log=(print if args.verbose else None), ladder=args.ladder)
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(rep.render())
         print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def _oos_results_for_markets(args: argparse.Namespace) -> dict:
+    """Walk-forward OOS por mercado (mesmo motor do compare-news) → {símbolo: [BacktestResult por fold]}."""
+    from .evaluation import Backtester, walk_forward
+    from .markets import get_market
+    from .config import EngineConfig
+
+    if getattr(args, "events", None) and not os.path.exists(args.events):
+        print(f"(banco histórico {args.events} não encontrado — contexto sem evento/relógio/fluxo)")
+        args.events = None
+    frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+    out = {}
+    for sym, frame in frames.items():
+        cfg = _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)
+        bt = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
+        wf = walk_forward(bt, n_folds=args.folds)
+        out[sym] = [res for _, res in wf.folds]
+    return out
+
+
+def cmd_exit_lab(args: argparse.Namespace) -> int:
+    """EXIT LAB (5.2): MFE/MAE das operações OOS → expectancy por saída (1R/2R/3R/trailing…) e política walk-forward; recomenda com n ≥ 20."""
+    from .exit_lab import exit_lab
+
+    results = _oos_results_for_markets(args)
+    if not results:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    reports = []
+    for sym, folds in results.items():
+        rows = [r for res in folds for r in res.trade_rows]
+        reports.append(exit_lab(sym, rows, n_blocks=args.blocks))
+    txt = "\n\n".join(r.render() for r in reports)
+    txt += "\n\nREGRA: a saída ao vivo não muda sozinha. Adote a candidata só quando a política walk-forward também superar a padrão com n ≥ 20 (ciclo de vida)."
+    print(txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt)
+        print(f"\nrelatório salvo em {args.out}")
+    return 0
+
+
+def cmd_edge_bank(args: argparse.Namespace) -> int:
+    """EDGE BANK (5.2): contextos (regime, evento, banda VWAP, relógio, fluxo) × ativo → R por operação OOS, potencial, tier e transferência ponderada."""
+    from .edge_bank import EdgeBank
+
+    results = _oos_results_for_markets(args)
+    if not results:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    bank = EdgeBank()
+    n = 0
+    for sym, folds in results.items():
+        for res in folds:
+            n += bank.add_backtest(sym, res.decisions, res.trade_rows, args.strategy)
+    bank.apply_transfer()
+    bank.note = (f"fonte: walk-forward OOS {args.start} → {args.end or 'hoje'} · {n} operações · saída '{args.strategy}' · "
+                 "transferência = 0,5 × similaridade (fatores) × n do outro ativo; o n próprio define o tier")
+    print(bank.render(list(results)))
+    if args.out:
+        bank.save(args.out)
+        print(f"\nbanco salvo em {args.out} (o live carrega com --edge-bank; só n próprio ≥ 30 ajusta prioridade)")
     return 0
 
 
@@ -1313,6 +1384,7 @@ def _main(argv: list[str]) -> int:
     lv.add_argument("-v", "--verbose", action="store_true")
     lv.add_argument("--markets", default=None, help="4.0: lista de mercados, ex.: EURUSD,US500,XAUUSD,USDJPY,WTI (Asset Selector escolhe a melhor)")
     lv.add_argument("--reaction-edge", default=os.path.join("dados", "reaction_edge.json"), help="veredito do REACTION EDGE por ativo ('' = ignorar)")
+    lv.add_argument("--edge-bank", default=os.path.join("dados", "edge_bank.json"), help="EDGE BANK (5.2) gerado por `edge-bank` ('' = ignorar)")
     lv.set_defaults(func=cmd_live)
 
     es = sub.add_parser("estimate", help="estimativa de lucro num período histórico (walk-forward OOS, custo, bootstrap)")
@@ -1335,6 +1407,25 @@ def _main(argv: list[str]) -> int:
     es.add_argument("--events", default=None, help="banco histórico point-in-time de eventos/notícias (dados/noticias_historicas.csv)")
     es.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     es.set_defaults(func=cmd_estimate)
+
+    for name, fn, hlp in (("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
+                          ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)")):
+        xp = sub.add_parser(name, help=hlp)
+        xp.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"), help="banco histórico point-in-time (contexto: evento, relógio, fluxo)")
+        xp.add_argument("--start", default="2026-01-01")
+        xp.add_argument("--end", default=None)
+        xp.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+        xp.add_argument("--csv-dir", default=None, help="pasta com <SYM>_h1.csv (senão Yahoo)")
+        xp.add_argument("--strategy", default="adaptive")
+        xp.add_argument("--folds", type=int, default=4)
+        xp.add_argument("--step", type=int, default=1)
+        xp.add_argument("--horizon", type=int, default=240)
+        xp.add_argument("--blocks", type=int, default=4, help="exit-lab: blocos cronológicos da política walk-forward")
+        xp.add_argument("--edge-score", type=float, default=None)
+        xp.add_argument("--signal-score", type=float, default=None)
+        xp.add_argument("--min-confirmations", type=int, default=None)
+        xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else None))
+        xp.set_defaults(func=fn)
 
     sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
     sw.add_argument("--csv", default=None)
@@ -1436,6 +1527,7 @@ def _main(argv: list[str]) -> int:
     cn.add_argument("--end", default=None)
     cn.add_argument("--markets", default="US500,XAUUSD", help="ex.: EURUSD,US500,XAUUSD,USDJPY,WTI")
     cn.add_argument("--modes", default=None, help="none,macro,full,full_sem_relogio,full_sem_flow (padrão: none,macro,full; os dois últimos isolam o relógio e o fluxo)")
+    cn.add_argument("--ladder", action="store_true", help="ESCADA 5.2: A preço · B +macro · C +news · D +flow · E +reaction clock, com funil de captura por camada")
     cn.add_argument("--min-coverage", type=float, default=0.8, help="cobertura mínima do banco no período (macro por semana, news por dia)")
     cn.add_argument("--allow-partial", action="store_true", help="roda mesmo com banco incompleto (resultado é ensaio, não conclusão)")
     cn.add_argument("--equity", type=float, default=10000.0)
