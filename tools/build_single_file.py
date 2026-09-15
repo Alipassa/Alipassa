@@ -129,16 +129,39 @@ if __name__ == "__main__":
 '''
 
 
+ALIAS = re.compile(r"^(\s*)from (\.|\.\.)[\w.]* import (.+)$")
+
+
+def _alias_lines(ln: str) -> list[str]:
+    """`from .x import a as b, c` → [`b = a`]: no bundle tudo já está no mesmo módulo, mas o apelido precisa existir."""
+    m = ALIAS.match(ln)
+    if not m:
+        return []
+    indent, names = m.group(1), m.group(3).strip().strip("()")
+    out = []
+    for item in names.split(","):
+        item = item.strip()
+        if " as " in item:
+            src, dst = (x.strip() for x in item.split(" as ", 1))
+            if src != dst:
+                out.append(f"{indent}{dst} = {src}")
+    return out
+
+
 def strip_imports(text: str) -> str:
-    out, multi = [], False
+    out, multi, buf = [], False, ""
     for ln in text.splitlines():
         if multi:
+            buf += " " + ln.strip()
             if ln.strip().endswith(")"):
                 multi = False
+                out.extend(_alias_lines(buf.replace("(", "").replace(")", "")))
             continue
         if SKIP.match(ln):
             if "(" in ln and ")" not in ln:   # import multilinha (parêntese aberto)
-                multi = True
+                multi, buf = True, ln.replace("(", "")
+                continue
+            out.extend(_alias_lines(ln))
             continue
         out.append(ln)
     return "\n".join(out).strip("\n")

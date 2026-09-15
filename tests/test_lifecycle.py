@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 
-from gold_ai.lifecycle import consecutive_losses, evaluate, render_table, tier
+from gold_ai.lifecycle import consecutive_losses, evaluate_parameter as evaluate, render_table, tier
 
 
 class TierTests(unittest.TestCase):

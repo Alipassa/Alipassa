@@ -3711,6 +3711,7 @@ o GOLD AI ENGINE reduz a confiança em vez de quebrar. `LiveSource` implementa
 
 
 
+_atr = atr
 
 
 @dataclass
@@ -3949,6 +3950,7 @@ resto do MarketSnapshot com o DataEngine (DXY, juros, FRED, COT, notícias).
 
 
 
+_atr = atr
 
 
 TF_TO_MT5 = {"M1": "TIMEFRAME_M1", "M5": "TIMEFRAME_M5", "M15": "TIMEFRAME_M15", "M30": "TIMEFRAME_M30",
@@ -8522,6 +8524,7 @@ alinhadas e um walk-forward (calibração no treino, avaliação fora da amostra
 
 
 
+_atr = atr
 
 
 # --------------------------------------------------------------------------- estruturas
@@ -9367,7 +9370,7 @@ def funnel_stage(a, sig, gate_reason: str, decision: str, cfg, raw_min_score: fl
         return True, "POSICAO_ABERTA"
     if "prioridade" in d:
         return True, "PRIORIDADE"
-    if "CICLO DE VIDA" in decision_text or "PARÂMETRO" in decision_text:
+    if "ciclo de vida" in d or "parâmetro" in d:
         return True, "PARAMETRO"
     if "lote" in d or "stop" in d:
         return True, "STOP_LOTE"
@@ -10445,6 +10448,7 @@ nunca por uma sequência isolada:
 
 
 
+
 TIERS = ((100, "alta confiança"), (50, "validado"), (30, "operacional"), (20, "candidato"), (10, "observação"))
 ALERT_STREAK, PROTECT_STREAK, SUSPEND_STREAK = 3, 4, 5
 
@@ -10458,13 +10462,6 @@ def tier(n: int) -> str:
 
 def tier_icon(n: int) -> str:
     return "🟢" if n >= 20 else "🟡" if n >= 10 else "🔴"
-
-
-def profit_factor(xs: Sequence[float]) -> Optional[float]:
-    wins, losses = sum(x for x in xs if x > 0), -sum(x for x in xs if x < 0)
-    if not xs:
-        return None
-    return (wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
 
 
 def consecutive_losses(xs: Sequence[float]) -> int:
@@ -10527,7 +10524,7 @@ def _window(label: str, xs: Sequence[float]) -> Window:
     return Window(label, len(xs), statistics.fmean(xs) if xs else 0.0, profit_factor(xs), (sum(1 for x in xs if x > 0) / len(xs)) if xs else 0.0)
 
 
-def evaluate(name: str, results: Sequence[float], previous_action: str = "NORMAL") -> ParameterState:
+def evaluate_parameter(name: str, results: Sequence[float], previous_action: str = "NORMAL") -> ParameterState:
     """`results`: R por operação FECHADA, em ordem cronológica (fora da amostra por construção no live).
     `previous_action`: estado anterior (SUSPENSO/QUEBRADO persistem até a revalidação passar)."""
     xs = list(results)
@@ -10960,6 +10957,7 @@ cada mercado recebe os próprios candles/preço/ATR/fluxo (Yahoo ou MT5) e o COT
 
 import copy
 
+_atr = atr
 
 
 @dataclass
@@ -11337,6 +11335,7 @@ class MarketAIEngine:
 
     # ------------------------------------------------------------------ histórico por mercado
     def refresh_history(self) -> None:
+        lifecycle_evaluate = evaluate_parameter
         if not hasattr(self, "lifecycle"):
             self.lifecycle = {}
             self._real_mode = {sym: eng.mode for sym, eng in self.engines.items()}
@@ -11640,6 +11639,8 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
                             selector=AssetSelector(reaction_edge=edge))
     # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
+    _Http = HttpClient
+    _Yahoo = YahooCollector
     _y = _Yahoo(_Http(cache_dir=dcfg.cache_dir, ttl=60))
 
     def lead_history(name, t_from, t_to):

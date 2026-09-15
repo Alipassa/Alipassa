@@ -244,7 +244,7 @@ class MarketAIEngine:
 
     # ------------------------------------------------------------------ histórico por mercado
     def refresh_history(self) -> None:
-        from .lifecycle import evaluate as lifecycle_evaluate
+        from .lifecycle import evaluate_parameter as lifecycle_evaluate
         if not hasattr(self, "lifecycle"):
             self.lifecycle = {}
             self._real_mode = {sym: eng.mode for sym, eng in self.engines.items()}

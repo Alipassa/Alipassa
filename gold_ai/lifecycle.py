@@ -17,6 +17,8 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
+from .reaction_hires import profit_factor
+
 TIERS = ((100, "alta confiança"), (50, "validado"), (30, "operacional"), (20, "candidato"), (10, "observação"))
 ALERT_STREAK, PROTECT_STREAK, SUSPEND_STREAK = 3, 4, 5
 
@@ -30,13 +32,6 @@ def tier(n: int) -> str:
 
 def tier_icon(n: int) -> str:
     return "🟢" if n >= 20 else "🟡" if n >= 10 else "🔴"
-
-
-def profit_factor(xs: Sequence[float]) -> Optional[float]:
-    wins, losses = sum(x for x in xs if x > 0), -sum(x for x in xs if x < 0)
-    if not xs:
-        return None
-    return (wins / losses) if losses > 0 else (float("inf") if wins > 0 else 0.0)
 
 
 def consecutive_losses(xs: Sequence[float]) -> int:
@@ -99,7 +94,7 @@ def _window(label: str, xs: Sequence[float]) -> Window:
     return Window(label, len(xs), statistics.fmean(xs) if xs else 0.0, profit_factor(xs), (sum(1 for x in xs if x > 0) / len(xs)) if xs else 0.0)
 
 
-def evaluate(name: str, results: Sequence[float], previous_action: str = "NORMAL") -> ParameterState:
+def evaluate_parameter(name: str, results: Sequence[float], previous_action: str = "NORMAL") -> ParameterState:
     """`results`: R por operação FECHADA, em ordem cronológica (fora da amostra por construção no live).
     `previous_action`: estado anterior (SUSPENSO/QUEBRADO persistem até a revalidação passar)."""
     xs = list(results)

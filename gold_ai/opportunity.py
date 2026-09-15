@@ -241,7 +241,7 @@ def funnel_stage(a, sig, gate_reason: str, decision: str, cfg, raw_min_score: fl
         return True, "POSICAO_ABERTA"
     if "prioridade" in d:
         return True, "PRIORIDADE"
-    if "CICLO DE VIDA" in decision_text or "PARÂMETRO" in decision_text:
+    if "ciclo de vida" in d or "parâmetro" in d:
         return True, "PARAMETRO"
     if "lote" in d or "stop" in d:
         return True, "STOP_LOTE"
