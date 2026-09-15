@@ -165,6 +165,13 @@ class MarketSnapshot:
     reaction_latency_min: Optional[float] = None
     reaction_expected_min: Optional[float] = None
     reaction_chain: str = ""
+    # FLOW ANOMALY ENGINE (5.0): informação implícita — movimento que revela algo que ainda não conhecemos
+    flow_score: int = 0
+    flow_status: str = "SEM ANOMALIA"       # SEM ANOMALIA | MOVIMENTO EXPLICADO | FLUXO ANÔMALO | REGIME ANÔMALO
+    flow_origin: str = "—"                  # A notícia · B macro · C intermarket · D institucional provável · E anômalo
+    flow_direction: float = 0.0
+    anomalous_regime: bool = False
+    flow_chain: str = ""
     # COT: último dado válido conhecido + idade (semanal; o peso decai com a idade)
     cot_age_days: Optional[float] = None
     cot_report_date: Optional[str] = None

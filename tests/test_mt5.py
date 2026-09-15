@@ -39,7 +39,8 @@ class FakeMT5:
 
     def copy_rates_from_pos(self, symbol, tf, start, n):
         step = self.MINUTES[tf] * 60
-        base = int(NOW.timestamp()) - n * step
+        from datetime import datetime as _dt, timezone as _tz
+        base = int(_dt.now(_tz.utc).timestamp()) - n * step      # termina AGORA (a fonte compara com a hora atual)
         rows = []
         p = 2650.0
         for i in range(n):

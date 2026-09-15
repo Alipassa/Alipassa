@@ -290,6 +290,9 @@ class HistoryFrame:
         elif s.us10y_change_bp is not None:
             s.real_yield_change_bp = s.us10y_change_bp  # aproximação: sem breakeven, usa nominal
         self._attach_events(s, t)
+        from .flow_anomaly import FlowAnomalyEngine
+        fa = FlowAnomalyEngine().assess(self.symbol, s, [], t)
+        s.flow_score, s.flow_status, s.flow_origin, s.flow_direction, s.anomalous_regime, s.flow_chain = fa.score, fa.status, fa.origin, fa.direction, fa.anomalous_regime, fa.chain
         return s
 
     def reaction_stats(self):

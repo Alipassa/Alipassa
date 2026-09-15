@@ -83,6 +83,37 @@ class MarketAIEngine:
         self.reaction_stats = ReactionStats(mem.reaction_records())
         self.pending_reactions: dict[str, dict] = {}     # event_id → {ev, exp/lead_dirs por ativo, série do alvo, séries líderes}
         self.reaction_horizon = min(horizon_min, 240)
+        # FLOW ANOMALY ENGINE (5.0): eventos implícitos ativos (mercado → IdentifiedEvent) e assinaturas do ciclo
+        from .flow_anomaly import FlowAnomalyEngine
+        self.flow_engine = FlowAnomalyEngine()
+        self.active_flows: dict[str, object] = {}
+        self.flow_assessments: dict = {}
+
+    def _flow_anomaly(self, snaps: MarketSnapshotSet) -> None:
+        """Informação implícita: movimento anormal sem explicação vira evento IMPLÍCITO no REACTION ENGINE (líder → atrasados)."""
+        now = snaps.time
+        self.flow_assessments = {}
+        for sym, snap in snaps.by_symbol.items():
+            fa = self.flow_engine.assess(sym, snap, snaps.identified, now, snaps.by_symbol)
+            self.flow_assessments[sym] = fa
+            snap.flow_score, snap.flow_status, snap.flow_origin, snap.flow_direction = fa.score, fa.status, fa.origin, fa.direction
+            snap.anomalous_regime, snap.flow_chain = fa.anomalous_regime, fa.chain
+            ev = fa.implicit_event(now)
+            if ev is not None and sym not in self.active_flows:
+                self.active_flows[sym] = ev
+                self.log(fa.chain)
+                self.sender.send(f"🟣 FLUXO ANÔMALO — {sym} {'↑' if fa.direction > 0 else '↓'} {fa.move_atr:+.2f} ATR · FLOW SCORE {fa.score} · origem NÃO identificada "
+                                 f"(assinatura {fa.signature})\n{fa.chain.splitlines()[1] if len(fa.chain.splitlines()) > 1 else ''}\n"
+                                 "Relógio de reação aberto nos demais mercados: procurando quem ainda está atrasado.")
+        # expira fluxos com mais de 2 h ou revertidos
+        for sym in list(self.active_flows):
+            ev = self.active_flows[sym]
+            fa = self.flow_assessments.get(sym)
+            if ev.age_min(now) > 120 or (fa is not None and fa.direction != 0 and fa.direction != ev.direction_sign * (1 if ev.kind.endswith("_up") else -1) and fa.score < 40):
+                del self.active_flows[sym]
+        for ev in self.active_flows.values():
+            if all(getattr(x, "kind", None) != ev.kind or getattr(x, "time", None) != ev.time for x in snaps.identified):
+                snaps.identified.append(ev)
 
     # ------------------------------------------------------------------ REACTION ENGINE (live)
     def _reaction_clock(self, snaps: MarketSnapshotSet) -> None:
@@ -169,7 +200,8 @@ class MarketAIEngine:
         first.commands = self.commands
         if self.commands is not None and any(c.startswith("/EDGE") for c in getattr(self.commands, "last_cmds", [])):
             self.daily_edge(snaps.time, pc, force=True)
-        # 0) REACTION ENGINE: relógio de reação por mercado + aprendizado dos eventos concluídos
+        # 0) FLOW ANOMALY (informação implícita) → REACTION ENGINE (relógio por mercado + aprendizado dos eventos concluídos)
+        self._flow_anomaly(snaps)
         self._reaction_clock(snaps)
         # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
         for sym, eng in self.engines.items():
@@ -202,7 +234,11 @@ class MarketAIEngine:
             if entered:
                 self.engines[sym].enter(r, snaps.by_symbol[sym], veto=f"PRIORIDADE — {pc.chosen} foi a melhor oportunidade do ciclo (OPP {pc.ranked[0].opportunity_score:.1f} vs {c.opportunity_score:.1f})")
                 continue
-            self.engines[sym].enter(r, snaps.by_symbol[sym])
+            snap_c = snaps.by_symbol[sym]
+            if snap_c.anomalous_regime and snap_c.flow_direction != 0 and ((c.direction == Direction.ALTA) != (snap_c.flow_direction > 0)):
+                self.engines[sym].enter(r, snap_c, veto=f"REGIME ANÔMALO em {sym} — entrada contra o fluxo anômalo adiada (FLOW {snap_c.flow_score})")
+                continue
+            self.engines[sym].enter(r, snap_c)
             pc.messages += [m for m in r.messages if m not in pc.messages]
             if r.decision.startswith(("🟢 PAPER OPEN", "🟢 POSITION OPEN")):
                 entered, pc.chosen = True, sym

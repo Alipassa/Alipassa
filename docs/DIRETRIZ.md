@@ -464,3 +464,12 @@ Regras:
     MAX_DAILY_LOSS=6 (duas perdas cheias), MAX_LOT=1.0, MAX_TOTAL_OPEN_RISK=6, MAX_CORRELATED_RISK=3. Aritmética: com 3%
     por operação, +10% = +3,33R líquidos no dia. O Reaction Engine só prioriza curtíssimo prazo depois de edge líquido
     comprovado (`reaction learn --tf BOTH`, veredito 🟢 com amostra).
+
+# ADENDO 5.0 — INFORMAÇÃO IMPLÍCITA (FLOW ANOMALY ENGINE)
+
+Explícito (news/macro/Fed) + implícito (fluxo/preço/volume) → EVENT & FLOW ENGINE → REACTION ENGINE → LEAD/LAG → PRESSÃO LATENTE
+→ PRE-MOVE → OPPORTUNITY → ASSET SELECTOR → TRADE → MONITOR → LEARNING. Regras: (1) FLOW SCORE 0–100 com componentes visíveis;
+(2) assinaturas A/B/C e origem A–E; (3) NUNCA nomear o comprador — "fluxo institucional provável, origem desconhecida" até haver
+evidência; (4) assinatura C com score ≥ 70 = ANOMALOUS FLOW REGIME: o modelo normal do ativo é suspenso e entradas contra o fluxo
+são adiadas; (5) o evento implícito entra no Reaction Engine como qualquer evento: a propagação é aprendida, não assumida; (6) o
+núcleo 4.0 (risco, MT5, monitor, Telegram, OOS, walk-forward, funil, selector) permanece intacto.

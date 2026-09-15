@@ -583,6 +583,34 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
     return verdicts
 
 
+def cmd_flow(args: argparse.Namespace) -> int:
+    """FLOW ANOMALY ENGINE agora: FLOW SCORE por mercado, assinatura, origem e mapa de propagação (líder → atrasados)."""
+    from .data import DataEngineConfig
+    from .data.multi import MultiMarketData
+    from .flow_anomaly import FlowAnomalyEngine, render_propagation
+    from .reaction import ReactionClock, ReactionStats
+
+    symbols = tuple(s.strip().upper() for s in args.markets.split(",") if s.strip())
+    mem = PredictionMemory(args.db)
+    data = MultiMarketData(symbols, DataEngineConfig(enable_cot=False, enable_fred=not args.no_fred, enable_news=not args.no_news))
+    snaps = data.collect()
+    print(data.coverage())
+    fe = FlowAnomalyEngine()
+    fas = {}
+    for sym, snap in snaps.by_symbol.items():
+        fas[sym] = fe.assess(sym, snap, snaps.identified, snaps.time, snaps.by_symbol)
+        print(fas[sym].chain)
+        ev = fas[sym].implicit_event(snaps.time)
+        if ev is not None:
+            snaps.identified.append(ev)
+    clock = ReactionClock(ReactionStats(mem.reaction_records()))
+    clocks = {sym: clock.assess(sym, snap, snaps.identified, snaps.time).chain for sym, snap in snaps.by_symbol.items()}
+    print()
+    print(render_propagation(fas, clocks))
+    mem.close()
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """DOCTOR: tudo está funcionando? qual a eficiência? — painel por camada com ação, e leitura do que está provado."""
     from .doctor import run_doctor
@@ -1205,6 +1233,13 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--csv-dir", default=None)
     hi.add_argument("--no-fred", action="store_true")
     hi.set_defaults(func=cmd_history)
+
+    fl = sub.add_parser("flow", help="5.0 FLOW ANOMALY ENGINE agora: FLOW SCORE, assinatura, origem (nunca 'banco central') e propagação líder → atrasados")
+    fl.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    fl.add_argument("--db", default="gold_ai.db")
+    fl.add_argument("--no-fred", action="store_true")
+    fl.add_argument("--no-news", action="store_true")
+    fl.set_defaults(func=cmd_flow)
 
     dc = sub.add_parser("doctor", help="tudo está funcionando? qual a eficiência? — painel por camada (✅ ⚠️ ❌) com ação e leitura do que está provado")
     dc.add_argument("--mt5", action="store_true", help="testa a conexão com o MetaTrader 5 (terminal aberto)")
