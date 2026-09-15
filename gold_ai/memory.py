@@ -352,6 +352,7 @@ class PredictionMemory:
             except ValueError:
                 continue
             out.append((t, float(r["capital"]), r["pnl"], r["nota"] or ""))
+        return out
 
     def neutralize_baseline_syncs(self, min_fraction: float = 0.25) -> int:
         """Reparo de registros antigos: um 'sync broker' que muda ≥ 25% do capital num único ciclo não é resultado de operação —
@@ -364,7 +365,6 @@ class PredictionMemory:
         if ids:
             self.conn.commit()
         return len(ids)
-        return out
 
     def equity_curve(self) -> list[tuple[datetime, float]]:
         return [(datetime.fromisoformat(r["hora"]), r["capital"]) for r in self.conn.execute("SELECT hora, capital FROM account ORDER BY id").fetchall()]
