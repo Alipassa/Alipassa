@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+
+from tests.test_mt5 import NumpyLike
 from datetime import datetime, timedelta, timezone
 
 from gold_ai import Direction
@@ -126,12 +128,12 @@ class MT5ExportTests(unittest.TestCase):
             COPY_TICKS_INFO = 1
 
             def copy_rates_range(self, symbol, tf, start, end):
-                return self.copy_rates_from_pos(symbol, tf, 0, 3)
+                return NumpyLike(self.copy_rates_from_pos(symbol, tf, 0, 3))
 
             def copy_ticks_range(self, symbol, start, end, flags):
                 base = int(start.timestamp()) * 1000
-                return [{"time": int(start.timestamp()), "time_msc": base + i * 250, "bid": 2650.0 + i * 0.01, "ask": 2650.3 + i * 0.01} for i in range(4)] + \
-                       [{"time": int(start.timestamp()) + 1, "time_msc": base + 1000, "bid": 0.0, "ask": 2650.5}]   # bid 0 → herda o anterior
+                return NumpyLike([{"time": int(start.timestamp()), "time_msc": base + i * 250, "bid": 2650.0 + i * 0.01, "ask": 2650.3 + i * 0.01} for i in range(4)] +
+                                 [{"time": int(start.timestamp()) + 1, "time_msc": base + 1000, "bid": 0.0, "ask": 2650.5}])   # bid 0 → herda o anterior
         c = MT5Client(MT5Config(symbol="XAUUSD"), mt5=Fake())
         c.connect()
         cs = c.rates_range("XAUUSD", "M1", T0, T0 + timedelta(hours=1))
@@ -347,11 +349,11 @@ class MT5ServerOffsetTests(unittest.TestCase):
             def copy_rates_range(self, symbol, tf, start, end):
                 self.asked["rates"] = (start, end)
                 base = int(start.timestamp())
-                return [{"time": base, "open": 1, "high": 2, "low": 0, "close": 1, "tick_volume": 1, "spread": 1, "real_volume": 0}]
+                return NumpyLike([{"time": base, "open": 1, "high": 2, "low": 0, "close": 1, "tick_volume": 1, "spread": 1, "real_volume": 0}])
 
             def copy_ticks_range(self, symbol, start, end, flags):
                 self.asked["ticks"] = (start, end)
-                return [{"time": int(start.timestamp()), "time_msc": int(start.timestamp()) * 1000, "bid": 1.0, "ask": 1.1}]
+                return NumpyLike([{"time": int(start.timestamp()), "time_msc": int(start.timestamp()) * 1000, "bid": 1.0, "ask": 1.1}])
         os.environ.pop("MT5_UTC_OFFSET_HOURS", None)
         c = MT5Client(MT5Config(symbol="XAUUSD"), mt5=Fake())
         c.connect()

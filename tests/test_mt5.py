@@ -38,6 +38,9 @@ class FakeMT5:
         self.shutdown_called = True
 
     def copy_rates_from_pos(self, symbol, tf, start, n):
+        return NumpyLike(self._rows(tf, n))
+
+    def _rows(self, tf, n):
         step = self.MINUTES[tf] * 60
         from datetime import datetime as _dt, timezone as _tz
         base = int(_dt.now(_tz.utc).timestamp()) - n * step      # termina AGORA (a fonte compara com a hora atual)
@@ -54,6 +57,13 @@ class FakeMT5:
     def order_send(self, req):
         self.sent.append(req)
         return SimpleNamespace(retcode=10009, order=12345, comment="done")
+
+
+class NumpyLike(list):
+    """Imita o structured array do numpy que o MetaTrader5 devolve: iterável, com len, mas SEM valor-verdade."""
+
+    def __bool__(self):
+        raise ValueError("The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()")
 
 
 class MT5Tests(unittest.TestCase):
