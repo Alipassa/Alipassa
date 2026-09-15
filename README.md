@@ -288,6 +288,8 @@ operações, reações, última análise há quanto tempo) e os resultados (`pro
 Fecha com a leitura de eficiência: o que está **provado** (vivido em PAPER/LIVE; OOS histórico) e o que ainda é hipótese.
 `rodar_tudo.bat` termina chamando o doctor. Scripts de 2 cliques: `rodar_tudo.bat` (pipeline), `rodar_live.bat` (PAPER 24/7),
 `rodar_live_demo.bat` (LIVE na conta DEMO: ordens reais com dinheiro fictício; trava `--demo-only` recusa conta real), `verificar.bat`.
+O M1 do MT5 vem em blocos de 14 dias, mas o terminal só guarda as últimas ~100 000 barras (~3 meses); `history prices --source dukascopy --tf M1 --full`
+baixa os candles M1 diários do Dukascopy e **completa** o `dados/<SYM>_m1.csv` sem sobrescrever as barras que o broker já deu (etapa 4b do `rodar_tudo.bat`).
 Os scripts de live mostram a saída **na janela e no log** (`--log-file logs\live_demo.log`, opção global que vale para qualquer subcomando):
 cada etapa da inicialização (conexão MT5, conta/tipo, fuso do servidor, coleta) sai com hora UTC, e cada ciclo imprime `coleta Xs · análise Ys`.
 O primeiro ciclo é o mais lento (baixa H1/H4/D1 de 5 mercados + FRED + CFTC + RSS); os seguintes usam cache e levam segundos.

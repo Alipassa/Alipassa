@@ -4316,6 +4316,7 @@ Hora sem dados (fim de semana, feriado) = 404 → vazio. Meses no caminho começ
 import lzma
 import struct
 
+
 DUKA_BASE = "https://datafeed.dukascopy.com/datafeed"
 
 # mercado do MARKET AI → (instrumento Dukascopy, escala de preço)
@@ -4348,6 +4349,25 @@ def parse_bi5(data: bytes, hour_start: datetime, scale: float) -> list[tuple[dat
 
 def hour_url(instrument: str, t: datetime) -> str:
     return f"{DUKA_BASE}/{instrument}/{t.year}/{t.month - 1:02d}/{t.day:02d}/{t.hour:02d}h_ticks.bi5"
+
+
+def day_candles_url(instrument: str, d: date, side: str = "BID") -> str:
+    """Candles M1 de um dia inteiro num arquivo só (BID_candles_min_1.bi5): 1 pedido por dia por instrumento."""
+    return f"{DUKA_BASE}/{instrument}/{d.year}/{d.month - 1:02d}/{d.day:02d}/{side}_candles_min_1.bi5"
+
+
+def parse_candles_bi5(data: bytes, day_start: datetime, scale: float) -> list[Candle]:
+    """Registro de 24 bytes big-endian: segundos desde 00:00 UTC, open, close, low, high (inteiros escalados), volume (float)."""
+    if not data:
+        return []
+    raw = lzma.decompress(data)
+    out = []
+    for off in range(0, len(raw) - len(raw) % 24, 24):
+        sec, o, c, lo, hi, vol = struct.unpack(">iiiiif", raw[off:off + 24])
+        if o <= 0 or c <= 0 or lo <= 0 or hi <= 0:
+            continue
+        out.append(Candle(day_start + timedelta(seconds=sec), o / scale, hi / scale, lo / scale, c / scale, float(vol)))
+    return out
 
 
 class DukascopyImporter:
@@ -4412,6 +4432,50 @@ class DukascopyImporter:
                 checkpoint(out)
             if self._log and (i // 24) % 10 == 9:
                 self._log(f"  {market}: {min(i + 24, len(uniq))}/{len(uniq)} horas · {len(out)} ticks")
+        return out
+
+    def m1_range(self, market: str, start: date, end: date, scale: Optional[float] = None,
+                 checkpoint: Optional[Callable[[list], None]] = None) -> list[Candle]:
+        """Candles M1 dia a dia (arquivo diário BID): cobre o que o terminal da corretora não guarda (limite de barras)."""
+        inst, sc = DUKA_INSTRUMENTS.get(market.upper(), (market.upper(), 1000.0))
+        sc = scale or sc
+        days = []
+        d = start
+        while d <= end:
+            if d.weekday() != 5:                                      # sábado sem pregão; domingo tem a abertura (21h)
+                days.append(d)
+            d += timedelta(days=1)
+        if self._log:
+            self._log(f"Dukascopy {market}: M1 de {len(days)} dias ({start} → {end})")
+        out: list[Candle] = []
+        for i, d in enumerate(days):
+            day_start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+            data = None
+            for attempt in range(self.retries + 1):
+                try:
+                    recent = day_start > datetime.now(timezone.utc) - timedelta(days=3)
+                    data = self.http.get_bytes(day_candles_url(inst, d), ttl=(3600 if recent else 365 * 24 * 3600), allow_404=True)
+                    if self.pace:
+                        self._sleep(self.pace)
+                    break
+                except (DataError, OSError, EOFError) as e:
+                    if attempt == self.retries:
+                        self.failed.append((inst, day_start, str(e)[-80:]))
+                        if self._log:
+                            self._log(f"  {inst} {d}: FALHOU após {self.retries + 1} tentativas — pulado (repita o comando para completar)")
+                    else:
+                        self._sleep(min(60.0, 3.0 * (2 ** attempt)))
+            if data is None:
+                continue
+            try:
+                out += parse_candles_bi5(data, day_start, sc)
+            except Exception as e:  # noqa: BLE001
+                self.failed.append((inst, day_start, f"bi5 inválido: {e}"))
+            if checkpoint and i % 20 == 19:
+                checkpoint(out)
+            if self._log and i % 40 == 39:
+                self._log(f"  {market}: {i + 1}/{len(days)} dias · {len(out)} candles M1")
+        out.sort(key=lambda c: c.time)
         return out
 
     def range(self, market: str, start: date, end: date, scale: Optional[float] = None, checkpoint: Optional[Callable[[list], None]] = None) -> list:
@@ -11778,6 +11842,16 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_candles_csv(path: str) -> list:
+    import csv as _csv
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for r in _csv.DictReader(f):
+            t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
+            out.append(Candle(t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r.get("volume") or 0)))
+    return sorted(out, key=lambda c: c.time)
+
+
 def cmd_history(args: argparse.Namespace) -> int:
     """BANCO HISTÓRICO DE EVENTOS/NOTÍCIAS (point-in-time): template · fetch-te · fetch-alfred · fetch-gdelt · rules · learn · stats."""
 
@@ -11794,6 +11868,32 @@ def cmd_history(args: argparse.Namespace) -> int:
         out_dir = args.out_dir or "dados"
         os.makedirs(out_dir, exist_ok=True)
         symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
+        if args.tf.upper() == "M1":
+            # candles M1 diários: completa o {sym}_m1.csv do MT5 (que só guarda as últimas ~100 000 barras) sem sobrescrever o que o broker deu
+            hard_failed = False
+            for sym in symbols:
+                inst, sc = DUKA_INSTRUMENTS.get(sym, (sym, 1000.0))
+                dest = os.path.join(out_dir, f"{sym}_m1.csv")
+                existing = _read_candles_csv(dest) if os.path.exists(dest) else []
+                have = {c.time for c in existing}
+
+                def merged(new, existing=existing, have=have):
+                    return sorted(existing + [c for c in new if c.time not in have], key=lambda c: c.time)
+                try:
+                    cs = imp.m1_range(sym, start, end, args.scale, checkpoint=lambda c, d=dest, m=merged: save_candles(m(c), d))
+                except Exception as e:  # noqa: BLE001
+                    print(f"{sym} ({inst}): FALHOU — {e}")
+                    hard_failed = True
+                    continue
+                allc = merged(cs)
+                n = save_candles(allc, dest)
+                added = len(allc) - len(existing)
+                span = f" · de {allc[0].time:%d/%m/%Y} a {allc[-1].time:%d/%m/%Y}" if allc else ""
+                print(f"{sym} ({inst}, escala {args.scale or sc:g}): {len(cs)} candles M1 do Dukascopy · {added} novos · {n} no arquivo{span} → {dest}")
+            if imp.failed or hard_failed:
+                print(f"\n{len(imp.failed)} dia(s) falharam. Repita o mesmo comando: os já baixados estão em cache.")
+                return 2
+            return 0
         ev_times = []
         hard_failed = False
         if not args.full:
@@ -12722,7 +12822,7 @@ def _main(argv: list[str]) -> int:
 
     hi = sub.add_parser("history", help="BANCO HISTÓRICO point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats | list | prices (M1/ticks do MT5)")
     hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list", "prices"])
-    hi.add_argument("--tf", default="M1", help="prices: M1 | M5 | TICK (ticks bid/ask, blocos diários)")
+    hi.add_argument("--tf", default="TICK", help="prices: TICK (ticks bid/ask) | M1 (mt5: blocos de 14 dias; dukascopy: candles diários, completa o CSV do MT5) | M5")
     hi.add_argument("--source", choices=["mt5", "dukascopy"], default="dukascopy", help="prices: dukascopy (ticks gratuitos, sem chave) | mt5 (terminal logado)")
     hi.add_argument("--full", action="store_true", help="prices dukascopy: período inteiro (padrão: só horas ao redor dos eventos macro)")
     hi.add_argument("--before", type=int, default=4, help="prices dukascopy: horas antes de cada evento")

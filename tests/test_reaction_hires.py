@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 from tests.test_mt5 import NumpyLike
 from datetime import datetime, timedelta, timezone
@@ -370,3 +371,57 @@ class MT5ServerOffsetTests(unittest.TestCase):
             self.assertEqual(c2.server_offset_hours, 2.0)
         finally:
             os.environ.pop("MT5_UTC_OFFSET_HOURS", None)
+
+
+class DukascopyM1Tests(unittest.TestCase):
+    @staticmethod
+    def _day(rows):
+        import lzma
+        import struct
+        return lzma.compress(b"".join(struct.pack(">iiiiif", sec, o, c, lo, hi, 1.5) for sec, o, c, lo, hi in rows))
+
+    def test_parse_daily_candles(self):
+        from gold_ai.data.dukascopy import day_candles_url, parse_candles_bi5
+        from datetime import date
+        d0 = datetime(2026, 2, 3, tzinfo=UTC)
+        self.assertEqual(day_candles_url("XAUUSD", date(2026, 2, 3)), "https://datafeed.dukascopy.com/datafeed/XAUUSD/2026/01/03/BID_candles_min_1.bi5")
+        cs = parse_candles_bi5(self._day([(0, 2500000, 2500500, 2499800, 2500700), (60, 2500500, 2500200, 2500100, 2500900), (120, 0, 1, 1, 1)]), d0, 1000.0)
+        self.assertEqual(len(cs), 2)                                    # candle com open 0 descartado
+        self.assertEqual(cs[1].time, d0 + timedelta(minutes=1))
+        self.assertAlmostEqual(cs[0].open, 2500.0)
+        self.assertAlmostEqual(cs[0].high, 2500.7)
+        self.assertAlmostEqual(cs[0].low, 2499.8)
+        self.assertAlmostEqual(cs[0].close, 2500.5)
+        self.assertEqual(parse_candles_bi5(b"", d0, 1000.0), [])
+
+    def test_m1_range_skips_saturday_and_merges_into_mt5_csv(self):
+        import os
+        import tempfile
+        from datetime import date
+        from gold_ai.data.dukascopy import DukascopyImporter
+        from gold_ai.reaction_hires import save_candles
+        from gold_ai import cli
+        from gold_ai.models import Candle
+        days = self._day
+        calls = []
+
+        class Http:
+            def get_bytes(self, url, ttl=None, allow_404=False):
+                calls.append(url)
+                return days([(0, 2500000, 2500500, 2499800, 2500700)])
+        imp = DukascopyImporter(Http(), sleep=lambda s: None, pace=0)
+        cs = imp.m1_range("XAUUSD", date(2026, 2, 6), date(2026, 2, 9))     # sex, sáb, dom, seg
+        self.assertEqual(len(calls), 3)                                     # sábado não é pedido
+        self.assertTrue(all("/01/0" in u for u in calls))
+        self.assertEqual([c.time.day for c in cs], [6, 8, 9])
+        # CLI: completa o CSV do MT5 sem sobrescrever as barras que o broker já deu
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch("gold_ai.data.dukascopy.DukascopyImporter.m1_range", lambda self, *a, **k: cs):
+            dest = os.path.join(d, "XAUUSD_m1.csv")
+            mt5_bar = Candle(datetime(2026, 2, 9, tzinfo=UTC), 9.0, 9.0, 9.0, 9.0, 1.0)     # mesma hora que o Dukascopy → prevalece o broker
+            save_candles([mt5_bar, Candle(datetime(2026, 6, 1, tzinfo=UTC), 1, 1, 1, 1, 1)], dest)
+            rc = cli.main(["history", "prices", "--source", "dukascopy", "--tf", "M1", "--full", "--markets", "XAUUSD", "--start", "2026-02-06", "--end", "2026-02-09",
+                           "--out-dir", d, "--file", os.path.join(d, "none.csv")])
+            self.assertEqual(rc, 0)
+            rows = cli._read_candles_csv(dest)
+            self.assertEqual(len(rows), 4)
+            self.assertEqual([c for c in rows if c.time.day == 9 and c.time.month == 2][0].open, 9.0)

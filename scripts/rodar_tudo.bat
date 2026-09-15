@@ -37,8 +37,12 @@ set "NOME=3/8 MT5 ticks desde junho"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" history prices --source mt5 --tf TICK --markets %MERCADOS% --extra USDX --start 2026-06-01"
 call :passo
 
-set "NOME=4/8 MT5 M1 desde janeiro"
+set "NOME=4/8 MT5 M1 desde janeiro (o terminal guarda ~100 000 barras: ~3 meses)"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" history prices --source mt5 --tf M1 --markets %MERCADOS% --extra USDX --start %INICIO%"
+call :passo
+
+set "NOME=4b/8 Dukascopy M1 diario - completa o que o terminal nao guarda (janeiro ate junho)"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" history prices --source dukascopy --tf M1 --full --markets %MERCADOS% --extra USDX --start %INICIO% --end %FIM%"
 call :passo
 
 echo.
