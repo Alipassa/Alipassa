@@ -348,3 +348,39 @@ class EvaluationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CftcFinancialFuturesTests(unittest.TestCase):
+    def test_financial_code_uses_tff_report_and_leveraged_funds(self):
+        from gold_ai.data.cftc import CftcCollector, FINANCIAL_CODES
+        from gold_ai.data.http import DataError
+        calls = []
+
+        class Http:
+            def get_json(self, url, ttl=0):
+                calls.append(url)
+                if "72hh-3qpy" in url:
+                    return []                                   # commodities: código de moeda não existe aqui
+                return [{"report_date_as_yyyy_mm_dd": "2026-09-01T00:00:00.000", "lev_money_positions_long_all": "100", "lev_money_positions_short_all": "40",
+                         "dealer_positions_long_all": "10", "dealer_positions_short_all": "30"},
+                        {"report_date_as_yyyy_mm_dd": "2026-09-08T00:00:00.000", "lev_money_positions_long_all": "120", "lev_money_positions_short_all": "40",
+                         "dealer_positions_long_all": "10", "dealer_positions_short_all": "50"}]
+        self.assertIn("099741", FINANCIAL_CODES)
+        r = CftcCollector(Http()).gold(code="099741")
+        self.assertIn("gpe5-46if", calls[0])                       # relatório financeiro consultado primeiro
+        self.assertEqual(r.managed_money_net, 80.0)
+        self.assertEqual(r.managed_money_net_change, 20.0)
+        self.assertEqual(r.commercial_net_change, -20.0)
+
+    def test_commodity_code_falls_back_to_other_report_when_empty(self):
+        from gold_ai.data.cftc import CftcCollector
+        from gold_ai.data.http import DataError
+        calls = []
+
+        class Http:
+            def get_json(self, url, ttl=0):
+                calls.append(url)
+                return []
+        with self.assertRaises(DataError):
+            CftcCollector(Http()).gold(code="088691")
+        self.assertEqual(len(calls), 2)
