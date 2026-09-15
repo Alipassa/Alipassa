@@ -11421,6 +11421,16 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         try:
             mt5_client = MT5Client(mcfg)
             mt5_client.connect()
+            if mode != TradingMode.PAPER:
+                # TRAVA DE CONTA: com --demo-only (padrão) o modo real só roda em conta DEMO da corretora
+                info = mt5_client.mt5.account_info()
+                trade_mode = int(getattr(info, "trade_mode", -1)) if info is not None else -1     # 0 = demo · 1 = contest · 2 = real
+                acct = f"conta {getattr(info, 'login', '?')} · {getattr(info, 'server', '?')} · saldo {float(getattr(info, 'balance', 0.0)):,.2f} {getattr(info, 'currency', '')}"
+                kind = {0: "DEMO", 1: "CONTEST", 2: "REAL"}.get(trade_mode, "DESCONHECIDA")
+                print(f"MT5: {acct} · tipo {kind}")
+                if getattr(args, "demo_only", True) and trade_mode != 0:
+                    print("🛑 TRAVA: modo real pedido mas a conta NÃO é demo (ou não foi possível confirmar). Use --no-demo-only apenas quando decidir operar dinheiro real.")
+                    return 1
         except Exception as e:  # noqa: BLE001
             print(f"MT5 indisponível: {e}")
             if mode != TradingMode.PAPER:
@@ -12360,6 +12370,8 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--mode", choices=["paper", "authorize", "semi-live", "live"], default="paper",
                     help="🟢 paper (padrão) · 🟡 authorize · 🟠 semi-live · 🔴 live (exige --authorize)")
     lv.add_argument("--authorize", action="store_true", help="autoriza a próxima entrada (AUTHORIZE) / habilita LIVE")
+    lv.add_argument("--no-demo-only", dest="demo_only", action="store_false", default=True,
+                    help="permite modo real em conta REAL (padrão: só em conta DEMO da corretora — trava de segurança)")
     lv.add_argument("--equity", type=float, default=10000.0, help="capital inicial (PAPER); em LIVE vem do broker")
     lv.add_argument("--horizon", type=int, default=240, help="minutos para resolver cada previsão/operação")
     lv.add_argument("--calibrator", default="calibrator.json", help="JSON gerado por `calibrate` (ignorado se não existir)")

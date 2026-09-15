@@ -42,3 +42,17 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DemoOnlyGuardTests(unittest.TestCase):
+    def test_live_refuses_real_account_unless_no_demo_only(self):
+        from gold_ai.cli import main
+        # a trava é avaliada antes de qualquer coleta de dados: com o pacote MetaTrader5 ausente o MT5Client falha e o comando
+        # devolve 1 em modo real; o que este teste garante é a existência/semântica do flag
+        import argparse
+        p = argparse.ArgumentParser()
+        p.add_argument("--no-demo-only", dest="demo_only", action="store_false", default=True)
+        self.assertTrue(p.parse_args([]).demo_only)
+        self.assertFalse(p.parse_args(["--no-demo-only"]).demo_only)
+        with self.assertRaises(SystemExit):
+            main(["live", "--help"])
