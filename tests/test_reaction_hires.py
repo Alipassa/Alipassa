@@ -470,3 +470,32 @@ class LeadLagEpisodeTests(unittest.TestCase):
         self.assertTrue(all(r.kind == "flow_XAUUSD_down" for r in recs))
         self.assertTrue(next(r for r in recs if r.target == "EURUSD").direction_correct)
         self.assertIsNone(next(r for r in recs if r.target == "USDJPY").time_to_first)
+
+
+class CorruptedCsvTests(unittest.TestCase):
+    def test_load_ticks_skips_truncated_rows_and_warns(self):
+        import os
+        import tempfile
+        from gold_ai.reaction_hires import load_ticks
+        msgs = []
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "USDX_ticks.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("time,bid,ask\n2026-05-12T10:00:00+00:00,100.1,100.2\n2026-05-1\n2026-05-12T10:00:01+00:00,abc,100.2\n"
+                        "2026-05-12T09:59:59+00:00,100.0,100.1\n")
+            ticks = load_ticks(p, msgs.append)
+        self.assertEqual(len(ticks), 2)
+        self.assertLess(ticks[0][0], ticks[1][0])                      # ordenado
+        self.assertTrue(msgs and "2 linha(s) inválida(s)" in msgs[0])
+
+    def test_read_candles_csv_skips_truncated_rows(self):
+        import os
+        import tempfile
+        from gold_ai import cli
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "XAUUSD_m1.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("time,open,high,low,close,volume\n2026-05-12T10:00:00+00:00,1,2,0.5,1.5,10\n2026-05-1,1,2\n2026-05-12T10:01:00+00:00,1.5,2,1,1.8,\n")
+            rows = cli._read_candles_csv(p)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1].volume, 0.0)

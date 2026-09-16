@@ -137,8 +137,13 @@ def autotune_market(market: str, bt: Backtester, grid: Optional[dict] = None, n_
     rows = sorted((r for res in policy_runs for r in res.trade_rows), key=lambda r: r["time"])
     tune.oos_results = [float(r["results"].get(strategy, r["results"].get("3R"))) for r in rows if r["results"].get(strategy, r["results"].get("3R")) is not None]
     tune.default_oos = _metrics(default_runs, float("nan"), strategy, equity, risk_pct)
+    # recomendação: mais votada nos blocos; empate decidido pelo que a escolha RENDEU nos blocos de teste (R somado), não pela ordem
     votes = Counter(json.dumps(p.params, sort_keys=True) for p in tune.picks)
-    tune.recommended = json.loads(votes.most_common(1)[0][0]) if votes else dict(dflt)
+    earned: dict[str, float] = {}
+    for p in tune.picks:
+        key = json.dumps(p.params, sort_keys=True)
+        earned[key] = earned.get(key, 0.0) + p.test.expectancy * p.test.n
+    tune.recommended = json.loads(max(votes, key=lambda k: (votes[k], earned.get(k, 0.0)))) if votes else dict(dflt)
     return tune
 
 

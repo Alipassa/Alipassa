@@ -322,11 +322,21 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 def _read_candles_csv(path: str) -> list:
     import csv as _csv
     from .models import Candle
-    out = []
-    with open(path, encoding="utf-8") as f:
+    from .reaction_hires import parse_time
+    out, bad = [], 0
+    with open(path, encoding="utf-8", errors="replace") as f:
         for r in _csv.DictReader(f):
-            t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
-            out.append(Candle(t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r.get("volume") or 0)))
+            t = parse_time(r.get("time"))
+            try:
+                vals = [float(r[k]) for k in ("open", "high", "low", "close")]
+            except (KeyError, ValueError, TypeError):
+                t = None
+            if t is None:
+                bad += 1
+                continue
+            out.append(Candle(t, *vals, float(r.get("volume") or 0)))
+    if bad:
+        print(f"[aviso] {os.path.basename(path)}: {bad} linha(s) inválida(s) ignorada(s) (arquivo com trecho truncado); {len(out)} candles válidos")
     return sorted(out, key=lambda c: c.time)
 
 
@@ -600,13 +610,13 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
         p_t = os.path.join(csv_dir, f"{sym}_ticks.csv")
         p_c = os.path.join(csv_dir, f"{sym}_{tf.lower()}.csv")
         if tf == "TICK" and os.path.exists(p_t):
-            return PricePath.from_ticks(load_ticks(p_t)), "ticks"
+            return PricePath.from_ticks(load_ticks(p_t, print)), "ticks"
         if os.path.exists(p_c):
             return PricePath.from_candles(read_candles(p_c), spread, 1 if tf == "M1" else 5), tf
         if os.path.exists(p_t):
             if tf in ("M1", "M5"):
-                return PricePath.from_ticks(load_ticks(p_t)).resample(1 if tf == "M1" else 5), f"{tf} (reamostrado dos ticks)"
-            return PricePath.from_ticks(load_ticks(p_t)), "ticks"
+                return PricePath.from_ticks(load_ticks(p_t, print)).resample(1 if tf == "M1" else 5), f"{tf} (reamostrado dos ticks)"
+            return PricePath.from_ticks(load_ticks(p_t, print)), "ticks"
         return None, ""
 
     leads = {}

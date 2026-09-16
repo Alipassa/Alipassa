@@ -96,3 +96,24 @@ class LifecycleSeedTests(unittest.TestCase):
             self.assertEqual(eng.engines["XAUUSD"].engine.cfg.min_confirmations, 2)
             self.assertEqual(eng.engines["US500"].engine.cfg.min_confirmations, 3)
             mem.close()
+
+
+class AutotuneTieBreakTests(unittest.TestCase):
+    def test_tie_between_params_goes_to_the_one_that_earned_more_in_test(self):
+        import json
+        from collections import Counter
+        from gold_ai.autotune import FoldPick, MarketTune
+        from gold_ai.sweep import FloorMetrics
+        m = lambda n, e: FloorMetrics(25.0, n, 10.0, e, 0.5, None, 1.0, None, None)  # noqa: E731
+        a, b = {"min_edge_score": 35.0, "min_confirmations": 2, "signal_score": 40}, {"min_edge_score": 25.0, "min_confirmations": 2, "signal_score": 40}
+        picks = [FoldPick(1, a, m(5, 0.3), m(1, 2.72)), FoldPick(2, a, m(5, 0.5), m(0, 0.0)),
+                 FoldPick(3, b, m(10, 0.5), m(4, 0.81)), FoldPick(4, b, m(11, 0.5), m(4, -0.04))]
+        # mesma regra do autotune_market, isolada: 2 votos cada; 'a' rendeu 2.72R, 'b' rendeu 3.24 − 0.16 = 3.08R → 'b'
+        votes = Counter(json.dumps(p.params, sort_keys=True) for p in picks)
+        earned = {}
+        for p in picks:
+            k = json.dumps(p.params, sort_keys=True)
+            earned[k] = earned.get(k, 0.0) + p.test.expectancy * p.test.n
+        best = json.loads(max(votes, key=lambda k: (votes[k], earned.get(k, 0.0))))
+        self.assertEqual(best, b)
+        self.assertGreater(earned[json.dumps(b, sort_keys=True)], earned[json.dumps(a, sort_keys=True)])

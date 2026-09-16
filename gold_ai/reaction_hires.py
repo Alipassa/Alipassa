@@ -13,10 +13,11 @@ saída em 5 min (reação) ou até 60 min com stop (continuação). Nada aqui af
 from __future__ import annotations
 
 import csv
+import os
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from .models import Candle
 from .reaction import CONFIRM_ATR, FIRST_ATR, LEAD_THRESHOLDS, ReactionRecord
@@ -343,12 +344,33 @@ def save_ticks(ticks: Sequence[tuple[datetime, float, float]], path: str) -> int
     return len(ticks)
 
 
-def load_ticks(path: str) -> list[tuple[datetime, float, float]]:
-    out = []
-    with open(path, encoding="utf-8") as f:
+def parse_time(value: str) -> Optional[datetime]:
+    """ISO-8601 tolerante: devolve None para linha truncada/corrompida ('2026-05-1', vazio) em vez de derrubar a etapa."""
+    try:
+        t = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def load_ticks(path: str, log: Optional[Callable[[str], None]] = None) -> list[tuple[datetime, float, float]]:
+    """Ticks de um CSV time,bid,ask. Linhas inválidas (tempo truncado, número faltando — típico de export interrompido) são
+    puladas e contadas; o arquivo continua utilizável. Ordena por tempo e remove duplicatas exatas."""
+    out, bad = [], 0
+    with open(path, encoding="utf-8", errors="replace") as f:
         for r in csv.DictReader(f):
-            t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
-            out.append((t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["bid"]), float(r["ask"])))
+            t = parse_time(r.get("time"))
+            try:
+                b, a = float(r.get("bid") or ""), float(r.get("ask") or "")
+            except ValueError:
+                t = None
+            if t is None:
+                bad += 1
+                continue
+            out.append((t, b, a))
+    if bad and log:
+        log(f"[aviso] {os.path.basename(path)}: {bad} linha(s) inválida(s) ignorada(s) — arquivo de ticks com trecho corrompido/interrompido; {len(out)} ticks válidos")
+    out.sort(key=lambda x: x[0])
     return out
 
 

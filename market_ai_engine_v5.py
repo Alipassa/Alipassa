@@ -6520,12 +6520,33 @@ def save_ticks(ticks: Sequence[tuple[datetime, float, float]], path: str) -> int
     return len(ticks)
 
 
-def load_ticks(path: str) -> list[tuple[datetime, float, float]]:
-    out = []
-    with open(path, encoding="utf-8") as f:
+def parse_time(value: str) -> Optional[datetime]:
+    """ISO-8601 tolerante: devolve None para linha truncada/corrompida ('2026-05-1', vazio) em vez de derrubar a etapa."""
+    try:
+        t = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def load_ticks(path: str, log: Optional[Callable[[str], None]] = None) -> list[tuple[datetime, float, float]]:
+    """Ticks de um CSV time,bid,ask. Linhas inválidas (tempo truncado, número faltando — típico de export interrompido) são
+    puladas e contadas; o arquivo continua utilizável. Ordena por tempo e remove duplicatas exatas."""
+    out, bad = [], 0
+    with open(path, encoding="utf-8", errors="replace") as f:
         for r in csv.DictReader(f):
-            t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
-            out.append((t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["bid"]), float(r["ask"])))
+            t = parse_time(r.get("time"))
+            try:
+                b, a = float(r.get("bid") or ""), float(r.get("ask") or "")
+            except ValueError:
+                t = None
+            if t is None:
+                bad += 1
+                continue
+            out.append((t, b, a))
+    if bad and log:
+        log(f"[aviso] {os.path.basename(path)}: {bad} linha(s) inválida(s) ignorada(s) — arquivo de ticks com trecho corrompido/interrompido; {len(out)} ticks válidos")
+    out.sort(key=lambda x: x[0])
     return out
 
 
@@ -11839,8 +11860,13 @@ def autotune_market(market: str, bt: Backtester, grid: Optional[dict] = None, n_
     rows = sorted((r for res in policy_runs for r in res.trade_rows), key=lambda r: r["time"])
     tune.oos_results = [float(r["results"].get(strategy, r["results"].get("3R"))) for r in rows if r["results"].get(strategy, r["results"].get("3R")) is not None]
     tune.default_oos = _metrics(default_runs, float("nan"), strategy, equity, risk_pct)
+    # recomendação: mais votada nos blocos; empate decidido pelo que a escolha RENDEU nos blocos de teste (R somado), não pela ordem
     votes = Counter(json.dumps(p.params, sort_keys=True) for p in tune.picks)
-    tune.recommended = json.loads(votes.most_common(1)[0][0]) if votes else dict(dflt)
+    earned: dict[str, float] = {}
+    for p in tune.picks:
+        key = json.dumps(p.params, sort_keys=True)
+        earned[key] = earned.get(key, 0.0) + p.test.expectancy * p.test.n
+    tune.recommended = json.loads(max(votes, key=lambda k: (votes[k], earned.get(k, 0.0)))) if votes else dict(dflt)
     return tune
 
 
@@ -13534,11 +13560,20 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 
 def _read_candles_csv(path: str) -> list:
     import csv as _csv
-    out = []
-    with open(path, encoding="utf-8") as f:
+    out, bad = [], 0
+    with open(path, encoding="utf-8", errors="replace") as f:
         for r in _csv.DictReader(f):
-            t = datetime.fromisoformat(r["time"].replace("Z", "+00:00"))
-            out.append(Candle(t if t.tzinfo else t.replace(tzinfo=timezone.utc), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), float(r.get("volume") or 0)))
+            t = parse_time(r.get("time"))
+            try:
+                vals = [float(r[k]) for k in ("open", "high", "low", "close")]
+            except (KeyError, ValueError, TypeError):
+                t = None
+            if t is None:
+                bad += 1
+                continue
+            out.append(Candle(t, *vals, float(r.get("volume") or 0)))
+    if bad:
+        print(f"[aviso] {os.path.basename(path)}: {bad} linha(s) inválida(s) ignorada(s) (arquivo com trecho truncado); {len(out)} candles válidos")
     return sorted(out, key=lambda c: c.time)
 
 
@@ -13789,13 +13824,13 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
         p_t = os.path.join(csv_dir, f"{sym}_ticks.csv")
         p_c = os.path.join(csv_dir, f"{sym}_{tf.lower()}.csv")
         if tf == "TICK" and os.path.exists(p_t):
-            return PricePath.from_ticks(load_ticks(p_t)), "ticks"
+            return PricePath.from_ticks(load_ticks(p_t, print)), "ticks"
         if os.path.exists(p_c):
             return PricePath.from_candles(read_candles(p_c), spread, 1 if tf == "M1" else 5), tf
         if os.path.exists(p_t):
             if tf in ("M1", "M5"):
-                return PricePath.from_ticks(load_ticks(p_t)).resample(1 if tf == "M1" else 5), f"{tf} (reamostrado dos ticks)"
-            return PricePath.from_ticks(load_ticks(p_t)), "ticks"
+                return PricePath.from_ticks(load_ticks(p_t, print)).resample(1 if tf == "M1" else 5), f"{tf} (reamostrado dos ticks)"
+            return PricePath.from_ticks(load_ticks(p_t, print)), "ticks"
         return None, ""
 
     leads = {}
