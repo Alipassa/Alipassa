@@ -13854,11 +13854,16 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
         return None, ""
 
     leads = {}
+    # sinal do líder USD: USDX/DXY/USDJPY sobem com o dólar; EURUSD/GBPUSD/AUDUSD/XAUUSD caem (dólar é a moeda cotada) → inverte
+    USD_LEADER_SIGN = {"USDX": 1.0, "DXY": 1.0, "USDJPY": 1.0, "USDCHF": 1.0, "USDCAD": 1.0, "EURUSD": -1.0, "GBPUSD": -1.0, "AUDUSD": -1.0,
+                       "NZDUSD": -1.0, "XAUUSD": -1.0}
+    usd_sign = 1.0
     if args.lead_usd:
         lp, kind = load_path(args.lead_usd.upper(), 0.0)
         if lp:
             leads["USD"] = lp
-            print(f"líder USD: {args.lead_usd} ({kind})")
+            usd_sign = USD_LEADER_SIGN.get(args.lead_usd.upper(), 1.0)
+            print(f"líder USD: {args.lead_usd} ({kind})" + (" · sinal invertido: este par cai quando o dólar sobe" if usd_sign < 0 else ""))
         else:
             print(f"líder USD {args.lead_usd}: arquivo não encontrado em {csv_dir} (sem líder USD → lead-lag e trade sim ficam vazios)")
     if args.lead_yield:
@@ -13893,16 +13898,21 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
             if exp == 0.0:
                 continue
             chans = TRANSMISSION.get(e.kind) or EXTRA_TRANSMISSION.get(e.kind) or {}
-            lead_dirs = {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}
-            per_instant.setdefault(e.published_at.replace(second=0, microsecond=0), []).append((e, exp, lead_dirs, abs(sigma or 0.0)))
+            lead_dirs = {"USD": usd_sign * sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}
+            per_instant.setdefault(e.published_at.replace(second=0, microsecond=0), []).append((e, exp, lead_dirs, abs(sigma) if sigma is not None else 1.0))
         ambiguous, merged = 0, 0
         for t0, items in sorted(per_instant.items()):
-            dirs = {x[1] for x in items}
-            if len(dirs) > 1:
+            # a SURPRESA MAIOR decide (NFP forte + desemprego pior no mesmo segundo → vence quem surpreendeu mais, em desvios típicos);
+            # ambíguo só quando as surpresas se anulam
+            vote = sum(x[1] * x[3] for x in items)
+            if abs(vote) < 1e-9:
                 ambiguous += 1
                 continue
-            items.sort(key=lambda x: -x[3])                                   # a maior surpresa dá o canal líder
-            e, exp, lead_dirs, _ = items[0]
+            items.sort(key=lambda x: -x[3])
+            e, _, lead_dirs, _ = items[0]
+            exp = 1.0 if vote > 0 else -1.0
+            if items[0][1] != exp:                                            # canal do líder segue a direção vencedora
+                lead_dirs = {k: -v for k, v in lead_dirs.items()}
             label = "+".join(sorted({x[0].kind for x in items}))
             merged += len(items) - 1
             atr = path.atr_at(e.published_at)
