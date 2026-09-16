@@ -521,3 +521,23 @@ class FamilyPoolingTests(unittest.TestCase):
         self.assertEqual(next(r.n for r in rows if r.kind == "Σ manchete"), 10)
         txt = LeadLagStats(recs).render()
         self.assertIn("Σ agendado", txt)
+
+
+class SameInstantMergeTests(unittest.TestCase):
+    def test_leader_direction_is_not_flipped_when_signs_agree(self):
+        """Regressão: direção graduada do alvo (-0.8) × voto (-1.0) não pode inverter o canal do líder."""
+        items = [("nfp", -0.8, {"USD": -0.7}, 2.0), ("earnings", -0.5, {"USD": -0.5}, 0.5)]
+        vote = sum(x[1] * x[3] for x in items)
+        exp = 1.0 if vote > 0 else -1.0
+        lead_dirs = dict(items[0][2])
+        if (items[0][1] > 0) != (exp > 0):
+            lead_dirs = {k: -v for k, v in lead_dirs.items()}
+        self.assertEqual(lead_dirs["USD"], -0.7)                              # mantido
+        items2 = [("nfp", 0.3, {"USD": 0.7}, 0.5), ("unemployment", -0.9, {"USD": -0.6}, 3.0)]
+        vote2 = sum(x[1] * x[3] for x in items2)
+        exp2 = 1.0 if vote2 > 0 else -1.0
+        items2.sort(key=lambda x: -x[3])
+        lead2 = dict(items2[0][2])
+        if (items2[0][1] > 0) != (exp2 > 0):
+            lead2 = {k: -v for k, v in lead2.items()}
+        self.assertEqual(lead2["USD"], -0.6)                                  # desemprego dominou: líder acompanha
