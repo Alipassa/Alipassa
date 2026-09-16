@@ -6284,6 +6284,7 @@ class HiResRecord:
     spread_atr: float = 0.0
     lead_lag_sec: Optional[float] = None       # 1ª reação do alvo − 1ª reação do líder mais rápido (s)
     lead_first_sec: Optional[float] = None
+    lead_move_at: dict[int, Optional[float]] = field(default_factory=dict)   # segundos → movimento do líder USD (%, sinal = direção esperada)
 
     @property
     def kind(self) -> str:
@@ -6345,9 +6346,14 @@ def measure_hires(event_id: str, kind: str, published_at: datetime, target: str,
         if l0 is None:
             continue
         thr = LEAD_THRESHOLDS.get(name, 0.0)
+        dsign = 1.0 if d > 0 else -1.0
+        if name == "USD":                                   # diagnóstico: quanto o líder andou (na direção esperada) em N s
+            for b in (5, 60, 300):
+                q = lp.at_or_before(published_at + timedelta(seconds=b))
+                rec.lead_move_at[b] = round(dsign * (q.mid / l0.mid - 1) * 100, 4) if q and q.time > published_at else None
         for q in lp.between(published_at, end):
             delta = (q.mid / l0.mid - 1) * 100 if name == "USD" else (q.mid - l0.mid) * 100
-            if (1.0 if d > 0 else -1.0) * delta >= thr:
+            if dsign * delta >= thr:
                 base.lead_times[name] = (q.time - published_at).total_seconds() / 60
                 firsts.append((q.time - published_at).total_seconds())
                 break
@@ -6373,12 +6379,15 @@ class LeadLagRow:
     median_short_mae: float
     median_spread_atr: float
     buckets: dict[int, Optional[float]]
+    lead_moves: dict[int, Optional[float]] = field(default_factory=dict)   # 5/60/300 s → movimento mediano do líder USD em % (direção esperada)
 
     def row(self) -> str:
         f = lambda v, fmt: "  n/d" if v is None else fmt.format(v)  # noqa: E731
         b = " ".join(f"{('n/d' if self.buckets.get(k) is None else f'{self.buckets[k]:+.2f}'):>6}" for k in BUCKETS_SEC)
-        return (f"{self.kind:<20}{self.target:<8}{self.n:>4}{self.n_lead:>6}{f(self.p_confirm_given_lead, '{:>7.0%}'):>8}{f(self.p_confirm_no_lead, '{:>7.0%}'):>8}"
-                f"{f(self.median_lag_sec, '{:>7.0f}'):>8}{self.median_short_mfe:>7.2f}{self.median_short_mae:>7.2f}{self.median_follow_mfe:>7.2f}{self.median_spread_atr:>8.3f}  {b}")
+        lm = " ".join(f"{('n/d' if self.lead_moves.get(k) is None else f'{self.lead_moves[k]:+.3f}'):>7}" for k in (5, 60, 300))
+        kind = self.kind if len(self.kind) <= 19 else self.kind[:16] + "…"
+        return (f"{kind:<20}{self.target:<8}{self.n:>4}{self.n_lead:>6}{f(self.p_confirm_given_lead, '{:>7.0%}'):>8}{f(self.p_confirm_no_lead, '{:>7.0%}'):>8}"
+                f"{f(self.median_lag_sec, '{:>7.0f}'):>8}{self.median_short_mfe:>7.2f}{self.median_short_mae:>7.2f}{self.median_follow_mfe:>7.2f}{self.median_spread_atr:>8.3f}  {b}  {lm}")
 
 
 SCHEDULED_KINDS = frozenset({"cpi", "core_cpi", "pce", "core_pce", "ppi", "nfp", "unemployment", "jobless_claims", "gdp", "earnings", "retail_sales",
@@ -6419,9 +6428,15 @@ class LeadLagStats:
             for b in BUCKETS_SEC:
                 xs = [r.move_at[b] for r in rs if r.move_at.get(b) is not None]
                 buckets[b] = statistics.median(xs) if xs else None
-            out.append(LeadLagRow(kind, target, len(rs), len(with_lead), pc(with_lead), pc(no_lead), statistics.median(lags) if lags else None,
-                                  med([r.short_mfe for r in rs]), med([r.follow_mfe for r in rs]), med([r.short_mae for r in rs]),
-                                  med([r.spread_atr for r in rs]), buckets))
+            lead_moves = {}
+            for b in (5, 60, 300):
+                xs = [r.lead_move_at[b] for r in rs if r.lead_move_at.get(b) is not None]
+                lead_moves[b] = statistics.median(xs) if xs else None
+            row = LeadLagRow(kind, target, len(rs), len(with_lead), pc(with_lead), pc(no_lead), statistics.median(lags) if lags else None,
+                             med([r.short_mfe for r in rs]), med([r.follow_mfe for r in rs]), med([r.short_mae for r in rs]),
+                             med([r.spread_atr for r in rs]), buckets)
+            row.lead_moves = lead_moves
+            out.append(row)
         return out
 
     def render(self) -> str:
@@ -6430,11 +6445,13 @@ class LeadLagStats:
             return "LEAD-LAG: sem eventos medidos"
         res = min((r.base.resolution_min for r in self.records), default=1.0)
         head = (f"{'evento':<20}{'alvo':<8}{'n':>4}{'c/líd':>6}{'P(B|A)':>8}{'P(B|¬A)':>8}{'lag s':>8}{'MFE5m':>7}{'MAE5m':>7}{'MFE60':>7}{'spread':>8}  " +
-                " ".join(f"{'T+' + str(b) + 's':>6}" for b in BUCKETS_SEC))
+                " ".join(f"{'T+' + str(b) + 's':>6}" for b in BUCKETS_SEC) + "  " + " ".join(f"{'líd' + str(b) + 's':>7}" for b in (5, 60, 300)))
         lines = ["🔬 LEAD-LAG — quando o líder (USD/yields) se move após o evento, o alvo acompanha? (medianas em ATR)", head] + [r.row() for r in rows]
         lines.append(f"  resolução {res * 60:.0f} s · P(B|A) = P(alvo confirma ≥ 0,40 ATR | líder reagiu) · lag = 1ª reação do alvo − 1ª do líder · spread em ATR")
         lines.append("  amostra < 20 por linha = inconclusivo; T+Ns = movimento mediano do alvo N segundos após a publicação")
         lines.append("  Σ agendado = todos os releases com hora exata (NFP, CPI, PPI, PCE, claims…) somados · Σ manchete = notícias GDELT somadas · uma publicação = um caso")
+        lines.append(f"  lídNs = movimento mediano do LÍDER USD em % na direção esperada, N s após a publicação (o líder 'reage' ao cruzar {LEAD_THRESHOLDS['USD']:.2f}%);"
+                     " líd ≈ 0 em NFP/CPI = ticks do líder desalinhados ou sem cotação naquele segundo")
         return "\n".join(lines)
 
 
