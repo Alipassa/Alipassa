@@ -61,6 +61,8 @@ class MarketAIEngine:
                  selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None, params: Optional[dict] = None) -> None:
         self.mem = mem
         self.params = params or {}                                    # autotune (5.2): {mercado: {"params", "apply", ...}}
+        # semente do ciclo de vida: as operações OOS do histórico que validaram o parâmetro adotado contam como amostra inicial
+        self.seed_results: dict[str, list[float]] = {sym: [float(x) for x in (e.get("oos_results") or [])] for sym, e in self.params.items() if e.get("apply")}
         self.edge_bank = edge_bank                                    # edge_bank.EdgeBank (5.2) — opcional
         self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
         self.mode, self.limits = mode, limits
@@ -296,7 +298,7 @@ class MarketAIEngine:
             self._real_mode = {sym: eng.mode for sym, eng in self.engines.items()}
         for sym in self.specs:
             rs = self.mem.r_stats(sym)
-            results = self.mem.results_chrono(sym)
+            results = list(getattr(self, "seed_results", {}).get(sym, [])) + self.mem.results_chrono(sym)   # histórico OOS + vivido
             self.history[sym] = statistical_confidence(results)
             self.engines[sym].mpe.history = self.engines[sym].monitor.history = rs
             # CICLO DE VIDA: estado por mercado (amostra OOS + sequência); SOMBRA = motor do mercado cai para PAPER até revalidar

@@ -72,3 +72,27 @@ class AutotuneTests(unittest.TestCase):
             self.assertEqual((cfg2.min_edge_score, cfg2.min_confirmations, cfg2.buy, cfg2.sell), (15.0, 2, 40, -40))
             self.assertIn("APRENDIDO", note2)
         self.assertEqual(cfg_with(EngineConfig(), {"signal_score": 45}).sell, -45)
+
+
+class LifecycleSeedTests(unittest.TestCase):
+    def test_autotune_oos_results_seed_the_live_lifecycle(self):
+        import os
+        import tempfile
+        from gold_ai.guard import GuardLimits, KillSwitch, TradingMode
+        from gold_ai.market_engine import MarketAIEngine
+        from gold_ai.memory import PredictionMemory
+        from gold_ai.selector import PortfolioLimits
+        from gold_ai.telegram import TelegramSender
+        params = {"XAUUSD": {"params": {"min_edge_score": 15.0, "min_confirmations": 2, "signal_score": 40}, "apply": True, "n_oos": 25,
+                             "tier": "candidato", "oos_results": [0.5, -1.0, 0.8] * 8 + [0.4]},
+                  "US500": {"params": {"min_edge_score": 15.0}, "apply": False, "n_oos": 4, "tier": "sem amostra", "oos_results": [1.0, 1.0, 1.0, 1.0]}}
+        with tempfile.TemporaryDirectory() as d:
+            mem = PredictionMemory(os.path.join(d, "m.db"))
+            eng = MarketAIEngine(mem, GuardLimits(), ("XAUUSD", "US500"), TradingMode.PAPER, 10000.0, PortfolioLimits(), sender=TelegramSender(dry_run=True, quiet=True),
+                                 kill_switch=KillSwitch(enabled_env=False), log=lambda m: None, params=params)
+            self.assertEqual(eng.lifecycle["XAUUSD"].n, 25)              # semente conta como amostra
+            self.assertEqual(eng.lifecycle["XAUUSD"].tier, "candidato")
+            self.assertEqual(eng.lifecycle["US500"].n, 0)                # não adotado → não semeia
+            self.assertEqual(eng.engines["XAUUSD"].engine.cfg.min_confirmations, 2)
+            self.assertEqual(eng.engines["US500"].engine.cfg.min_confirmations, 3)
+            mem.close()

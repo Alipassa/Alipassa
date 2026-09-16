@@ -11165,7 +11165,7 @@ def evaluate_parameter(name: str, results: Sequence[float], previous_action: str
     streak = consecutive_losses(xs)
     edge_ok = all(w.positive for w in windows if w.n >= 10) and not deteriorating and any(w.n >= 10 for w in windows)
     if n < 10:
-        action, note = "NORMAL", "amostra < 10: ainda não é parâmetro (opera em PAPER/observação)"
+        action, note = "NORMAL", "amostra < 10: ainda não é parâmetro — entradas seguem o funil normal (observação)"
     elif previous_action in ("SUSPENSO", "QUEBRADO"):
         # revalidação: só reativa se o edge continua positivo nas janelas
         if edge_ok and streak < SUSPEND_STREAK:
@@ -11702,6 +11702,7 @@ class MarketTune:
     default_oos: Optional[FloorMetrics] = None       # mesmos blocos com o parâmetro padrão
     recommended: dict = field(default_factory=dict)  # combinação mais votada
     default: dict = field(default_factory=dict)
+    oos_results: list = field(default_factory=list)  # R das operações OOS da política, em ordem cronológica (semente do ciclo de vida)
 
     @property
     def n_oos(self) -> int:
@@ -11723,7 +11724,7 @@ class MarketTune:
         m = lambda x: None if x is None else {"n": x.n, "expectancy": round(x.expectancy, 3), "win_rate": round(x.win_rate, 3),  # noqa: E731
                                               "profit_factor": (None if x.profit_factor in (None, float("inf")) else round(x.profit_factor, 2)), "max_dd_pct": round(x.max_dd_pct, 2)}
         return {"params": self.recommended, "default": self.default, "n_oos": self.n_oos, "tier": self.tier, "apply": self.apply,
-                "policy_oos": m(self.policy_oos), "default_oos": m(self.default_oos),
+                "policy_oos": m(self.policy_oos), "default_oos": m(self.default_oos), "oos_results": [round(x, 3) for x in self.oos_results],
                 "folds": [{"fold": p.fold, "params": p.params, "train_n": p.train.n, "train_expectancy": round(p.train.expectancy, 3),
                            "test_n": p.test.n, "test_expectancy": round(p.test.expectancy, 3)} for p in self.picks]}
 
@@ -11770,6 +11771,8 @@ def autotune_market(market: str, bt: Backtester, grid: Optional[dict] = None, n_
         default_runs.append(test if best_p == dflt else bt.run(train_end, test_end, cfg_with(base, dflt)))
         tune.picks.append(FoldPick(k + 1, dict(best_p), best_m, _metrics([test], best_p.get("min_edge_score", 0.0), strategy, equity, risk_pct)))
     tune.policy_oos = _metrics(policy_runs, float("nan"), strategy, equity, risk_pct)
+    rows = sorted((r for res in policy_runs for r in res.trade_rows), key=lambda r: r["time"])
+    tune.oos_results = [float(r["results"].get(strategy, r["results"].get("3R"))) for r in rows if r["results"].get(strategy, r["results"].get("3R")) is not None]
     tune.default_oos = _metrics(default_runs, float("nan"), strategy, equity, risk_pct)
     votes = Counter(json.dumps(p.params, sort_keys=True) for p in tune.picks)
     tune.recommended = json.loads(votes.most_common(1)[0][0]) if votes else dict(dflt)
@@ -12533,6 +12536,8 @@ class MarketAIEngine:
                  selector: Optional[AssetSelector] = None, calibrator=None, edge_bank=None, params: Optional[dict] = None) -> None:
         self.mem = mem
         self.params = params or {}                                    # autotune (5.2): {mercado: {"params", "apply", ...}}
+        # semente do ciclo de vida: as operações OOS do histórico que validaram o parâmetro adotado contam como amostra inicial
+        self.seed_results: dict[str, list[float]] = {sym: [float(x) for x in (e.get("oos_results") or [])] for sym, e in self.params.items() if e.get("apply")}
         self.edge_bank = edge_bank                                    # edge_bank.EdgeBank (5.2) — opcional
         self.specs: dict[str, MarketSpec] = {s: get_market(s) for s in symbols}
         self.mode, self.limits = mode, limits
@@ -12760,7 +12765,7 @@ class MarketAIEngine:
             self._real_mode = {sym: eng.mode for sym, eng in self.engines.items()}
         for sym in self.specs:
             rs = self.mem.r_stats(sym)
-            results = self.mem.results_chrono(sym)
+            results = list(getattr(self, "seed_results", {}).get(sym, [])) + self.mem.results_chrono(sym)   # histórico OOS + vivido
             self.history[sym] = statistical_confidence(results)
             self.engines[sym].mpe.history = self.engines[sym].monitor.history = rs
             # CICLO DE VIDA: estado por mercado (amostra OOS + sequência); SOMBRA = motor do mercado cai para PAPER até revalidar

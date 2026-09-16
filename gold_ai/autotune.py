@@ -65,6 +65,7 @@ class MarketTune:
     default_oos: Optional[FloorMetrics] = None       # mesmos blocos com o parâmetro padrão
     recommended: dict = field(default_factory=dict)  # combinação mais votada
     default: dict = field(default_factory=dict)
+    oos_results: list = field(default_factory=list)  # R das operações OOS da política, em ordem cronológica (semente do ciclo de vida)
 
     @property
     def n_oos(self) -> int:
@@ -86,7 +87,7 @@ class MarketTune:
         m = lambda x: None if x is None else {"n": x.n, "expectancy": round(x.expectancy, 3), "win_rate": round(x.win_rate, 3),  # noqa: E731
                                               "profit_factor": (None if x.profit_factor in (None, float("inf")) else round(x.profit_factor, 2)), "max_dd_pct": round(x.max_dd_pct, 2)}
         return {"params": self.recommended, "default": self.default, "n_oos": self.n_oos, "tier": self.tier, "apply": self.apply,
-                "policy_oos": m(self.policy_oos), "default_oos": m(self.default_oos),
+                "policy_oos": m(self.policy_oos), "default_oos": m(self.default_oos), "oos_results": [round(x, 3) for x in self.oos_results],
                 "folds": [{"fold": p.fold, "params": p.params, "train_n": p.train.n, "train_expectancy": round(p.train.expectancy, 3),
                            "test_n": p.test.n, "test_expectancy": round(p.test.expectancy, 3)} for p in self.picks]}
 
@@ -133,6 +134,8 @@ def autotune_market(market: str, bt: Backtester, grid: Optional[dict] = None, n_
         default_runs.append(test if best_p == dflt else bt.run(train_end, test_end, cfg_with(base, dflt)))
         tune.picks.append(FoldPick(k + 1, dict(best_p), best_m, _metrics([test], best_p.get("min_edge_score", 0.0), strategy, equity, risk_pct)))
     tune.policy_oos = _metrics(policy_runs, float("nan"), strategy, equity, risk_pct)
+    rows = sorted((r for res in policy_runs for r in res.trade_rows), key=lambda r: r["time"])
+    tune.oos_results = [float(r["results"].get(strategy, r["results"].get("3R"))) for r in rows if r["results"].get(strategy, r["results"].get("3R")) is not None]
     tune.default_oos = _metrics(default_runs, float("nan"), strategy, equity, risk_pct)
     votes = Counter(json.dumps(p.params, sort_keys=True) for p in tune.picks)
     tune.recommended = json.loads(votes.most_common(1)[0][0]) if votes else dict(dflt)

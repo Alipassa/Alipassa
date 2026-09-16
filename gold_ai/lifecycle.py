@@ -105,7 +105,7 @@ def evaluate_parameter(name: str, results: Sequence[float], previous_action: str
     streak = consecutive_losses(xs)
     edge_ok = all(w.positive for w in windows if w.n >= 10) and not deteriorating and any(w.n >= 10 for w in windows)
     if n < 10:
-        action, note = "NORMAL", "amostra < 10: ainda não é parâmetro (opera em PAPER/observação)"
+        action, note = "NORMAL", "amostra < 10: ainda não é parâmetro — entradas seguem o funil normal (observação)"
     elif previous_action in ("SUSPENSO", "QUEBRADO"):
         # revalidação: só reativa se o edge continua positivo nas janelas
         if edge_ok and streak < SUSPEND_STREAK:
