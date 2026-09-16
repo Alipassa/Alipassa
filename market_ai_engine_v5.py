@@ -2499,9 +2499,15 @@ def _layer_line(a: Assessment, direction: Direction) -> list[str]:
     ]
 
 
+def _price_digits(price: float) -> int:
+    """Casas decimais pelo nível do preço: FX (< 10) 5 · JPY/petróleo (< 1000) 3 · ouro/índices 2."""
+    return 5 if price < 10 else 3 if price < 1000 else 2
+
+
 def _zone(a: Assessment) -> list[str]:
     z = a.zone
-    fmt = lambda v: f"{v:.2f}" if v is not None else "n/d"  # noqa: E731
+    d = _price_digits(float(getattr(a, "price", 0.0) or 0.0))
+    fmt = lambda v: f"{v:.{d}f}" if v is not None else "n/d"  # noqa: E731
     lines = []
     if z.get("entry_low") is not None:
         lines.append(f"Entrada: {fmt(z.get('entry_low'))}–{fmt(z.get('entry_high'))}")
@@ -2520,7 +2526,7 @@ def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
     d = sig.direction
     prob = a.prob_up if d == Direction.ALTA else a.prob_down if d == Direction.BAIXA else a.prob_flat
     name, pair = MARKET_LABEL.get(symbol.upper(), (symbol.upper(), symbol.upper()))
-    digits = 5 if a.price < 10 else 3 if a.price < 1000 else 2
+    digits = _price_digits(a.price)
     price = f"Preço: {a.price:.{digits}f}"
 
     if sig.type == SignalType.WATCH:

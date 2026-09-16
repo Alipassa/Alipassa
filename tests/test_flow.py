@@ -312,3 +312,15 @@ class FlowBreakdownTests(unittest.TestCase):
             self.assertIn(label, txt)
         self.assertIn("QUEBRAS", render_flow_stats(rows))
         self.assertEqual(render_flow_breakdown(rows[:5]), "")           # < 20 casos: sem quebra
+
+
+class ZoneDigitsTests(unittest.TestCase):
+    def test_zone_levels_use_asset_digits(self):
+        from types import SimpleNamespace
+        from gold_ai.telegram import _zone
+        a = SimpleNamespace(price=1.15453, zone={"entry_low": 1.15420, "entry_high": 1.15480, "support": 1.15210, "resistance": 1.15790, "invalidation": 1.15900})
+        txt = "\n".join(_zone(a))
+        self.assertIn("Entrada: 1.15420–1.15480", txt)
+        self.assertIn("Resistência: 1.15790", txt)
+        g = SimpleNamespace(price=4277.1, zone={"support": 4270.55, "resistance": 4290.1, "invalidation": 4295.0})
+        self.assertIn("Suporte: 4270.55", "\n".join(_zone(g)))
