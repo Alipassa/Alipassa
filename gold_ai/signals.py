@@ -59,6 +59,8 @@ class SignalGate:
     last_risk_alert: bool = False
     seen_events: set[str] = field(default_factory=set)
     last_reason: str = ""   # motivo do último None (funil de entrada)
+    last_watch_at: Optional[datetime] = None          # anti-spam do WATCH: mesmo mercado/direção só a cada min_seconds_between_alerts
+    last_watch_direction: Optional[Direction] = None
 
     def evaluate(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
         self.last_reason = ""
@@ -101,7 +103,9 @@ class SignalGate:
             direction = a.premove.direction
         # 4b. GOLD WATCH: nível 2 de evidência, ainda sem sinal operacional
         elif base_type == SignalType.NEUTRAL and a.evidence_level >= EvidenceLevel.L2_ALERTA \
-                and max(a.prob_up, a.prob_down) >= self.cfg.watch_min_probability and self.last_type != SignalType.WATCH:
+                and max(a.prob_up, a.prob_down) >= self.cfg.watch_min_probability and self.last_type != SignalType.WATCH \
+                and (self.last_watch_at is None or direction != self.last_watch_direction
+                     or (a.time - self.last_watch_at).total_seconds() >= self.cfg.min_seconds_between_alerts):
             sig_type, trigger = SignalType.WATCH, "evidência nível 2 — observação"
         # 5. confirmação de movimento
         elif stage == Stage.CONFIRMACAO and self.last_stage == Stage.PRE_MOVIMENTO and base_type != SignalType.NEUTRAL:
@@ -148,5 +152,7 @@ class SignalGate:
     def _emit(self, sig_type: SignalType, direction: Direction, a: Assessment, trigger: str) -> Signal:
         self.last_sent_at = a.time
         self.last_type = sig_type
+        if sig_type == SignalType.WATCH:
+            self.last_watch_at, self.last_watch_direction = a.time, direction
         rs = reasons_for(a, direction) if direction != Direction.LATERAL else []
         return Signal(type=sig_type, direction=direction, assessment=a, reasons=rs, trigger=trigger)

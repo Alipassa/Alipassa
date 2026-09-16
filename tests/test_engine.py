@@ -236,3 +236,40 @@ class MemoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchAntiSpamTests(unittest.TestCase):
+    """WATCH repetido a cada poucos minutos (16/09 05:09, 05:12, 05:19, 05:24) — agora respeita o intervalo mínimo por direção."""
+
+    def _a(self, t):
+        from types import SimpleNamespace
+        from gold_ai.models import Direction, EvidenceLevel, Stage
+        return SimpleNamespace(time=t, score=-26.0, direction=Direction.BAIXA, premove=SimpleNamespace(stage=Stage.NEUTRO, direction=Direction.BAIXA),
+                               confirmations=["a", "b", "c"], has_edge=True, systemic_risk=0.0, reversal=SimpleNamespace(risk=0.0, current_trend=Direction.ALTA),
+                               evidence_level=EvidenceLevel.L2_ALERTA, prob_up=0.31, prob_down=0.69, prob_flat=0.0, factors=[], technical=[], price=1.15,
+                               confidence=52.0, horizon="1–5 dias")
+    def test_watch_respects_min_interval_per_direction(self):
+        from datetime import datetime, timedelta, timezone
+        from gold_ai.config import EngineConfig
+        from gold_ai.models import Direction, SignalType
+        from gold_ai.signals import SignalGate
+        gate = SignalGate(EngineConfig())
+        t0 = datetime(2026, 9, 16, 5, 9, tzinfo=timezone.utc)
+        first = gate.evaluate(self._a(t0))
+        self.assertIsNotNone(first)
+        self.assertEqual(first.type, SignalType.WATCH)
+        for m in (3, 10, 14):                                          # dentro dos 15 min: silêncio
+            self.assertIsNone(gate.evaluate(self._a(t0 + timedelta(minutes=m))), f"repetiu aos {m} min")
+        again = gate.evaluate(self._a(t0 + timedelta(minutes=16)))
+        self.assertIsNotNone(again)
+        self.assertEqual(again.type, SignalType.WATCH)
+        # direção contrária pode alertar antes do intervalo (após um ciclo sem WATCH, como no desenho original)
+        neutral = self._a(t0 + timedelta(minutes=17))
+        neutral.has_edge = False
+        self.assertIsNone(gate.evaluate(neutral))
+        a = self._a(t0 + timedelta(minutes=18))
+        a.direction = a.premove.direction = Direction.ALTA
+        a.score, a.prob_up, a.prob_down = 26.0, 0.69, 0.31
+        flipped = gate.evaluate(a)
+        self.assertIsNotNone(flipped)
+        self.assertEqual(flipped.type, SignalType.WATCH)
