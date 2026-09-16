@@ -57,6 +57,13 @@ MARKET_LABEL = {"XAUUSD": ("GOLD", "XAU/USD"), "US500": ("US500", "S&P 500 (US50
                 "USDJPY": ("USDJPY", "USD/JPY"), "WTI": ("WTI", "Petróleo WTI"), "NAS100": ("NAS100", "Nasdaq 100"), "XAGUSD": ("SILVER", "XAG/USD")}
 
 
+def signal_label(sig_type, symbol: str = "XAUUSD") -> str:
+    """Nome do sinal com o rótulo do mercado: 'GOLD WATCH' → 'EURUSD WATCH' para EURUSD (o enum guarda o nome histórico GOLD)."""
+    name = MARKET_LABEL.get(str(symbol).upper(), (str(symbol).upper(), ""))[0]
+    value = getattr(sig_type, "value", str(sig_type))
+    return value.replace("GOLD ", f"{name} ", 1) if value.startswith("GOLD ") else value
+
+
 def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
     a = sig.assessment
     d = sig.direction

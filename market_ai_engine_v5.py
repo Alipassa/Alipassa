@@ -2521,6 +2521,13 @@ MARKET_LABEL = {"XAUUSD": ("GOLD", "XAU/USD"), "US500": ("US500", "S&P 500 (US50
                 "USDJPY": ("USDJPY", "USD/JPY"), "WTI": ("WTI", "Petróleo WTI"), "NAS100": ("NAS100", "Nasdaq 100"), "XAGUSD": ("SILVER", "XAG/USD")}
 
 
+def signal_label(sig_type, symbol: str = "XAUUSD") -> str:
+    """Nome do sinal com o rótulo do mercado: 'GOLD WATCH' → 'EURUSD WATCH' para EURUSD (o enum guarda o nome histórico GOLD)."""
+    name = MARKET_LABEL.get(str(symbol).upper(), (str(symbol).upper(), ""))[0]
+    value = getattr(sig_type, "value", str(sig_type))
+    return value.replace("GOLD ", f"{name} ", 1) if value.startswith("GOLD ") else value
+
+
 def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
     a = sig.assessment
     d = sig.direction
@@ -8448,6 +8455,17 @@ class GuardLimits(RiskLimits):
     max_drawdown_pct: float = 10.0
     min_rr_to_structure: float = 2.0     # se a resistência/suporte forte estiver antes disto (em R), não há expectativa
     daily_target_pct: float = 0.0        # META DIÁRIA (0 = desligada): ao atingir, sem novas entradas até o dia seguinte — trava, não obrigação
+    risk_ladder: tuple = ()              # ESCADA (5.2): (base, operacional 30 OOS, validado 50 OOS) em %; vazio = proporcional à base (×1, ×4/3, ×5/3)
+    risk_ladder_max_pct: float = 5.0     # teto absoluto da escada
+
+    def ladder(self) -> tuple[float, float, float]:
+        if self.risk_ladder:
+            xs = [float(x) for x in self.risk_ladder][:3]
+            while len(xs) < 3:
+                xs.append(xs[-1])
+            return tuple(min(x, self.risk_ladder_max_pct) for x in xs)
+        b = float(self.risk_per_trade_pct)
+        return (b, min(round(b * 4 / 3, 2), self.risk_ladder_max_pct), min(round(b * 5 / 3, 2), self.risk_ladder_max_pct))
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "GuardLimits":
@@ -8456,6 +8474,10 @@ class GuardLimits(RiskLimits):
         g.max_drawdown_pct = float(env.get("MAX_DRAWDOWN", g.max_drawdown_pct))
         g.min_rr_to_structure = float(env.get("MIN_RR_TO_STRUCTURE", g.min_rr_to_structure))
         g.daily_target_pct = float(env.get("DAILY_TARGET", g.daily_target_pct) or 0.0)
+        g.risk_ladder_max_pct = float(env.get("RISK_LADDER_MAX", g.risk_ladder_max_pct))
+        raw = str(env.get("RISK_LADDER", "") or "").strip()
+        if raw:
+            g.risk_ladder = tuple(float(x) for x in raw.split(",") if x.strip())
         return g
 
 
@@ -10369,7 +10391,7 @@ class LiveEdgeReport:
         out = [top, "║" + "MARKET AI — LIVE EDGE".center(width) + "║", "║" + f"{self.date} · fora da amostra por construção".center(width) + "║", mid]
         for m in self.ranked():
             out += [line(m.symbol), line(f"OOS Trades: {m.n_trades}"), line(f"Expectancy: {m.expectancy:+.2f}R  (ajustada {m.confidence.shrunk:+.2f}R)"),
-                    line(f"Probabilidade calibrada: {pct(m.prob_observed)}" + (f"  (declarada {pct(m.prob_declared)}, n={m.n_predictions})" if m.prob_declared is not None else "")),
+                    line(f"Prob. calibrada: {pct(m.prob_observed)}" + (f" (decl. {pct(m.prob_declared)}, n={m.n_predictions})" if m.prob_declared is not None else "")),
                     line(f"Capture Rate: {pct(m.capture_rate)}  · Entry Rate: {pct(m.entry_rate)}"),
                     line(f"Win: {m.win_rate:.0%} · PF: {m.profit_factor if m.profit_factor is not None else 'n/d'} · {m.pnl_usd:+,.2f} USD"),
                     line(f"Status: {m.status}  {m.status_reason}"), mid]
@@ -11140,6 +11162,7 @@ class ParameterState:
     deteriorating: bool = False
     trend: list[float] = field(default_factory=list)      # expectancy por bloco de 10 (do mais antigo ao mais recente)
     note: str = ""
+    edge_ok: bool = False           # expectancy positiva em todas as janelas com n ≥ 10, sem deterioração
 
     @property
     def allows_entries(self) -> bool:
@@ -11196,7 +11219,31 @@ def evaluate_parameter(name: str, results: Sequence[float], previous_action: str
         action, note = "ALERTA", f"{streak} perdas seguidas: confiança reduzida (×0,85), parâmetro mantido"
     else:
         action, note = "NORMAL", ""
-    return ParameterState(name, n, tier(n), streak, action, windows, deteriorating, blocks, note)
+    return ParameterState(name, n, tier(n), streak, action, windows, deteriorating, blocks, note, edge_ok)
+
+
+# --------------------------------------------------------------------------- ESCADA DE RISCO (decidida antes, nunca depois de ganhos ou perdas)
+LADDER_TIERS = (30, 50)          # degraus: operacional (30 casos OOS) · validado (50 casos OOS)
+
+
+def risk_ladder_pct(state: "ParameterState", base_pct: float, ladder: Sequence[float], ceiling_pct: float = 5.0) -> tuple[float, str]:
+    """Risco por operação do mercado: `ladder` = (base, operacional, validado) em % do capital, limitado por `ceiling_pct`.
+    Sobe só com amostra (30 / 50 casos OOS) E edge positivo nas janelas E estado NORMAL/REATIVADO. Cai para a base em ALERTA,
+    PROTEÇÃO, SUSPENSO, QUEBRADO, deterioração ou expectancy negativa. Nunca sobe por sequência de ganhos nem desce por sequência
+    de perdas fora dessas regras — o percentual é função do tier, não do humor."""
+    steps = [float(x) for x in ladder] if ladder else [base_pct]
+    while len(steps) < 3:
+        steps.append(steps[-1])
+    cap = float(ceiling_pct)
+    base = min(float(base_pct), cap)
+    if state.action not in ("NORMAL", "REATIVADO") or not state.edge_ok:
+        why = "sem edge confirmado" if state.action in ("NORMAL", "REATIVADO") else state.action
+        return base, f"base {base:g}% ({why})"
+    if state.n >= LADDER_TIERS[1]:
+        return min(steps[2], cap), f"{min(steps[2], cap):g}% (validado: {state.n} casos, edge positivo)"
+    if state.n >= LADDER_TIERS[0]:
+        return min(steps[1], cap), f"{min(steps[1], cap):g}% (operacional: {state.n} casos, edge positivo)"
+    return base, f"base {base:g}% ({state.tier}: {state.n} casos)"
 
 
 def render_table(states: Sequence[ParameterState]) -> str:
@@ -12012,6 +12059,7 @@ class LiveExecutionEngine:
         self.commands = commands
         self.horizon = horizon_min
         self.engine = engine or GoldAIEngine()
+        self.risk_pct: Optional[float] = None       # ESCADA (5.2): % por operação deste mercado, definida pelo ciclo de vida; None = RISK_PER_TRADE
         self.log = log
         self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
         start_equity = mem.last_equity() or equity
@@ -12060,6 +12108,12 @@ class LiveExecutionEngine:
             self._close_trade(tr, tr.r_at(price_hint if price_hint is not None else tr.plan.entry), "MANUAL", now, res, price_hint=price_hint)
 
     # ------------------------------------------------------------------ ciclo
+    def risk_usd(self) -> float:
+        """Risco financeiro por operação deste mercado: capital × escada (tier do ciclo de vida) ou × RISK_PER_TRADE."""
+        if self.risk_pct is None:
+            return self.perf.risk_usd
+        return round(self.perf.equity * float(self.risk_pct) / 100.0, 2)
+
     def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None, defer_entry: bool = False) -> CycleResult:
         res = CycleResult(None, None)
         now = snap.time
@@ -12124,7 +12178,7 @@ class LiveExecutionEngine:
     # ------------------------------------------------------------------ entrada
     def _decide_entry(self, sig: Signal, a: Assessment, snap: MarketSnapshot, pid: int, res: CycleResult) -> str:
         if sig.type not in self.EXECUTABLE or sig.direction == Direction.LATERAL:
-            return f"NO_TRADE — sinal {sig.type.value} não é operacional"
+            return f"NO_TRADE — sinal {signal_label(sig.type, self.symbol)} não é operacional"
         allowed, why = self.ks.new_entries_allowed()
         if not allowed:
             return f"BLOQUEADA — {why}"
@@ -12157,9 +12211,9 @@ class LiveExecutionEngine:
             import copy as _copy
             lim = _copy.copy(self.limits)
             lim.min_lot, lim.lot_step, lim.max_lot = ss.volume_min, ss.volume_step, min(self.limits.max_lot, ss.volume_max)
-        plan.lots, plan.risk_usd = size_lots(lim, self.perf.risk_usd, plan.r_value, pv)
+        plan.lots, plan.risk_usd = size_lots(lim, self.risk_usd(), plan.r_value, pv)
         if not plan.lots:
-            return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+            return f"BLOQUEADA — risco de {self.risk_usd():.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
         if self.entry_gate is not None:
             blocked = self.entry_gate(self.symbol, sig.direction, plan.risk_usd)
             if blocked:
@@ -12194,7 +12248,7 @@ class LiveExecutionEngine:
             self.tickets[tid] = execution.ticket
             tr.plan.entry = execution.fill_price or plan.entry
         self.mem.save_thesis(tid, thesis, tr.state_dict())
-        self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
+        self.mem.save_execution(tid, execution, self.perf.equity, self.risk_pct if self.risk_pct is not None else self.limits.risk_per_trade_pct, a)
         self.managed.append(tr)
         self._send(format_entry(plan, a, self.mode.value, execution, self.symbol), res)
         return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
@@ -12796,6 +12850,15 @@ class MarketAIEngine:
                 self.sender.send(f"♻️ {sym}: parâmetro revalidado — volta ao modo {real_mode.value}.")
             if changed and st.action in ("ALERTA", "PROTEÇÃO", "SUSPENSO", "REATIVADO"):
                 self.sender.send({"ALERTA": "⚠️", "PROTEÇÃO": "🟠", "SUSPENSO": "🔴", "REATIVADO": "♻️"}[st.action] + f" {sym}: {st.note}")
+            # ESCADA DE RISCO: % por operação em função do tier (30 → operacional, 50 → validado) e do edge; teto RISK_LADDER_MAX
+            pct, why = risk_ladder_pct(st, self.limits.risk_per_trade_pct, self.limits.ladder(), self.limits.risk_ladder_max_pct)
+            prev_pct = eng.risk_pct if eng.risk_pct is not None else self.limits.risk_per_trade_pct
+            eng.risk_pct = pct
+            if abs(pct - prev_pct) > 1e-9 and hasattr(self, "_ladder_ready"):
+                self.sender.send(f"🪜 {sym}: risco por operação {prev_pct:g}% → {pct:g}% — {why}")
+            self.risk_notes = getattr(self, "risk_notes", {})
+            self.risk_notes[sym] = why
+        self._ladder_ready = True
 
     def open_exposures(self) -> list[OpenExposure]:
         out = []
@@ -12909,6 +12972,9 @@ class MarketAIEngine:
             lines.append(f"  {sym:<7} {h.render()}")
         if getattr(self, "lifecycle", None):
             lines.append(render_table(list(self.lifecycle.values())))
+            lad = self.limits.ladder()
+            lines.append(f"🪜 ESCADA DE RISCO: base {lad[0]:g}% · operacional (30 OOS) {lad[1]:g}% · validado (50 OOS) {lad[2]:g}% · teto {self.limits.risk_ladder_max_pct:g}% — "
+                         + " · ".join(f"{sym} {getattr(self, 'risk_notes', {}).get(sym, '')}" for sym in self.specs))
         if self.edge_bank is not None and self.edge_bank.stats:
             lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))
         rows = self.mem.flow_anomaly_rows()

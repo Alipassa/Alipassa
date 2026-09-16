@@ -207,6 +207,12 @@ python market_ai_engine_v5.py sweep --start 2026-01-01 --market US500 --events d
 ## 🎯 Perfil agressivo com trava (3% por operação · meta +10%/dia)
 
 `.env`: `RISK_PER_TRADE=3`, `DAILY_TARGET=10`, `MAX_DAILY_LOSS=6`, `MAX_LOT=1.0`, `MAX_TOTAL_OPEN_RISK=6`, `MAX_CORRELATED_RISK=3`.
+
+**Escada de risco (5.2)** — `RISK_LADDER=3,4,5` e `RISK_LADDER_MAX=5`: o percentual por operação de cada mercado é função do tier do
+ciclo de vida, decidido antes dos resultados e nunca alterado depois de ganhos ou perdas: base 3% enquanto candidato (<30 casos fora da
+amostra), 4% em operacional (≥30), 5% em validado (≥50). Só sobe com expectancy positiva em todas as janelas, sem deterioração, e estado
+NORMAL/REATIVADO; em ALERTA (3 perdas), PROTEÇÃO (4) ou SUSPENSO (5) volta à base. Cinco por cento é o teto absoluto. `/STATUS` mostra o
+degrau de cada mercado e o Telegram avisa quando um degrau muda (🪜). Continua valendo: o lote sai do risco fixo do degrau, nunca da confiança.
 O lote acompanha o capital (compounding) e **nunca** sobe após perda; martingale não existe. A meta é **trava, não obrigação**:
 ao atingir +10% no dia o Risk Guard bloqueia novas entradas até o dia seguinte e avisa no Telegram; posições abertas seguem com
 o monitor. Sem edge, não opera — a meta não cria entradas. Com 3% por operação, +10% = +3,33R líquidos no dia (+1R = +3%).

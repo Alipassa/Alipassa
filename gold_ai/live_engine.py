@@ -65,6 +65,7 @@ class LiveExecutionEngine:
         self.commands = commands
         self.horizon = horizon_min
         self.engine = engine or GoldAIEngine()
+        self.risk_pct: Optional[float] = None       # ESCADA (5.2): % por operação deste mercado, definida pelo ciclo de vida; None = RISK_PER_TRADE
         self.log = log
         self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
         start_equity = mem.last_equity() or equity
@@ -113,6 +114,12 @@ class LiveExecutionEngine:
             self._close_trade(tr, tr.r_at(price_hint if price_hint is not None else tr.plan.entry), "MANUAL", now, res, price_hint=price_hint)
 
     # ------------------------------------------------------------------ ciclo
+    def risk_usd(self) -> float:
+        """Risco financeiro por operação deste mercado: capital × escada (tier do ciclo de vida) ou × RISK_PER_TRADE."""
+        if self.risk_pct is None:
+            return self.perf.risk_usd
+        return round(self.perf.equity * float(self.risk_pct) / 100.0, 2)
+
     def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None, defer_entry: bool = False) -> CycleResult:
         res = CycleResult(None, None)
         now = snap.time
@@ -178,7 +185,8 @@ class LiveExecutionEngine:
     # ------------------------------------------------------------------ entrada
     def _decide_entry(self, sig: Signal, a: Assessment, snap: MarketSnapshot, pid: int, res: CycleResult) -> str:
         if sig.type not in self.EXECUTABLE or sig.direction == Direction.LATERAL:
-            return f"NO_TRADE — sinal {sig.type.value} não é operacional"
+            from .telegram import signal_label
+            return f"NO_TRADE — sinal {signal_label(sig.type, self.symbol)} não é operacional"
         allowed, why = self.ks.new_entries_allowed()
         if not allowed:
             return f"BLOQUEADA — {why}"
@@ -211,9 +219,9 @@ class LiveExecutionEngine:
             import copy as _copy
             lim = _copy.copy(self.limits)
             lim.min_lot, lim.lot_step, lim.max_lot = ss.volume_min, ss.volume_step, min(self.limits.max_lot, ss.volume_max)
-        plan.lots, plan.risk_usd = size_lots(lim, self.perf.risk_usd, plan.r_value, pv)
+        plan.lots, plan.risk_usd = size_lots(lim, self.risk_usd(), plan.r_value, pv)
         if not plan.lots:
-            return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+            return f"BLOQUEADA — risco de {self.risk_usd():.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
         if self.entry_gate is not None:
             blocked = self.entry_gate(self.symbol, sig.direction, plan.risk_usd)
             if blocked:
@@ -248,7 +256,7 @@ class LiveExecutionEngine:
             self.tickets[tid] = execution.ticket
             tr.plan.entry = execution.fill_price or plan.entry
         self.mem.save_thesis(tid, thesis, tr.state_dict())
-        self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
+        self.mem.save_execution(tid, execution, self.perf.equity, self.risk_pct if self.risk_pct is not None else self.limits.risk_per_trade_pct, a)
         self.managed.append(tr)
         self._send(format_entry(plan, a, self.mode.value, execution, self.symbol), res)
         return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"

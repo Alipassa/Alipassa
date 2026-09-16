@@ -94,3 +94,77 @@ class LiveIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RiskLadderTests(unittest.TestCase):
+    def test_ladder_by_tier_edge_and_state(self):
+        from gold_ai.lifecycle import evaluate_parameter, risk_ladder_pct
+        good = [0.6, -1.0, 0.8, 0.5] * 13                                   # 52 casos, expectancy positiva
+        st50 = evaluate_parameter("X", good)
+        self.assertTrue(st50.edge_ok)
+        self.assertEqual(risk_ladder_pct(st50, 3.0, (3, 4, 5), 5.0)[0], 5.0)
+        st30 = evaluate_parameter("X", good[:32])
+        self.assertEqual(risk_ladder_pct(st30, 3.0, (3, 4, 5), 5.0)[0], 4.0)
+        st20 = evaluate_parameter("X", good[:22])
+        self.assertEqual(risk_ladder_pct(st20, 3.0, (3, 4, 5), 5.0)[0], 3.0)
+        # teto absoluto
+        self.assertEqual(risk_ladder_pct(st50, 3.0, (3, 6, 10), 5.0)[0], 5.0)
+        # 3 perdas seguidas → ALERTA → volta à base mesmo com 52 casos
+        st_alert = evaluate_parameter("X", good + [-1.0, -1.0, -1.0])
+        self.assertEqual(st_alert.action, "ALERTA")
+        self.assertEqual(risk_ladder_pct(st_alert, 3.0, (3, 4, 5), 5.0)[0], 3.0)
+        # expectancy negativa → base
+        bad = [0.3, -1.0] * 26
+        st_bad = evaluate_parameter("X", bad)
+        self.assertFalse(st_bad.edge_ok)
+        self.assertEqual(risk_ladder_pct(st_bad, 3.0, (3, 4, 5), 5.0)[0], 3.0)
+
+    def test_guard_limits_ladder_from_env_and_proportional_default(self):
+        from gold_ai.guard import GuardLimits
+        g = GuardLimits.from_env({"RISK_PER_TRADE": "3", "RISK_LADDER": "3,4,5", "RISK_LADDER_MAX": "5"})
+        self.assertEqual(g.ladder(), (3.0, 4.0, 5.0))
+        g2 = GuardLimits.from_env({"RISK_PER_TRADE": "3"})
+        self.assertEqual(g2.ladder(), (3.0, 4.0, 5.0))                     # proporcional ×1, ×4/3, ×5/3, teto 5
+        g3 = GuardLimits.from_env({"RISK_PER_TRADE": "0.6"})
+        self.assertEqual(g3.ladder(), (0.6, 0.8, 1.0))
+        g4 = GuardLimits.from_env({"RISK_PER_TRADE": "3", "RISK_LADDER": "3,6,10"})
+        self.assertEqual(g4.ladder(), (3.0, 5.0, 5.0))                     # nunca acima do teto
+
+    def test_live_engine_uses_ladder_risk(self):
+        import os
+        import tempfile
+        from gold_ai.guard import GuardLimits, KillSwitch, TradingMode
+        from gold_ai.market_engine import MarketAIEngine
+        from gold_ai.memory import PredictionMemory
+        from gold_ai.selector import PortfolioLimits
+        from gold_ai.telegram import TelegramSender
+        params = {"XAUUSD": {"params": {"min_edge_score": 25.0}, "apply": True, "n_oos": 52, "tier": "validado", "oos_results": [0.6, -1.0, 0.8, 0.5] * 13}}
+        with tempfile.TemporaryDirectory() as d:
+            mem = PredictionMemory(os.path.join(d, "m.db"))
+            eng = MarketAIEngine(mem, GuardLimits(risk_per_trade_pct=3.0), ("XAUUSD", "US500"), TradingMode.PAPER, 50000.0, PortfolioLimits(),
+                                 sender=TelegramSender(dry_run=True, quiet=True), kill_switch=KillSwitch(enabled_env=False), log=lambda m: None, params=params)
+            self.assertEqual(eng.engines["XAUUSD"].risk_pct, 5.0)         # validado com edge → topo da escada
+            self.assertEqual(eng.engines["XAUUSD"].risk_usd(), 2500.0)
+            self.assertEqual(eng.engines["US500"].risk_pct, 3.0)          # sem amostra → base
+            self.assertEqual(eng.engines["US500"].risk_usd(), 1500.0)
+            self.assertIn("ESCADA DE RISCO", eng.status_text())
+            mem.close()
+
+
+class SignalLabelDecisionTests(unittest.TestCase):
+    def test_signal_label_uses_market_name(self):
+        from gold_ai.models import SignalType
+        from gold_ai.telegram import signal_label
+        self.assertEqual(signal_label(SignalType.WATCH, "EURUSD"), "EURUSD WATCH")
+        self.assertEqual(signal_label(SignalType.WATCH, "XAUUSD"), "GOLD WATCH")
+        self.assertEqual(signal_label(SignalType.PRE_MOVE, "US500"), "US500 PRE-MOVE")
+
+    def test_live_edge_probability_line_fits_width(self):
+        from gold_ai.edge_report import MarketEdge, LiveEdgeReport
+        from gold_ai.selector import StatConfidence
+        conf = StatConfidence(n=3, expectancy=1.0, std=0.5, level="LOW", lower_bound=0.0, shrunk=0.1)
+        m = MarketEdge("WTI", 3, 1.0, 1.0, None, 0.65, 1.0, 3, None, None, 0.0, conf, "⚪", "amostra pequena")
+        txt = LiveEdgeReport("2026-09-16", [m]).render()
+        row = [l for l in txt.splitlines() if "Prob." in l][0]
+        self.assertIn("n=3", row)
+        self.assertIn("decl. 65%", row)

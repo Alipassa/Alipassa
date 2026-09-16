@@ -68,6 +68,7 @@ class ParameterState:
     deteriorating: bool = False
     trend: list[float] = field(default_factory=list)      # expectancy por bloco de 10 (do mais antigo ao mais recente)
     note: str = ""
+    edge_ok: bool = False           # expectancy positiva em todas as janelas com n ≥ 10, sem deterioração
 
     @property
     def allows_entries(self) -> bool:
@@ -124,7 +125,31 @@ def evaluate_parameter(name: str, results: Sequence[float], previous_action: str
         action, note = "ALERTA", f"{streak} perdas seguidas: confiança reduzida (×0,85), parâmetro mantido"
     else:
         action, note = "NORMAL", ""
-    return ParameterState(name, n, tier(n), streak, action, windows, deteriorating, blocks, note)
+    return ParameterState(name, n, tier(n), streak, action, windows, deteriorating, blocks, note, edge_ok)
+
+
+# --------------------------------------------------------------------------- ESCADA DE RISCO (decidida antes, nunca depois de ganhos ou perdas)
+LADDER_TIERS = (30, 50)          # degraus: operacional (30 casos OOS) · validado (50 casos OOS)
+
+
+def risk_ladder_pct(state: "ParameterState", base_pct: float, ladder: Sequence[float], ceiling_pct: float = 5.0) -> tuple[float, str]:
+    """Risco por operação do mercado: `ladder` = (base, operacional, validado) em % do capital, limitado por `ceiling_pct`.
+    Sobe só com amostra (30 / 50 casos OOS) E edge positivo nas janelas E estado NORMAL/REATIVADO. Cai para a base em ALERTA,
+    PROTEÇÃO, SUSPENSO, QUEBRADO, deterioração ou expectancy negativa. Nunca sobe por sequência de ganhos nem desce por sequência
+    de perdas fora dessas regras — o percentual é função do tier, não do humor."""
+    steps = [float(x) for x in ladder] if ladder else [base_pct]
+    while len(steps) < 3:
+        steps.append(steps[-1])
+    cap = float(ceiling_pct)
+    base = min(float(base_pct), cap)
+    if state.action not in ("NORMAL", "REATIVADO") or not state.edge_ok:
+        why = "sem edge confirmado" if state.action in ("NORMAL", "REATIVADO") else state.action
+        return base, f"base {base:g}% ({why})"
+    if state.n >= LADDER_TIERS[1]:
+        return min(steps[2], cap), f"{min(steps[2], cap):g}% (validado: {state.n} casos, edge positivo)"
+    if state.n >= LADDER_TIERS[0]:
+        return min(steps[1], cap), f"{min(steps[1], cap):g}% (operacional: {state.n} casos, edge positivo)"
+    return base, f"base {base:g}% ({state.tier}: {state.n} casos)"
 
 
 def render_table(states: Sequence[ParameterState]) -> str:

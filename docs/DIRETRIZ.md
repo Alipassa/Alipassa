@@ -509,3 +509,15 @@ Mais inteligência → mais oportunidades detectadas → mais setups qualificado
 4. Mais oportunidades não significa mais lucro: `portfolio-sim` compara 1 × 2 × 3 × 4 posições simultâneas com as operações fora da amostra,
    líquido de spread/slippage e correlação, e só o retorno líquido com drawdown proporcional justifica subir `MAX_ENTRIES_PER_CYCLE`, `MAX_TOTAL_OPEN_RISK`
    e `MAX_CORRELATED_RISK` no .env.
+
+## Adendo 5.2c — ESCADA DE RISCO `[lifecycle.risk_ladder_pct, guard.GuardLimits.ladder, live_engine.risk_usd]`
+
+1. O percentual de risco por operação não é uma opinião sobre o sistema; é função do tier do ciclo de vida de cada mercado:
+   base (RISK_PER_TRADE) enquanto candidato (<30 casos fora da amostra) · degrau 2 em operacional (≥30) · degrau 3 em validado (≥50).
+   `.env`: `RISK_LADDER=3,4,5`, `RISK_LADDER_MAX=5` (teto absoluto; nada acima dele, por nenhum motivo).
+2. Sobe só com edge confirmado: expectancy positiva em todas as janelas com n ≥ 10, sem deterioração, estado NORMAL ou REATIVADO.
+   Em ALERTA (3 perdas seguidas), PROTEÇÃO (4), SUSPENSO (5), QUEBRADO ou expectancy negativa o mercado volta à base — automaticamente.
+3. A escada é decidida antes dos resultados e nunca mexida depois de ganhos ou perdas. Não se sobe um degrau por uma boa semana nem se
+   desce por uma má; sobe-se por amostra e desce-se por regra. Pedir 10% "porque um bom sistema não perde" continua vetado: cinco perdas
+   a 10% são −41% do capital e exigem +69% para voltar; a 5% são −23% e exigem +29%.
+4. Os demais limites continuam por cima da escada: MAX_DAILY_LOSS, MAX_TOTAL_OPEN_RISK, MAX_CORRELATED_RISK, MAX_LOT, META DIÁRIA (trava).

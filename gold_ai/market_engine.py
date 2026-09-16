@@ -317,6 +317,16 @@ class MarketAIEngine:
                 self.sender.send(f"♻️ {sym}: parâmetro revalidado — volta ao modo {real_mode.value}.")
             if changed and st.action in ("ALERTA", "PROTEÇÃO", "SUSPENSO", "REATIVADO"):
                 self.sender.send({"ALERTA": "⚠️", "PROTEÇÃO": "🟠", "SUSPENSO": "🔴", "REATIVADO": "♻️"}[st.action] + f" {sym}: {st.note}")
+            # ESCADA DE RISCO: % por operação em função do tier (30 → operacional, 50 → validado) e do edge; teto RISK_LADDER_MAX
+            from .lifecycle import risk_ladder_pct
+            pct, why = risk_ladder_pct(st, self.limits.risk_per_trade_pct, self.limits.ladder(), self.limits.risk_ladder_max_pct)
+            prev_pct = eng.risk_pct if eng.risk_pct is not None else self.limits.risk_per_trade_pct
+            eng.risk_pct = pct
+            if abs(pct - prev_pct) > 1e-9 and hasattr(self, "_ladder_ready"):
+                self.sender.send(f"🪜 {sym}: risco por operação {prev_pct:g}% → {pct:g}% — {why}")
+            self.risk_notes = getattr(self, "risk_notes", {})
+            self.risk_notes[sym] = why
+        self._ladder_ready = True
 
     def open_exposures(self) -> list[OpenExposure]:
         out = []
@@ -433,6 +443,9 @@ class MarketAIEngine:
         if getattr(self, "lifecycle", None):
             from .lifecycle import render_table
             lines.append(render_table(list(self.lifecycle.values())))
+            lad = self.limits.ladder()
+            lines.append(f"🪜 ESCADA DE RISCO: base {lad[0]:g}% · operacional (30 OOS) {lad[1]:g}% · validado (50 OOS) {lad[2]:g}% · teto {self.limits.risk_ladder_max_pct:g}% — "
+                         + " · ".join(f"{sym} {getattr(self, 'risk_notes', {}).get(sym, '')}" for sym in self.specs))
         if self.edge_bank is not None and self.edge_bank.stats:
             lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))
         rows = self.mem.flow_anomaly_rows()

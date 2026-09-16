@@ -62,7 +62,7 @@ class EdgeTests(unittest.TestCase):
             self.assertEqual(by["WTI"].status, "⚪")
             self.assertEqual(rep.ranked()[0].symbol, "EURUSD")
             txt = rep.render()
-            for key in ("MARKET AI — LIVE EDGE", "OOS Trades: 120", "Expectancy:", "Probabilidade calibrada:", "Capture Rate:", "Status: 🟢", "Melhor edge vivido: EURUSD", "Capital: 10,500.00"):
+            for key in ("MARKET AI — LIVE EDGE", "OOS Trades: 120", "Expectancy:", "Prob. calibrada:", "Capture Rate:", "Status: 🟢", "Melhor edge vivido: EURUSD", "Capital: 10,500.00"):
                 self.assertIn(key, txt)
             self.assertTrue(all(len(l) == len(txt.splitlines()[0]) for l in txt.splitlines()[:-2]))   # caixa alinhada
             # persistência e evolução

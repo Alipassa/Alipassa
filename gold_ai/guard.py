@@ -34,6 +34,17 @@ class GuardLimits(RiskLimits):
     max_drawdown_pct: float = 10.0
     min_rr_to_structure: float = 2.0     # se a resistência/suporte forte estiver antes disto (em R), não há expectativa
     daily_target_pct: float = 0.0        # META DIÁRIA (0 = desligada): ao atingir, sem novas entradas até o dia seguinte — trava, não obrigação
+    risk_ladder: tuple = ()              # ESCADA (5.2): (base, operacional 30 OOS, validado 50 OOS) em %; vazio = proporcional à base (×1, ×4/3, ×5/3)
+    risk_ladder_max_pct: float = 5.0     # teto absoluto da escada
+
+    def ladder(self) -> tuple[float, float, float]:
+        if self.risk_ladder:
+            xs = [float(x) for x in self.risk_ladder][:3]
+            while len(xs) < 3:
+                xs.append(xs[-1])
+            return tuple(min(x, self.risk_ladder_max_pct) for x in xs)
+        b = float(self.risk_per_trade_pct)
+        return (b, min(round(b * 4 / 3, 2), self.risk_ladder_max_pct), min(round(b * 5 / 3, 2), self.risk_ladder_max_pct))
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> "GuardLimits":
@@ -42,6 +53,10 @@ class GuardLimits(RiskLimits):
         g.max_drawdown_pct = float(env.get("MAX_DRAWDOWN", g.max_drawdown_pct))
         g.min_rr_to_structure = float(env.get("MIN_RR_TO_STRUCTURE", g.min_rr_to_structure))
         g.daily_target_pct = float(env.get("DAILY_TARGET", g.daily_target_pct) or 0.0)
+        g.risk_ladder_max_pct = float(env.get("RISK_LADDER_MAX", g.risk_ladder_max_pct))
+        raw = str(env.get("RISK_LADDER", "") or "").strip()
+        if raw:
+            g.risk_ladder = tuple(float(x) for x in raw.split(",") if x.strip())
         return g
 
 

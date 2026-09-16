@@ -93,7 +93,7 @@ class LiveEdgeReport:
         out = [top, "║" + "MARKET AI — LIVE EDGE".center(width) + "║", "║" + f"{self.date} · fora da amostra por construção".center(width) + "║", mid]
         for m in self.ranked():
             out += [line(m.symbol), line(f"OOS Trades: {m.n_trades}"), line(f"Expectancy: {m.expectancy:+.2f}R  (ajustada {m.confidence.shrunk:+.2f}R)"),
-                    line(f"Probabilidade calibrada: {pct(m.prob_observed)}" + (f"  (declarada {pct(m.prob_declared)}, n={m.n_predictions})" if m.prob_declared is not None else "")),
+                    line(f"Prob. calibrada: {pct(m.prob_observed)}" + (f" (decl. {pct(m.prob_declared)}, n={m.n_predictions})" if m.prob_declared is not None else "")),
                     line(f"Capture Rate: {pct(m.capture_rate)}  · Entry Rate: {pct(m.entry_rate)}"),
                     line(f"Win: {m.win_rate:.0%} · PF: {m.profit_factor if m.profit_factor is not None else 'n/d'} · {m.pnl_usd:+,.2f} USD"),
                     line(f"Status: {m.status}  {m.status_reason}"), mid]
