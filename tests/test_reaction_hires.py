@@ -541,3 +541,19 @@ class SameInstantMergeTests(unittest.TestCase):
         if (items2[0][1] > 0) != (exp2 > 0):
             lead2 = {k: -v for k, v in lead2.items()}
         self.assertEqual(lead2["USD"], -0.6)                                  # desemprego dominou: líder acompanha
+
+
+class MergeTicksByHourTests(unittest.TestCase):
+    def test_broker_hours_kept_and_empty_hours_filled(self):
+        from datetime import datetime, timedelta, timezone
+        from gold_ai.reaction_hires import merge_ticks_by_hour
+        t0 = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
+        broker = [(t0 + timedelta(minutes=m), 1.1, 1.1001) for m in range(0, 60, 5)]              # hora 12 coberta pela corretora
+        duka = [(t0 + timedelta(minutes=m), 1.2, 1.2001) for m in range(0, 60, 1)] + \
+               [(t0 + timedelta(hours=1, minutes=m), 1.3, 1.3001) for m in range(0, 60, 1)]      # hora 12 (ignorada) + hora 13 (nova)
+        out, added = merge_ticks_by_hour(broker, duka)
+        self.assertEqual(added, 1)
+        self.assertEqual(len(out), 12 + 60)
+        self.assertTrue(all(b == 1.1 for t, b, a in out if t.hour == 12))                         # nada do Dukascopy na hora da corretora
+        self.assertTrue(all(b == 1.3 for t, b, a in out if t.hour == 13))
+        self.assertEqual([t for t, _, _ in out], sorted(t for t, _, _ in out))

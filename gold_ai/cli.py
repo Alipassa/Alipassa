@@ -397,19 +397,28 @@ def cmd_history(args: argparse.Namespace) -> int:
                 return 1
             ev_times = [e.published_at for e in hist.events if e.revised is None and e.category in ("MACRO", "CENTRAL_BANK") and start <= e.published_at.date() <= end]
             print(f"{len(ev_times)} eventos macro com hora exata entre {start} e {end}")
+        from .reaction_hires import load_ticks, merge_ticks_by_hour
         for sym in symbols:
             inst, sc = DUKA_INSTRUMENTS.get(sym, (sym, 1000.0))
             dest = os.path.join(out_dir, f"{sym}_ticks.csv")
+            existing = load_ticks(dest, print) if os.path.exists(dest) else []       # ticks da corretora (spread real): ficam
+            if existing:
+                print(f"{sym}: {len(existing):,} ticks já no arquivo ({existing[0][0]:%d/%m/%Y} → {existing[-1][0]:%d/%m/%Y}) — o Dukascopy só completa as horas vazias")
+
+            def merged(new, existing=existing):
+                return merge_ticks_by_hour(existing, new)[0]
             try:
-                ticks = imp.range(sym, start, end, args.scale, checkpoint=lambda t, d=dest: save_ticks(t, d)) if args.full else \
-                    imp.around_events(sym, ev_times, args.before, args.after, args.scale, checkpoint=lambda t, d=dest: save_ticks(t, d))
+                ticks = imp.range(sym, start, end, args.scale, checkpoint=lambda t, d=dest, m=merged: save_ticks(m(t), d)) if args.full else \
+                    imp.around_events(sym, ev_times, args.before, args.after, args.scale, checkpoint=lambda t, d=dest, m=merged: save_ticks(m(t), d))
             except Exception as e:  # noqa: BLE001
                 print(f"{sym} ({inst}): FALHOU — {e}")
                 hard_failed = True
                 continue
-            n = save_ticks(ticks, dest)
+            allt, hours_added = merge_ticks_by_hour(existing, ticks)
+            n = save_ticks(allt, dest)
             first = f" · 1º tick {ticks[0][0]:%Y-%m-%d %H:%M} bid {ticks[0][1]:g} ask {ticks[0][2]:g} (confira a escala!)" if ticks else " · nenhum tick (instrumento/escala/período?)"
-            print(f"{sym} ({inst}, escala {args.scale or sc:g}): {n} ticks → {dest}{first}")
+            span = f" · cobertura {allt[0][0]:%d/%m/%Y} → {allt[-1][0]:%d/%m/%Y}" if allt else ""
+            print(f"{sym} ({inst}, escala {args.scale or sc:g}): {len(ticks):,} ticks do Dukascopy · {hours_added} hora(s) nova(s) · {n:,} no arquivo{span} → {dest}{first}")
         if imp.failed or hard_failed:
             print(f"\n{len(imp.failed)} hora(s) falharam" + (" e houve símbolo com falha total" if hard_failed else "") +
                   ". Repita o mesmo comando: as horas já baixadas estão em cache e só as que faltam são pedidas.")
@@ -629,7 +638,8 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
         if lp:
             leads["USD"] = lp
             usd_sign = USD_LEADER_SIGN.get(args.lead_usd.upper(), 1.0)
-            print(f"líder USD: {args.lead_usd} ({kind})" + (" · sinal invertido: este par cai quando o dólar sobe" if usd_sign < 0 else ""))
+            span = f" · cobertura {lp.q[0].time:%d/%m/%Y} → {lp.q[-1].time:%d/%m/%Y} ({len(lp.q):,} cotações)" if lp.q else ""
+            print(f"líder USD: {args.lead_usd} ({kind}){span}" + (" · sinal invertido: este par cai quando o dólar sobe" if usd_sign < 0 else ""))
         else:
             print(f"líder USD {args.lead_usd}: arquivo não encontrado em {csv_dir} (sem líder USD → lead-lag e trade sim ficam vazios)")
     if args.lead_yield:
@@ -666,7 +676,10 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
             chans = TRANSMISSION.get(e.kind) or EXTRA_TRANSMISSION.get(e.kind) or {}
             lead_dirs = {"USD": usd_sign * sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}
             per_instant.setdefault(e.published_at.replace(second=0, microsecond=0), []).append((e, exp, lead_dirs, abs(sigma) if sigma is not None else 1.0))
-        ambiguous, merged = 0, 0
+        ambiguous, merged, outside = 0, 0, 0
+        lead_usd = leads.get("USD")
+        lead_lo = lead_usd.q[0].time if (lead_usd and lead_usd.q) else None
+        lead_hi = lead_usd.q[-1].time if (lead_usd and lead_usd.q) else None
         for t0, items in sorted(per_instant.items()):
             # a SURPRESA MAIOR decide (NFP forte + desemprego pior no mesmo segundo → vence quem surpreendeu mais, em desvios típicos);
             # ambíguo só quando as surpresas se anulam
@@ -689,8 +702,12 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
                 all_recs.append(rec)
                 sim_items.append((rec, path, atr))
                 n += 1
+                if lead_lo is not None and not (lead_lo <= e.published_at <= lead_hi):
+                    outside += 1
+        span = f" · cobertura {path.q[0].time:%d/%m/%Y} → {path.q[-1].time:%d/%m/%Y}" if path.q else ""
         extra = (f" · {merged} rótulo(s) fundido(s) no mesmo instante" if merged else "") + (f" · {ambiguous} instante(s) ambíguo(s) ignorado(s)" if ambiguous else "")
-        print(f"{sym}: {n} publicações medidas em {kind} (resolução {path.resolution_sec:.0f} s){extra}")
+        extra += (f" · ⚠️ {outside} publicação(ões) fora da cobertura do líder (sem c/líd — não é falha de reação, é falta de ticks do líder)" if outside else "")
+        print(f"{sym}: {n} publicações medidas em {kind} (resolução {path.resolution_sec:.0f} s){span}{extra}")
     ll = LeadLagStats(all_recs)
     sim = ReactionTradeSim(slippage_atr=args.slippage, latency_sec=args.latency)
     from .reaction_hires import asset_verdicts, render_verdicts, save_reaction_edge

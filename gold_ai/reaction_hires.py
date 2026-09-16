@@ -410,6 +410,22 @@ def load_ticks(path: str, log: Optional[Callable[[str], None]] = None) -> list[t
     return out
 
 
+def merge_ticks_by_hour(existing: Sequence[tuple[datetime, float, float]], new: Sequence[tuple[datetime, float, float]]) -> tuple[list, int]:
+    """Completa por HORA: uma hora que já tem ticks da corretora (spread real) fica intocada; horas vazias recebem os ticks novos.
+    Nunca mistura duas fontes dentro da mesma hora (preços ligeiramente diferentes criariam ruído falso). Devolve (ticks, horas adicionadas)."""
+    have = {t.replace(minute=0, second=0, microsecond=0) for t, _, _ in existing}
+    added_hours = set()
+    out = list(existing)
+    for t, b, a in new:
+        h = t.replace(minute=0, second=0, microsecond=0)
+        if h in have:
+            continue
+        added_hours.add(h)
+        out.append((t, b, a))
+    out.sort(key=lambda x: x[0])
+    return out, len(added_hours)
+
+
 def save_candles(candles: Sequence[Candle], path: str) -> int:
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
