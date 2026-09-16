@@ -8740,6 +8740,45 @@ class TelegramCommands:
     offset: int = 0
     pending_close: bool = False
     last_cmds: list[str] = field(default_factory=list)
+    offset_path: Optional[str] = None            # persistência do ponteiro: um reinício não reexecuta comandos antigos
+    started_at: float = field(default_factory=time.time)
+    MAX_AGE_SEC: int = 120                       # comando mais velho que isto (antes da partida) é descartado
+
+    def __post_init__(self) -> None:
+        if self.offset_path and os.path.exists(self.offset_path):
+            try:
+                with open(self.offset_path, encoding="utf-8") as f:
+                    self.offset = max(self.offset, int(f.read().strip() or 0))
+            except (OSError, ValueError):
+                pass
+
+    def _save_offset(self) -> None:
+        if not self.offset_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.offset_path) or ".", exist_ok=True)
+            with open(self.offset_path, "w", encoding="utf-8") as f:
+                f.write(str(self.offset))
+        except OSError:
+            pass
+
+    def filter_updates(self, updates: list, now: Optional[float] = None) -> list[str]:
+        """Avança o ponteiro por TODAS as atualizações; devolve só comandos do chat certo e recentes (≤ MAX_AGE_SEC antes da partida)."""
+        now = now if now is not None else time.time()
+        cmds: list[str] = []
+        for upd in updates:
+            self.offset = max(self.offset, int(upd["update_id"]) + 1)
+            msg = upd.get("message") or {}
+            if str((msg.get("chat") or {}).get("id")) != str(self.chat_id):
+                continue
+            date = float(msg.get("date") or now)
+            if date < self.started_at - self.MAX_AGE_SEC:
+                continue                                                      # relíquia de antes do reinício: ignora
+            text = (msg.get("text") or "").strip()
+            if text.startswith("/"):
+                cmds.append(text.upper())
+        self._save_offset()
+        return cmds
 
     def poll(self) -> list[str]:  # pragma: no cover - rede
         if not self.token:
@@ -8750,16 +8789,7 @@ class TelegramCommands:
                 data = json.loads(resp.read().decode())
         except Exception:  # noqa: BLE001
             return []
-        cmds: list[str] = []
-        for upd in data.get("result", []):
-            self.offset = max(self.offset, int(upd["update_id"]) + 1)
-            msg = upd.get("message") or {}
-            if str((msg.get("chat") or {}).get("id")) != str(self.chat_id):
-                continue
-            text = (msg.get("text") or "").strip()
-            if text.startswith("/"):
-                cmds.append(text.upper())
-        return cmds
+        return self.filter_updates(data.get("result", []))
 
     def apply(self, cmds: list[str], ks: KillSwitch) -> list[str]:
         """Aplica ao kill switch; devolve ações que o loop deve executar: STATUS, CLOSE_CONFIRMED."""
@@ -13532,7 +13562,7 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         mode = TradingMode.PAPER
     data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env({**env, **os.environ}))
     sender = TelegramSender(dry_run=not args.send)
-    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
+    commands = TelegramCommands(sender.token, sender.chat_id, offset_path=os.path.join("dados", "telegram_offset.txt")) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
     edge = load_reaction_edge(args.reaction_edge) if getattr(args, "reaction_edge", None) else {}
     if edge:
@@ -14508,7 +14538,7 @@ def cmd_live(args: argparse.Namespace) -> int:
             calibrator = IsotonicCalibrator.from_dict(json.load(f))
         print(f"calibrador carregado: {args.calibrator}")
     sender = TelegramSender(dry_run=not args.send)
-    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
+    commands = TelegramCommands(sender.token, sender.chat_id, offset_path=os.path.join("dados", "telegram_offset.txt")) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
     live = LiveExecutionEngine(mem, limits, mode, args.equity, executor, sender, ks, commands, args.horizon,
                                GoldAIEngine(EngineConfig(), calibrator=calibrator), authorized=args.authorize)

@@ -30,3 +30,22 @@ class TelegramRobustnessTests(unittest.TestCase):
             self.assertFalse(s.send("x" * 5000))                               # duas mensagens, ambas falham, nenhuma exceção
         finally:
             urllib.request.urlopen = orig
+
+
+class TelegramCommandOffsetTests(unittest.TestCase):
+    def test_offset_persists_and_old_commands_are_dropped(self):
+        import os
+        import tempfile
+        import time
+        from gold_ai.guard import TelegramCommands
+        now = time.time()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "off.txt")
+            tc = TelegramCommands("t", "42", offset_path=path)
+            ups = [{"update_id": 10, "message": {"chat": {"id": 42}, "date": now - 3600, "text": "/PAUSE"}},     # de antes do reinício
+                   {"update_id": 11, "message": {"chat": {"id": 99}, "date": now, "text": "/STOP"}},            # outro chat
+                   {"update_id": 12, "message": {"chat": {"id": 42}, "date": now, "text": "/status"}}]
+            self.assertEqual(tc.filter_updates(ups, now), ["/STATUS"])
+            self.assertEqual(tc.offset, 13)
+            tc2 = TelegramCommands("t", "42", offset_path=path)                  # reinício: retoma do ponteiro salvo
+            self.assertEqual(tc2.offset, 13)

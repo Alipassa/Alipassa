@@ -196,7 +196,7 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         mode = TradingMode.PAPER
     data = MultiMarketData(symbols, dcfg, mt5_client=mt5_client, mt5_symbol_map=MultiMarketData.symbol_map_from_env({**env, **os.environ}))
     sender = TelegramSender(dry_run=not args.send)
-    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
+    commands = TelegramCommands(sender.token, sender.chat_id, offset_path=os.path.join("dados", "telegram_offset.txt")) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
     from .reaction_hires import load_reaction_edge
     from .selector import AssetSelector
@@ -1274,7 +1274,7 @@ def cmd_live(args: argparse.Namespace) -> int:
             calibrator = IsotonicCalibrator.from_dict(json.load(f))
         print(f"calibrador carregado: {args.calibrator}")
     sender = TelegramSender(dry_run=not args.send)
-    commands = TelegramCommands(sender.token, sender.chat_id) if (args.send and not sender.dry_run) else None
+    commands = TelegramCommands(sender.token, sender.chat_id, offset_path=os.path.join("dados", "telegram_offset.txt")) if (args.send and not sender.dry_run) else None
     mem = PredictionMemory(args.db)
     live = LiveExecutionEngine(mem, limits, mode, args.equity, executor, sender, ks, commands, args.horizon,
                                GoldAIEngine(EngineConfig(), calibrator=calibrator), authorized=args.authorize)
