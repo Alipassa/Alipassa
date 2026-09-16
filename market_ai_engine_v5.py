@@ -2649,18 +2649,61 @@ class TelegramSender:
         self.quiet = quiet
         self.sent: list[str] = []
 
+    MAX_LEN = 3900          # limite do Telegram é 4096 caracteres por mensagem
+
+    @staticmethod
+    def chunks(text: str, limit: int = 3900) -> list[str]:
+        """Divide em pedaços ≤ limit, cortando em quebra de linha; um /STATUS longo vira 2–3 mensagens em vez de um erro 400."""
+        if len(text) <= limit:
+            return [text]
+        out, cur = [], ""
+        for line in text.split("\n"):
+            while len(line) > limit:                       # linha isolada maior que o limite: corta na marra
+                if cur:
+                    out.append(cur)
+                    cur = ""
+                out.append(line[:limit])
+                line = line[limit:]
+            if cur and len(cur) + 1 + len(line) > limit:
+                out.append(cur)
+                cur = line
+            else:
+                cur = line if not cur else cur + "\n" + line
+        if cur:
+            out.append(cur)
+        return out
+
     def send(self, text: str) -> bool:
+        """Nunca levanta exceção: um erro do Telegram (400 texto longo, rede fora, 429) é registrado e o robô continua o ciclo."""
         if self.dry_run:
             self.sent.append(text)
             if not self.quiet:
                 print("\n[TELEGRAM dry-run]\n" + text + "\n")
             return True
+        ok = True
+        for part in self.chunks(text, self.MAX_LEN):
+            ok = self._post(part) and ok
+        return ok
+
+    def _post(self, text: str) -> bool:
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         data = urllib.parse.urlencode({"chat_id": self.chat_id, "text": text, "disable_web_page_preview": "true"}).encode()
         req = urllib.request.Request(url, data=data, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
-            body = json.loads(resp.read().decode())
-            return bool(body.get("ok"))
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+                body = json.loads(resp.read().decode())
+                return bool(body.get("ok"))
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = json.loads(e.read().decode()).get("description", "")
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"[telegram] falhou ({e.code}): {detail or e.reason} — mensagem de {len(text)} caracteres não entregue; o robô continua")
+            return False
+        except Exception as e:  # noqa: BLE001 — rede/DNS/timeout: nunca derrubar o ciclo por causa do Telegram
+            print(f"[telegram] falhou: {e} — o robô continua")
+            return False
 
 
 def format_decision(decision) -> str:
