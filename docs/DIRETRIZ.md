@@ -521,3 +521,18 @@ Mais inteligência → mais oportunidades detectadas → mais setups qualificado
    desce por uma má; sobe-se por amostra e desce-se por regra. Pedir 10% "porque um bom sistema não perde" continua vetado: cinco perdas
    a 10% são −41% do capital e exigem +69% para voltar; a 5% são −23% e exigem +29%.
 4. Os demais limites continuam por cima da escada: MAX_DAILY_LOSS, MAX_TOTAL_OPEN_RISK, MAX_CORRELATED_RISK, MAX_LOT, META DIÁRIA (trava).
+
+## Adendo 5.2d — MATRIZ DE DECISÃO `[matrix.build_matrix, portfolio_sim]`
+
+1. Confirmações mínimas e posições simultâneas não são escolhidas de antemão: a matriz confirmações 1→5 × posições 1→4 é medida
+   com o mesmo motor do backtest, custos reais e os limites de risco do .env. O teste descobre; a pessoa lê.
+2. Métricas por célula: operações, recusadas, acerto, R bruto/líquido, expectancy, lucro, custos, MFE, MAE, drawdown, maior sequência
+   de perdas, duração média, por ativo, por tipo de evento, 1ª × 2ª metade.
+3. A escolha é feita só na 1ª metade (retorno − drawdown, n ≥ 20) e conferida na 2ª. Parâmetro que só funciona numa metade é coincidência.
+4. A matriz não altera o live. Um candidato que sobrevive fora da amostra vira sugestão de MIN_CONFIRMATIONS / MAX_ENTRIES_PER_CYCLE,
+   entra em SOMBRA no autotune e sobe pelo ciclo de vida (20/30/50). Mais posições só valem se o retorno líquido sobe sem o drawdown
+   subir desproporcionalmente. O risco por operação continua fixo pela escada (5.2c), nunca por este quadro.
+5. Leitura estratégica: o H1 é seletivo por natureza (oito meses de ouro ≈ 17 operações no melhor caso). Afrouxar o funil não é o
+   próximo salto; o salto é a camada TICK → M1 → Reaction Clock → lead/lag → Flow Anomaly → propagação → entrada rápida → monitoramento,
+   que pode enxergar o que o H1 não vê. Nível 1 (edge possível em certas condições) demonstrado; nível 2 (parâmetros que sobrevivem OOS)
+   em validação; nível 3 (propagação líder → atrasado) é a oportunidade que diferencia o sistema de um robô de indicadores.

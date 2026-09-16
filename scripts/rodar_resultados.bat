@@ -57,6 +57,10 @@ set "NOME=8g/8 PORTFOLIO SIM - 1 x 2 x 3 x 4 posicoes simultaneas com as operaco
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" portfolio-sim --start %INICIO% --end %FIM% --markets %MERCADOS% --out portfolio_sim.txt"
 call :passo
 
+set "NOME=8h/8 MATRIZ - confirmacoes 1..5 x posicoes simultaneas 1..4: n, acerto, R, expectancy, lucro, custos, MFE, MAE, DD, sequencia, duracao, por ativo/evento, 1a x 2a metade (matriz.txt)"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" matrix --start %INICIO% --end %FIM% --markets %MERCADOS% --out matriz.txt"
+call :passo
+
 set "NOME=8e/8 AUTOTUNE - a IA procura piso/confirmacoes/limiar no passado (dados\parametros.json; o live adota so com 20 casos OOS)"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" autotune --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\parametros.json"
 call :passo

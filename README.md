@@ -318,6 +318,19 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
 ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
 
+**Matriz de decisão (`matrix`, etapa 8h).** Não se escolhe antecipadamente quantas confirmações nem quantas posições. O comando reprocessa
+cada mercado com confirmações mínimas 1 → 2 → 3 → 4 → 5 (só esse parâmetro muda) e põe as operações de todos os mercados na carteira
+simulada com 1, 2, 3 e 4 posições simultâneas, com os limites de risco do `.env` e custo por operação. Para cada célula: operações,
+recusadas, acerto, R bruto e líquido, expectancy, lucro em USD, custos, MFE, MAE, drawdown, maior sequência de perdas, duração média,
+resultado por ativo, por tipo de evento e nas duas metades do período. A célula "vencedora" é escolhida só na 1ª metade
+(retorno − drawdown, n ≥ 20) e o que conta é o que ela rendeu na 2ª metade. O quadro é mapa, não gatilho: o live continua adotando
+parâmetros só pelo autotune e pelo ciclo de vida (20/30/50). Saída `matriz.txt` + `matriz.json`.
+
+```
+python market_ai_engine_v5.py matrix --start 2026-01-01 --markets XAUUSD,US500,EURUSD,USDJPY,WTI --out matriz.txt
+python market_ai_engine_v5.py matrix --confirmations 1,2,3 --positions 1,2 --risk 3 --cost 0.05 --out matriz.txt
+```
+
 **Oportunidades de carteira.** O ciclo pode abrir até `MAX_ENTRIES_PER_CYCLE` entradas (padrão 3), em ordem de prioridade do Asset Selector, cada uma
 pelo funil do seu mercado e pelo motor de exposição: risco total (`MAX_TOTAL_OPEN_RISK`), risco correlacionado = mesma tese (`MAX_CORRELATED_RISK`,
 correlação assinada pela direção: ouro comprado + euro comprado é a mesma aposta no dólar), posições e 1 por ativo. Quatro sinais de 3% não viram

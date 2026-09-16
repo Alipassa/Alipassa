@@ -23,6 +23,9 @@ class SimTrade:
     r: float
     exit_time: datetime
     cost_r: float = 0.0
+    mfe: float = 0.0            # excursão máxima a favor (R, stop inicial)
+    mae: float = 0.0            # excursão máxima contra (R)
+    kind: str = ""              # tipo do evento identificado ≤ 4 h antes ("" = sem evento)
 
 
 @dataclass
@@ -37,6 +40,14 @@ class PortfolioResult:
     end_equity: float = 0.0
     max_dd_pct: float = 0.0
     peak_concurrent: int = 0
+    gross_r: float = 0.0                 # R antes do custo
+    costs_usd: float = 0.0               # custo total (spread + slippage) em USD
+    max_losing_streak: int = 0
+    avg_hours: float = 0.0               # duração média (entrada → saída)
+    mfe_avg: float = 0.0
+    mae_avg: float = 0.0
+    by_symbol: dict = field(default_factory=dict)   # sym → [n, soma R]
+    by_kind: dict = field(default_factory=dict)     # tipo de evento → [n, soma R]
 
     def row(self, start_equity: float) -> str:
         ret = (self.end_equity / start_equity - 1) * 100 if start_equity else 0.0
@@ -54,7 +65,9 @@ def trades_from_rows(rows_by_symbol: dict, strategy: str = "adaptive", default: 
             exits = row.get("exits") or {}
             et = exits.get(strategy) or exits.get(default) or (row["time"] + timedelta(hours=4))
             d = Direction.ALTA if str(row.get("direction", "ALTA")).upper().startswith("ALTA") else Direction.BAIXA
-            out.append(SimTrade(row["time"], sym, d, float(r) - cost_r, et, cost_r))
+            prof = row.get("profile")
+            out.append(SimTrade(row["time"], sym, d, float(r) - cost_r, et, cost_r, float(getattr(prof, "max_r_before_stop", 0.0) or 0.0),
+                                float(getattr(prof, "mae_r", 0.0) or 0.0), str(row.get("event_kind", "") or "")))
     return sorted(out, key=lambda t: t.time)
 
 
@@ -65,6 +78,7 @@ def simulate_portfolio(trades: Sequence[SimTrade], max_positions: int, limits: P
     res = PortfolioResult(max_positions, 0, 0)
     open_: list[tuple[SimTrade, float]] = []          # (trade, risco em USD)
     eq, peak = equity, equity
+    streak, hours, mfe, mae = 0, 0.0, 0.0, 0.0
     for t in sorted(trades, key=lambda x: x.time):
         # fecha o que já saiu antes desta entrada (resultado realizado no fechamento)
         still = []
@@ -86,8 +100,22 @@ def simulate_portfolio(trades: Sequence[SimTrade], max_positions: int, limits: P
         open_.append((t, risk))
         res.admitted += 1
         res.net_r += t.r
+        res.gross_r += t.r + t.cost_r
+        res.costs_usd += t.cost_r * risk
         res.peak_concurrent = max(res.peak_concurrent, len(open_))
         res.win_rate += 1 if t.r > 0 else 0
+        streak = streak + 1 if t.r <= 0 else 0
+        res.max_losing_streak = max(res.max_losing_streak, streak)
+        hours += max(0.0, (t.exit_time - t.time).total_seconds() / 3600.0)
+        mfe += t.mfe
+        mae += t.mae
+        res.by_symbol.setdefault(t.symbol, [0, 0.0])
+        res.by_symbol[t.symbol][0] += 1
+        res.by_symbol[t.symbol][1] += t.r
+        k = t.kind or "sem evento"
+        res.by_kind.setdefault(k, [0, 0.0])
+        res.by_kind[k][0] += 1
+        res.by_kind[k][1] += t.r
     for tr, risk in sorted(open_, key=lambda x: x[0].exit_time):
         eq = round(eq + tr.r * risk, 2)
         peak = max(peak, eq)
@@ -95,6 +123,8 @@ def simulate_portfolio(trades: Sequence[SimTrade], max_positions: int, limits: P
     res.end_equity = eq
     res.expectancy = res.net_r / res.admitted if res.admitted else 0.0
     res.win_rate = res.win_rate / res.admitted if res.admitted else 0.0
+    if res.admitted:
+        res.avg_hours, res.mfe_avg, res.mae_avg = hours / res.admitted, mfe / res.admitted, mae / res.admitted
     return res
 
 

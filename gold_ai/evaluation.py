@@ -469,7 +469,13 @@ class Backtester:
                 sim = simulate_all(plan, xau[i + 1: min(end, i + 1 + horizon_bars + 2)], self.horizon_min)
                 row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
                        "score": a.score, "direction": sig.direction.value, "entry": a.price,
-                       "exits": {k: v.exit_time for k, v in sim["details"].items()}, "symbol": getattr(self.frame, "symbol", "XAUUSD")}
+                       "exits": {k: v.exit_time for k, v in sim["details"].items()}, "symbol": getattr(self.frame, "symbol", "XAUUSD"),
+                       "event_kind": ""}
+                last_ev = getattr(self.frame, "_last_identified", None) or []
+                if last_ev:
+                    ev0 = max(last_ev, key=lambda e: e.time)
+                    if a.time - ev0.time <= timedelta(hours=4):
+                        row["event_kind"] = str(getattr(ev0, "kind", "") or "")
                 trade_rows.append(row)
                 if self.adaptive_exit:
                     managed.append((ManagedTrade(len(trade_rows), plan, Thesis.from_assessment(a, sig.direction)), row, i))

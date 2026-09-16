@@ -1073,6 +1073,44 @@ def cmd_portfolio_sim(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_matrix(args: argparse.Namespace) -> int:
+    """MATRIZ 5.2: confirmações 1→5 × posições simultâneas 1→4 — o teste escolhe na 1ª metade, a 2ª metade confere (nada é adotado por este quadro)."""
+    from .config import EngineConfig
+    from .evaluation import Backtester
+    from .markets import get_market
+    from .matrix import build_matrix
+    from .selector import PortfolioLimits
+    from .telegram import load_env_file
+
+    if getattr(args, "events", None) and not os.path.exists(args.events):
+        print(f"(banco histórico {args.events} não encontrado — funil sem evento/relógio/fluxo)")
+        args.events = None
+    frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+    if not frames:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    env = load_env_file()
+    plim = PortfolioLimits.from_env(env)
+    risk = args.risk if args.risk is not None else float(env.get("RISK_PER_TRADE", 0.5))
+    confs = tuple(int(x) for x in args.confirmations.split(",")) if args.confirmations else (1, 2, 3, 4, 5)
+    poss = tuple(int(x) for x in args.positions.split(",")) if args.positions else (1, 2, 3, 4)
+    bts = {}
+    for sym, frame in frames.items():
+        cfg = _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)
+        bts[sym] = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
+    t0 = time.time()
+    rep = build_matrix(bts, plim, args.equity, risk, args.cost, confs, poss, args.strategy, args.start,
+                       args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d"), log=lambda m: print(f"  [{time.time() - t0:6.0f}s] {m}", flush=True))
+    txt = rep.render()
+    print("\n" + txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt)
+        rep.save(os.path.splitext(args.out)[0] + ".json" if not args.out.endswith(".json") else args.out)
+        print(f"\nmatriz salva em {args.out} (+ .json)")
+    return 0
+
+
 def cmd_autotune(args: argparse.Namespace) -> int:
     """AUTOTUNE (5.2): a IA procura piso/confirmações/limiar no passado (walk-forward) e grava dados/parametros.json; o live adota só com n OOS ≥ 20."""
     from .autotune import DEFAULT_GRID, TuneReport, autotune_market
@@ -1624,6 +1662,25 @@ def _main(argv: list[str]) -> int:
     at.add_argument("-v", "--verbose", action="store_true")
     at.add_argument("--out", default=os.path.join("dados", "parametros.json"))
     at.set_defaults(func=cmd_autotune)
+
+    mx = sub.add_parser("matrix", help="MATRIZ 5.2: confirmações 1→5 × posições simultâneas 1→4 (n, acerto, R, expectancy, lucro, custos, MFE, MAE, DD, sequência, duração, por ativo/evento, 1ª × 2ª metade)")
+    mx.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    mx.add_argument("--start", default="2026-01-01")
+    mx.add_argument("--end", default=None)
+    mx.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    mx.add_argument("--csv-dir", default=None)
+    mx.add_argument("--confirmations", default=None, help="níveis testados, ex.: 1,2,3,4,5 (padrão)")
+    mx.add_argument("--positions", default=None, help="posições simultâneas testadas, ex.: 1,2,3,4 (padrão)")
+    mx.add_argument("--strategy", default="adaptive")
+    mx.add_argument("--step", type=int, default=1)
+    mx.add_argument("--horizon", type=int, default=240)
+    mx.add_argument("--edge-score", type=float, default=None)
+    mx.add_argument("--signal-score", type=float, default=None)
+    mx.add_argument("--equity", type=float, default=10000.0)
+    mx.add_argument("--risk", type=float, default=None, help="risco %% por operação (padrão RISK_PER_TRADE do .env)")
+    mx.add_argument("--cost", type=float, default=0.05, help="custo por operação em R (spread+slippage)")
+    mx.add_argument("--out", default=None, help="ex.: matriz.txt (gera também matriz.json)")
+    mx.set_defaults(func=cmd_matrix)
 
     sw = sub.add_parser("sweep", help="sweep de piso de vantagem no walk-forward (piso escolhido no treino de cada fold) + sensibilidade OOS")
     sw.add_argument("--csv", default=None)
