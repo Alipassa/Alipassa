@@ -6381,16 +6381,35 @@ class LeadLagRow:
                 f"{f(self.median_lag_sec, '{:>7.0f}'):>8}{self.median_short_mfe:>7.2f}{self.median_short_mae:>7.2f}{self.median_follow_mfe:>7.2f}{self.median_spread_atr:>8.3f}  {b}")
 
 
+SCHEDULED_KINDS = frozenset({"cpi", "core_cpi", "pce", "core_pce", "ppi", "nfp", "unemployment", "jobless_claims", "gdp", "earnings", "retail_sales",
+                             "ism", "ism_services", "oil_inventories", "fomc", "ecb", "boj", "consumer_confidence", "durable_goods", "housing"})
+
+
+def event_family(kind: str) -> str:
+    """Famílias para agregar amostra: 'Σ agendado' (releases com hora exata: NFP, CPI, PPI…) × 'Σ manchete' (GDELT/notícia: geopolítica,
+    China, petróleo, banco central…). Um rótulo composto 'nfp+earnings' é agendado se qualquer parte for release."""
+    parts = [x.strip().lower() for x in str(kind).split("+")]
+    return "Σ agendado" if any(x in SCHEDULED_KINDS for x in parts) else "Σ manchete"
+
+
+def _grouped(records, key_kind):
+    groups: dict[tuple[str, str], list] = {}
+    for item in records:
+        rec = item[0] if isinstance(item, tuple) else item
+        groups.setdefault((key_kind(rec), rec.target), []).append(item)
+    return groups
+
+
 class LeadLagStats:
     def __init__(self, records: Sequence[HiResRecord]) -> None:
         self.records = list(records)
 
     def rows(self) -> list[LeadLagRow]:
-        groups: dict[tuple[str, str], list[HiResRecord]] = {}
-        for r in self.records:
-            groups.setdefault((r.kind, r.target), []).append(r)
+        groups = _grouped(self.records, lambda r: r.kind)
+        pooled = _grouped(self.records, lambda r: event_family(r.kind))     # linhas Σ: a mesma publicação conta uma vez (dedupe feito antes)
+        groups = {**{k: v for k, v in pooled.items()}, **groups}
         out = []
-        for (kind, target), rs in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        for (kind, target), rs in sorted(groups.items(), key=lambda kv: (0 if kv[0][0].startswith("Σ") else 1, -len(kv[1]), kv[0])):
             with_lead = [r for r in rs if r.lead_first_sec is not None]
             no_lead = [r for r in rs if r.lead_first_sec is None]
             pc = lambda xs: (sum(1 for r in xs if r.base.direction_correct) / len(xs)) if xs else None  # noqa: E731
@@ -6415,6 +6434,7 @@ class LeadLagStats:
         lines = ["🔬 LEAD-LAG — quando o líder (USD/yields) se move após o evento, o alvo acompanha? (medianas em ATR)", head] + [r.row() for r in rows]
         lines.append(f"  resolução {res * 60:.0f} s · P(B|A) = P(alvo confirma ≥ 0,40 ATR | líder reagiu) · lag = 1ª reação do alvo − 1ª do líder · spread em ATR")
         lines.append("  amostra < 20 por linha = inconclusivo; T+Ns = movimento mediano do alvo N segundos após a publicação")
+        lines.append("  Σ agendado = todos os releases com hora exata (NFP, CPI, PPI, PCE, claims…) somados · Σ manchete = notícias GDELT somadas · uma publicação = um caso")
         return "\n".join(lines)
 
 
@@ -6484,11 +6504,10 @@ class ReactionTradeSim:
         return {"gross_short": gross_short, "cost": gross_short - net_short, "net_short": net_short, "net_follow": net_follow}
 
     def table(self, records: Sequence[tuple[HiResRecord, PricePath, float]], delays: Sequence[int] = DELAYS_SEC) -> list[TradeSimRow]:
-        groups: dict[tuple[str, str], list[tuple[HiResRecord, PricePath, float]]] = {}
-        for rec, path, atr in records:
-            groups.setdefault((rec.kind, rec.target), []).append((rec, path, atr))
+        groups = _grouped(records, lambda r: r.kind)
+        groups = {**_grouped(records, lambda r: event_family(r.kind)), **groups}
         out = []
-        for (kind, target), items in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        for (kind, target), items in sorted(groups.items(), key=lambda kv: (0 if kv[0][0].startswith("Σ") else 1, -len(kv[1]), kv[0])):
             for d in delays:
                 sims = [s for s in (self.simulate(rec, path, atr, d) for rec, path, atr in items) if s]
                 if not sims:
@@ -6909,7 +6928,7 @@ def render_stability(tick: Sequence[AssetVerdict], m1: Sequence[AssetVerdict]) -
     t = {v.symbol: v for v in tick}
     m = {v.symbol: v for v in m1}
     lines = [f"🧭 ESTABILIDADE TICK × M1 — evidência só é MUITO FORTE quando as duas resoluções apontam na mesma direção",
-             f"{'ativo':<8}{'TICK':<16}{'n':>5}{'líq.':>8}{'M1':<16}{'n':>5}{'líq.':>8}  conclusão"]
+             f"{'ativo':<8}{'TICK':<16}{'n':>5}{'líq.med':>8}{'M1':<16}{'n':>5}{'líq.med':>8}  conclusão"]
     label = {"🟢": "🟢 forte", "🟡": "🟡 moderado", "🔴": "🔴 sem edge", "⚪": "⚪ inconclusivo"}
     for sym in sorted(set(t) | set(m)):
         a, b = t.get(sym), m.get(sym)
@@ -6924,9 +6943,10 @@ def render_stability(tick: Sequence[AssetVerdict], m1: Sequence[AssetVerdict]) -
             concl = "🔴 uma resolução nega — não operar"
         else:
             concl = "🟡 moderado nas duas"
-        fa = (f"{a.n:>5}{a.net / STOP_ATR:>+7.2f}R" if a else f"{'':>5}{'':>8}")
-        fb = (f"{b.n:>5}{b.net / STOP_ATR:>+7.2f}R" if b else f"{'':>5}{'':>8}")
+        fa = (f"{a.n:>5}{a.robust / STOP_ATR:>+7.2f}R" if a else f"{'':>5}{'':>8}")
+        fb = (f"{b.n:>5}{b.robust / STOP_ATR:>+7.2f}R" if b else f"{'':>5}{'':>8}")
         lines.append(f"{sym:<8}{label[va]:<16}{fa}{label[vb]:<16}{fb}  {concl}")
+    lines.append("   líq. = MEDIANA das combinações atraso × saída com n ≥ 20 (a base do veredito), não o melhor caso; n = entradas do relógio, 0 = líder nunca reagiu a tempo")
     return "\n".join(lines)
 
 
@@ -13854,6 +13874,9 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
             print(f"{sym}: sem {sym}_{tf.lower()}.csv / {sym}_ticks.csv em {csv_dir} — exporte com `history prices --tf {tf} --markets {sym}`")
             continue
         n = 0
+        # UMA PUBLICAÇÃO = UM CASO: releases no mesmo instante (NFP + salário médio, CPI + núcleo) viram um único registro com rótulo
+        # composto ('nfp+earnings'); se as regras discordarem da direção, o instante é ambíguo e não é medido (contado abaixo)
+        per_instant: dict[datetime, list] = {}
         for e in hist.events:
             if e.revised is not None:
                 continue
@@ -13871,15 +13894,27 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
                 continue
             chans = TRANSMISSION.get(e.kind) or EXTRA_TRANSMISSION.get(e.kind) or {}
             lead_dirs = {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}
+            per_instant.setdefault(e.published_at.replace(second=0, microsecond=0), []).append((e, exp, lead_dirs, abs(sigma or 0.0)))
+        ambiguous, merged = 0, 0
+        for t0, items in sorted(per_instant.items()):
+            dirs = {x[1] for x in items}
+            if len(dirs) > 1:
+                ambiguous += 1
+                continue
+            items.sort(key=lambda x: -x[3])                                   # a maior surpresa dá o canal líder
+            e, exp, lead_dirs, _ = items[0]
+            label = "+".join(sorted({x[0].kind for x in items}))
+            merged += len(items) - 1
             atr = path.atr_at(e.published_at)
             if not atr:
                 continue
-            rec = measure_hires(e.event_id, e.kind, e.published_at, sym, exp, path, atr, leads, lead_dirs)
+            rec = measure_hires(e.event_id, label, e.published_at, sym, exp, path, atr, leads, lead_dirs)
             if rec:
                 all_recs.append(rec)
                 sim_items.append((rec, path, atr))
                 n += 1
-        print(f"{sym}: {n} eventos medidos em {kind} (resolução {path.resolution_sec:.0f} s)")
+        extra = (f" · {merged} rótulo(s) fundido(s) no mesmo instante" if merged else "") + (f" · {ambiguous} instante(s) ambíguo(s) ignorado(s)" if ambiguous else "")
+        print(f"{sym}: {n} publicações medidas em {kind} (resolução {path.resolution_sec:.0f} s){extra}")
     ll = LeadLagStats(all_recs)
     sim = ReactionTradeSim(slippage_atr=args.slippage, latency_sec=args.latency)
     delays_default = "1,5,10,30,60" if tf == "TICK" else "60,120,300"

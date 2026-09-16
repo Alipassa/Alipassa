@@ -640,6 +640,9 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
             print(f"{sym}: sem {sym}_{tf.lower()}.csv / {sym}_ticks.csv em {csv_dir} — exporte com `history prices --tf {tf} --markets {sym}`")
             continue
         n = 0
+        # UMA PUBLICAÇÃO = UM CASO: releases no mesmo instante (NFP + salário médio, CPI + núcleo) viram um único registro com rótulo
+        # composto ('nfp+earnings'); se as regras discordarem da direção, o instante é ambíguo e não é medido (contado abaixo)
+        per_instant: dict[datetime, list] = {}
         for e in hist.events:
             if e.revised is not None:
                 continue
@@ -657,15 +660,27 @@ def _reaction_learn_hires(args: argparse.Namespace, tf: Optional[str] = None, ed
                 continue
             chans = TRANSMISSION.get(e.kind) or EXTRA_TRANSMISSION.get(e.kind) or {}
             lead_dirs = {"USD": sign * chans.get("dollar", 0.0), "YIELD": sign * chans.get("yields", 0.0)}
+            per_instant.setdefault(e.published_at.replace(second=0, microsecond=0), []).append((e, exp, lead_dirs, abs(sigma or 0.0)))
+        ambiguous, merged = 0, 0
+        for t0, items in sorted(per_instant.items()):
+            dirs = {x[1] for x in items}
+            if len(dirs) > 1:
+                ambiguous += 1
+                continue
+            items.sort(key=lambda x: -x[3])                                   # a maior surpresa dá o canal líder
+            e, exp, lead_dirs, _ = items[0]
+            label = "+".join(sorted({x[0].kind for x in items}))
+            merged += len(items) - 1
             atr = path.atr_at(e.published_at)
             if not atr:
                 continue
-            rec = measure_hires(e.event_id, e.kind, e.published_at, sym, exp, path, atr, leads, lead_dirs)
+            rec = measure_hires(e.event_id, label, e.published_at, sym, exp, path, atr, leads, lead_dirs)
             if rec:
                 all_recs.append(rec)
                 sim_items.append((rec, path, atr))
                 n += 1
-        print(f"{sym}: {n} eventos medidos em {kind} (resolução {path.resolution_sec:.0f} s)")
+        extra = (f" · {merged} rótulo(s) fundido(s) no mesmo instante" if merged else "") + (f" · {ambiguous} instante(s) ambíguo(s) ignorado(s)" if ambiguous else "")
+        print(f"{sym}: {n} publicações medidas em {kind} (resolução {path.resolution_sec:.0f} s){extra}")
     ll = LeadLagStats(all_recs)
     sim = ReactionTradeSim(slippage_atr=args.slippage, latency_sec=args.latency)
     from .reaction_hires import asset_verdicts, render_verdicts, save_reaction_edge

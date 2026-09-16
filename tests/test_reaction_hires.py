@@ -499,3 +499,25 @@ class CorruptedCsvTests(unittest.TestCase):
             rows = cli._read_candles_csv(p)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1].volume, 0.0)
+
+
+class FamilyPoolingTests(unittest.TestCase):
+    def test_event_family_and_pooled_rows(self):
+        from datetime import datetime, timezone
+        from gold_ai.reaction import ReactionRecord
+        from gold_ai.reaction_hires import HiResRecord, LeadLagStats, event_family
+        self.assertEqual(event_family("nfp"), "Σ agendado")
+        self.assertEqual(event_family("nfp+earnings"), "Σ agendado")
+        self.assertEqual(event_family("geopolitical_escalation"), "Σ manchete")
+        recs = []
+        for i in range(30):
+            kind = ["nfp", "cpi", "geopolitical_escalation"][i % 3]
+            base = ReactionRecord(f"e{i}", kind, datetime(2026, 3, 1 + i % 20, 13, 30, tzinfo=timezone.utc), "EURUSD", 1.0, direction_correct=(i % 2 == 0))
+            recs.append(HiResRecord(base, {5: 0.1}, 0.3, 0.1, 0.5, 0.1, 0.02, None, None))
+        rows = LeadLagStats(recs).rows()
+        kinds = [r.kind for r in rows]
+        self.assertEqual(kinds[:2], ["Σ agendado", "Σ manchete"])                    # linhas Σ vêm primeiro
+        self.assertEqual(next(r.n for r in rows if r.kind == "Σ agendado"), 20)     # nfp + cpi somados
+        self.assertEqual(next(r.n for r in rows if r.kind == "Σ manchete"), 10)
+        txt = LeadLagStats(recs).render()
+        self.assertIn("Σ agendado", txt)
