@@ -1125,6 +1125,23 @@ def cmd_portfolio_sim(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_day(args: argparse.Namespace) -> int:
+    """EFICIÊNCIA DO DIA: análises, episódios SETUP/OPPORTUNITY, entradas, captura, R, USD, lote travado, motivos de não entrar, R não operado."""
+    from .efficiency import day_report
+    from .memory import PredictionMemory
+
+    mem = PredictionMemory(args.db)
+    day = datetime.fromisoformat(args.day).replace(tzinfo=timezone.utc) if args.day else datetime.now(timezone.utc)
+    syms = [x.strip().upper() for x in args.markets.split(",") if x.strip()]
+    txt = day_report(mem, day, syms).render()
+    print(txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt)
+    mem.close()
+    return 0
+
+
 def cmd_matrix(args: argparse.Namespace) -> int:
     """MATRIZ 5.2: confirmações 1→5 × posições simultâneas 1→4 — o teste escolhe na 1ª metade, a 2ª metade confere (nada é adotado por este quadro)."""
     from .config import EngineConfig
@@ -1714,6 +1731,13 @@ def _main(argv: list[str]) -> int:
     at.add_argument("-v", "--verbose", action="store_true")
     at.add_argument("--out", default=os.path.join("dados", "parametros.json"))
     at.set_defaults(func=cmd_autotune)
+
+    dy = sub.add_parser("dia", help="EFICIÊNCIA DO DIA: o que o robô viu, fez e deixou na mesa (também /DIA no Telegram; automático às DAILY_REPORT_UTC)")
+    dy.add_argument("--db", default="gold_ai.db")
+    dy.add_argument("--day", default=None, help="AAAA-MM-DD (padrão: hoje, UTC)")
+    dy.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    dy.add_argument("--out", default=None)
+    dy.set_defaults(func=cmd_day)
 
     mx = sub.add_parser("matrix", help="MATRIZ 5.2: confirmações 1→5 × posições simultâneas 1→4 (n, acerto, R, expectancy, lucro, custos, MFE, MAE, DD, sequência, duração, por ativo/evento, 1ª × 2ª metade)")
     mx.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))

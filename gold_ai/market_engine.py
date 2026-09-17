@@ -168,6 +168,27 @@ class MarketAIEngine:
                      f"confirmação {'—' if m['confirm_min'] is None else str(round(m['confirm_min'])) + ' min'}")
 
     # ------------------------------------------------------------------ comandos Telegram (carteira inteira)
+    def day_text(self, now: datetime, day: Optional[datetime] = None) -> str:
+        from .efficiency import day_report
+        return day_report(self.mem, day or now, list(self.specs)).render()
+
+    def maybe_daily_report(self, now: datetime) -> None:
+        """Envia a EFICIÊNCIA DO DIA uma vez por dia, na hora DAILY_REPORT_UTC (padrão 21 = fecho de Nova York)."""
+        import os as _os
+        try:
+            hour = int(_os.environ.get("DAILY_REPORT_UTC", "21"))
+        except ValueError:
+            hour = 21
+        if hour < 0:
+            return
+        key = now.strftime("%Y-%m-%d")
+        if now.hour >= hour and getattr(self, "_daily_sent", "") != key:
+            self._daily_sent = key
+            try:
+                self.sender.send(self.day_text(now))
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[eficiência] falhou: {e}")
+
     def _handle_commands(self, snaps: MarketSnapshotSet, pc: PortfolioCycle) -> None:
         if self.commands is None:
             return
@@ -181,6 +202,8 @@ class MarketAIEngine:
                 self.daily_edge(snaps.time, pc, force=True)
             elif action == "STATUS":
                 self.sender.send(self.status_text())
+            elif action == "DIA":
+                self.sender.send(self.day_text(snaps.time))
             elif action == "FLOW":
                 from .flow_anomaly import render_flow_stats
                 rows = self.mem.flow_anomaly_rows(measured_only=False)
@@ -348,6 +371,7 @@ class MarketAIEngine:
         pc = PortfolioCycle(snaps.time)
         # comandos (/STOP /PAUSE /RESUME /STATUS /CLOSE /EDGE) tratados AQUI, para todos os mercados, com o kill switch compartilhado
         self._handle_commands(snaps, pc)
+        self.maybe_daily_report(snaps.time)
         # 0) FLOW ANOMALY (informação implícita) → REACTION ENGINE (relógio por mercado + aprendizado dos eventos concluídos)
         self._flow_anomaly(snaps)
         self._reaction_clock(snaps)

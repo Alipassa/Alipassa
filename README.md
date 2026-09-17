@@ -318,6 +318,11 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
 ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
 
+**Eficiência do dia (`dia`, `/DIA`).** Todo dia, por mercado: análises, episódios em SETUP e em OPPORTUNITY, entradas, captura
+(entradas ÷ episódios com sinal), operações fechadas, R, USD, acerto, minutos por operação, R hipotético das oportunidades não
+operadas, risco planejado × real (denuncia lote travado por `MAX_LOT`), motivos mais comuns de não entrar e saídas. Automático às
+`DAILY_REPORT_UTC` (padrão 21, fecho de Nova York); `-1` desliga. `python market_ai_engine_v5.py dia --day 2026-09-16` para um dia passado.
+
 **Filtro de mercado lateral.** O regime de cada mercado já é classificado em H4/D1 (BULLISH, BEARISH, RANGE, VOLATILE). Com
 `block_range` ligado, em RANGE o robô não gera sinal operacional, só observação, e a tela diz "mercado lateral (regime RANGE) — filtro
 de regime ativo". O interruptor é um parâmetro do autotune (`lateral bloqueado` × `lateral livre`), decidido no passado e adotado só

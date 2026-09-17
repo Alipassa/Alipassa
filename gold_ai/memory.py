@@ -351,6 +351,15 @@ class PredictionMemory:
         r = self.conn.execute("SELECT capital FROM account ORDER BY id DESC LIMIT 1").fetchone()
         return float(r["capital"]) if r else None
 
+    def trades_between(self, t0: datetime, t1: datetime, symbol: Optional[str] = None) -> list[dict]:
+        """Operações abertas OU fechadas no intervalo [t0, t1) — base da EFICIÊNCIA DO DIA."""
+        conds = ["((aberta_em >= ? AND aberta_em < ?) OR (fechada_em >= ? AND fechada_em < ?))"]
+        args: list = [t0.isoformat(), t1.isoformat(), t0.isoformat(), t1.isoformat()]
+        if symbol:
+            conds.append("ativo = ?"); args.append(symbol)
+        rows = self.conn.execute("SELECT * FROM trades WHERE " + " AND ".join(conds) + " ORDER BY id", tuple(args)).fetchall()
+        return [dict(r) for r in rows]
+
     def account_rows(self) -> list[tuple[datetime, float, Optional[float], str]]:
         out = []
         for r in self.conn.execute("SELECT hora, capital, pnl, nota FROM account ORDER BY id").fetchall():
@@ -642,8 +651,15 @@ class PredictionMemory:
             conds.append("ativo = ?"); args.append(symbol)
         q = "SELECT * FROM decisions" + (" WHERE " + " AND ".join(conds) if conds else "") + " ORDER BY id"
         rows = self.conn.execute(q, tuple(args)).fetchall()
-        return [DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
-                               r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0) for r in rows]
+        out = []
+        for r in rows:
+            rec = DecisionRecord(datetime.fromisoformat(r["hora"]), r["preco"], r["score"] or 0.0, r["direcao"] or "LATERAL", r["acao"], r["motivo"] or "",
+                                 r["atr"] or 0.0, r["r_hipotetico"], r["nivel_evidencia"] or 0, r["confianca"] or 0.0)
+            keys = r.keys()
+            if "etapa" in keys and r["etapa"]:
+                rec.stage = r["etapa"]
+            out.append(rec)
+        return out
 
     def funnel(self, symbol: Optional[str] = None, since: Optional[datetime] = None):
         """FUNIL DE ENTRADA do que foi vivido (uma linha por análise gravada pelo live)."""
