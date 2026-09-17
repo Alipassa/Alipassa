@@ -536,3 +536,11 @@ Mais inteligência → mais oportunidades detectadas → mais setups qualificado
    próximo salto; o salto é a camada TICK → M1 → Reaction Clock → lead/lag → Flow Anomaly → propagação → entrada rápida → monitoramento,
    que pode enxergar o que o H1 não vê. Nível 1 (edge possível em certas condições) demonstrado; nível 2 (parâmetros que sobrevivem OOS)
    em validação; nível 3 (propagação líder → atrasado) é a oportunidade que diferencia o sistema de um robô de indicadores.
+
+## Adendo 5.2e — FILTRO DE MERCADO LATERAL `[config.block_range, signals.SignalGate, autotune]`
+
+1. Em regime RANGE (H4/D1: ADX < 18 e tendência fraca) o robô pode ser proibido de operar: `block_range` corta o sinal operacional e deixa
+   só a observação (WATCH). O texto de decisão diz "mercado lateral (regime RANGE) — filtro de regime ativo".
+2. Não é regra fixa: é parâmetro. O autotune testa `lateral bloqueado` × `lateral livre` em cada bloco e a política só adota o filtro
+   quando ele rendeu mais fora da amostra. `BLOCK_RANGE=1` força no live para quem quer o filtro desde já, sem esperar a prova.
+3. As duas perdas do US500 em 16/09 aconteceram com o regime marcado RANGE. Uma observação não é evidência; a prova vem do autotune.

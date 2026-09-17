@@ -117,3 +117,20 @@ class AutotuneTieBreakTests(unittest.TestCase):
         best = json.loads(max(votes, key=lambda k: (votes[k], earned.get(k, 0.0))))
         self.assertEqual(best, b)
         self.assertGreater(earned[json.dumps(b, sort_keys=True)], earned[json.dumps(a, sort_keys=True)])
+
+
+class RangeFilterTests(unittest.TestCase):
+    def test_gate_blocks_operational_signal_in_range_when_enabled(self):
+        from gold_ai.config import EngineConfig
+        from gold_ai.signals import SignalGate
+        from gold_ai.autotune import cfg_with, _label, default_params
+        cfg = cfg_with(EngineConfig(), {"block_range": True})
+        self.assertTrue(cfg.block_range)
+        self.assertIn("lateral bloqueado", _label({"block_range": True}))
+        self.assertIn("lateral livre", _label(default_params(EngineConfig())))
+        g = SignalGate(cfg)
+        a = type("A", (), {})()
+        a.regime, a.score, a.confirmations = "RANGE", -60.0, ["a", "b", "c"]
+        self.assertIn("mercado lateral", g.missing_for_signal(a))
+        a.regime = "BEARISH"
+        self.assertEqual(g.missing_for_signal(a), "limiares atingidos")

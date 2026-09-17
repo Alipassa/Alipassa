@@ -162,6 +162,8 @@ class EngineConfig:
 
     # Filtro contra falsos sinais (Diretriz §27).
     min_confirmations: int = 3
+    block_range: bool = False          # FILTRO DE REGIME: sem sinal operacional quando o regime H4/D1 é RANGE (lateral). Parâmetro que o
+                                       # autotune testa (com × sem) — o histórico decide; BLOCK_RANGE=1 no .env força ligado no live
     # Contribuição mínima (fração do peso máximo) para uma família "confirmar".
     family_confirmation_ratio: float = 0.35
 
@@ -1671,6 +1673,8 @@ class SignalGate:
     def missing_for_signal(self, a: Assessment) -> str:
         """O que faltou para o sinal operacional, em números: |score| contra o limiar de sinal e confirmações contra o mínimo.
         Responde à pergunta 'por que não entrou?' na própria tela (SETUP = vantagem passou; OPPORTUNITY exige isto)."""
+        if getattr(self.cfg, "block_range", False) and str(getattr(a, "regime", "")).upper().startswith("RANGE"):
+            return "mercado lateral (regime RANGE) — filtro de regime ativo: só observação"
         need = int(self.cfg.buy)
         have = abs(a.score)
         parts = []
@@ -1692,6 +1696,11 @@ class SignalGate:
 
         # 0. "NÃO SEI": sem vantagem estatística não há sinal direcional (risco/reversão continuam passando)
         directional_allowed = a.has_edge
+        # 0b. FILTRO DE REGIME (opcional, decidido pelo histórico): em mercado lateral não há sinal operacional — só observação
+        self.range_blocked = bool(getattr(self.cfg, "block_range", False) and str(getattr(a, "regime", "")).upper().startswith("RANGE"))
+        if self.range_blocked:
+            directional_allowed = False
+            self.last_reason = "mercado lateral (regime RANGE) — filtro de regime ativo"
 
         # 7. risco excepcional — tem prioridade e ignora intervalo mínimo
         if a.systemic_risk >= self.cfg.exceptional_systemic_risk and not self.last_risk_alert:
@@ -11914,8 +11923,8 @@ from itertools import product
 
 
 MIN_APPLY = 20            # candidato: n OOS mínimo para o live adotar
-DEFAULT_GRID: dict[str, Sequence] = {"min_edge_score": (15.0, 25.0, 35.0), "min_confirmations": (2, 3), "signal_score": (40, 50)}
-PARAM_KEYS = ("min_edge_score", "min_confirmations", "signal_score", "min_edge_probability", "min_edge_confidence")
+DEFAULT_GRID: dict[str, Sequence] = {"min_edge_score": (15.0, 25.0, 35.0), "min_confirmations": (2, 3), "signal_score": (40, 50), "block_range": (False, True)}
+PARAM_KEYS = ("min_edge_score", "min_confirmations", "signal_score", "min_edge_probability", "min_edge_confidence", "block_range")
 
 
 def cfg_with(base: EngineConfig, params: dict) -> EngineConfig:
@@ -11929,12 +11938,17 @@ def cfg_with(base: EngineConfig, params: dict) -> EngineConfig:
 
 
 def default_params(cfg: EngineConfig) -> dict:
-    return {"min_edge_score": float(cfg.min_edge_score), "min_confirmations": int(cfg.min_confirmations), "signal_score": int(cfg.buy)}
+    return {"min_edge_score": float(cfg.min_edge_score), "min_confirmations": int(cfg.min_confirmations), "signal_score": int(cfg.buy),
+            "block_range": bool(getattr(cfg, "block_range", False))}
 
 
 def _label(p: dict) -> str:
-    return " · ".join(f"{k.replace('min_edge_score', 'piso').replace('min_confirmations', 'conf').replace('signal_score', 'sinal').replace('min_edge_probability', 'prob')} {v:g}"
-                      for k, v in p.items())
+    def one(k, v):
+        if k == "block_range":
+            return "lateral bloqueado" if v else "lateral livre"
+        name = k.replace('min_edge_score', 'piso').replace('min_confirmations', 'conf').replace('signal_score', 'sinal').replace('min_edge_probability', 'prob')
+        return f"{name} {v:g}"
+    return " · ".join(one(k, v) for k, v in p.items())
 
 
 @dataclass
@@ -13104,10 +13118,15 @@ class MarketAIEngine:
                 log(f"[conta] {fixed} registro(s) antigo(s) de 'sync broker' reclassificados como linha de base (não eram resultado do dia)")
             self.perf.restore(mem.account_rows(), datetime.now(timezone.utc))   # reinício não apaga perda do dia, meta nem pico
         self.engines: dict[str, LiveExecutionEngine] = {}
+        import os as _os
+        force_range = str(_os.environ.get("BLOCK_RANGE", "")).strip().lower() in ("1", "true", "sim", "yes")
         for sym, spec in self.specs.items():
             cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
             cfg, note = apply_params(cfg, self.params.get(sym))
-            if self.params:
+            if force_range:
+                cfg.block_range = True
+                note += " · FILTRO DE REGIME forçado (BLOCK_RANGE=1): sem entradas em mercado lateral"
+            if self.params or force_range:
                 log(f"🧠 PARÂMETROS {sym}: {note}")
             brain = GoldAIEngine(cfg, calibrator=calibrator)
             self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,

@@ -26,8 +26,8 @@ from .lifecycle import tier
 from .sweep import FloorMetrics, _metrics, objective
 
 MIN_APPLY = 20            # candidato: n OOS mínimo para o live adotar
-DEFAULT_GRID: dict[str, Sequence] = {"min_edge_score": (15.0, 25.0, 35.0), "min_confirmations": (2, 3), "signal_score": (40, 50)}
-PARAM_KEYS = ("min_edge_score", "min_confirmations", "signal_score", "min_edge_probability", "min_edge_confidence")
+DEFAULT_GRID: dict[str, Sequence] = {"min_edge_score": (15.0, 25.0, 35.0), "min_confirmations": (2, 3), "signal_score": (40, 50), "block_range": (False, True)}
+PARAM_KEYS = ("min_edge_score", "min_confirmations", "signal_score", "min_edge_probability", "min_edge_confidence", "block_range")
 
 
 def cfg_with(base: EngineConfig, params: dict) -> EngineConfig:
@@ -41,12 +41,17 @@ def cfg_with(base: EngineConfig, params: dict) -> EngineConfig:
 
 
 def default_params(cfg: EngineConfig) -> dict:
-    return {"min_edge_score": float(cfg.min_edge_score), "min_confirmations": int(cfg.min_confirmations), "signal_score": int(cfg.buy)}
+    return {"min_edge_score": float(cfg.min_edge_score), "min_confirmations": int(cfg.min_confirmations), "signal_score": int(cfg.buy),
+            "block_range": bool(getattr(cfg, "block_range", False))}
 
 
 def _label(p: dict) -> str:
-    return " · ".join(f"{k.replace('min_edge_score', 'piso').replace('min_confirmations', 'conf').replace('signal_score', 'sinal').replace('min_edge_probability', 'prob')} {v:g}"
-                      for k, v in p.items())
+    def one(k, v):
+        if k == "block_range":
+            return "lateral bloqueado" if v else "lateral livre"
+        name = k.replace('min_edge_score', 'piso').replace('min_confirmations', 'conf').replace('signal_score', 'sinal').replace('min_edge_probability', 'prob')
+        return f"{name} {v:g}"
+    return " · ".join(one(k, v) for k, v in p.items())
 
 
 @dataclass

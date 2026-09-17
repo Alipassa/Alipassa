@@ -83,10 +83,15 @@ class MarketAIEngine:
             self.perf.restore(mem.account_rows(), datetime.now(timezone.utc))   # reinício não apaga perda do dia, meta nem pico
         self.engines: dict[str, LiveExecutionEngine] = {}
         from .autotune import apply_params
+        import os as _os
+        force_range = str(_os.environ.get("BLOCK_RANGE", "")).strip().lower() in ("1", "true", "sim", "yes")
         for sym, spec in self.specs.items():
             cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
             cfg, note = apply_params(cfg, self.params.get(sym))
-            if self.params:
+            if force_range:
+                cfg.block_range = True
+                note += " · FILTRO DE REGIME forçado (BLOCK_RANGE=1): sem entradas em mercado lateral"
+            if self.params or force_range:
                 log(f"🧠 PARÂMETROS {sym}: {note}")
             brain = GoldAIEngine(cfg, calibrator=calibrator)
             self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,

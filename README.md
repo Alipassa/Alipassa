@@ -318,6 +318,11 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
 ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
 
+**Filtro de mercado lateral.** O regime de cada mercado já é classificado em H4/D1 (BULLISH, BEARISH, RANGE, VOLATILE). Com
+`block_range` ligado, em RANGE o robô não gera sinal operacional, só observação, e a tela diz "mercado lateral (regime RANGE) — filtro
+de regime ativo". O interruptor é um parâmetro do autotune (`lateral bloqueado` × `lateral livre`), decidido no passado e adotado só
+com amostra, como os outros. `BLOCK_RANGE=1` no `.env` força o filtro ligado em todos os mercados no live.
+
 **Matriz de decisão (`matrix`, etapa 8h).** Não se escolhe antecipadamente quantas confirmações nem quantas posições. O comando reprocessa
 cada mercado com confirmações mínimas 1 → 2 → 3 → 4 → 5 (só esse parâmetro muda) e põe as operações de todos os mercados na carteira
 simulada com 1, 2, 3 e 4 posições simultâneas, com os limites de risco do `.env` e custo por operação. Para cada célula: operações,

@@ -73,6 +73,8 @@ class EngineConfig:
 
     # Filtro contra falsos sinais (Diretriz §27).
     min_confirmations: int = 3
+    block_range: bool = False          # FILTRO DE REGIME: sem sinal operacional quando o regime H4/D1 é RANGE (lateral). Parâmetro que o
+                                       # autotune testa (com × sem) — o histórico decide; BLOCK_RANGE=1 no .env força ligado no live
     # Contribuição mínima (fração do peso máximo) para uma família "confirmar".
     family_confirmation_ratio: float = 0.35
 
