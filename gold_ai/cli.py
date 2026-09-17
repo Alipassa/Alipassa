@@ -137,7 +137,7 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     from .market_engine import MarketAIEngine
     from .selector import PortfolioLimits
     from .telegram import load_env_file
-    from . import __version__
+    from . import __build__, __version__
 
     env = load_env_file()
     limits, plim = GuardLimits.from_env(env), PortfolioLimits.from_env(env)
@@ -153,7 +153,7 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     def stage(msg: str) -> None:
         print(f"[{datetime.now(timezone.utc):%H:%M:%S} UTC] {msg}", flush=True)
 
-    stage(f"MARKET AI ENGINE {__version__} iniciando · modo {mode.value} · mercados {', '.join(symbols)}")
+    stage(f"MARKET AI ENGINE {__version__} · build {__build__} · iniciando · modo {mode.value} · mercados {', '.join(symbols)}")
     if args.source == "mt5":
         from .data.mt5 import MT5Client, MT5Config
         from .execution import ExecutionEngine

@@ -16,6 +16,22 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "market_ai_engine_v5.py"
 VERSION = "5.0.0"
 
+
+def build_stamp() -> str:
+    """data/hora da build + commit (com '+' se gold_ai/ tem mudanças não commitadas): aparece no /STATUS e na partida do live."""
+    import subprocess
+    from datetime import datetime, timezone
+    try:
+        h = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=ROOT).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain", "--", "gold_ai"], capture_output=True, text=True, cwd=ROOT).stdout.strip())
+    except Exception:  # noqa: BLE001
+        h, dirty = "", False
+    return f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC" + (f" · {h}{'+' if dirty else ''}" if h else "")
+
+
+BUILD = build_stamp()
+
+
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "data/dukascopy", "trading", "monitor",
          "markets", "news_engine", "reaction", "reaction_hires", "flow_anomaly", "history", "data/history_sources", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "ablation", "doctor", "lifecycle", "exit_lab", "edge_bank", "leadlag", "autotune", "portfolio_sim",
@@ -106,6 +122,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "{VERSION}"
+__build__ = "{BUILD}"
 '''
 
 SKIP = re.compile(r"^\s*(from (\.|\.\.)[\w.]* import|from __future__|import (argparse|csv|hashlib|json|math|os|random|re|sqlite3|statistics|sys|time|"

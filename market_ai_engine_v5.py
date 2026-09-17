@@ -83,6 +83,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "5.0.0"
+__build__ = "2026-09-17 14:57 UTC · 0d46c1c"
 
 
 # ============================================================================
@@ -14309,7 +14310,7 @@ class MarketAIEngine:
         return text
 
     def status_text(self) -> str:
-        lines = [f"📋 MARKET AI STATUS · modo {self.mode.value} · mercados {', '.join(self.specs)}", self.perf.render(),
+        lines = [f"📋 MARKET AI STATUS · modo {self.mode.value} · mercados {', '.join(self.specs)} · build {__build__}", self.perf.render(),
                  self.portfolio.render(self.open_exposures(), self.perf.equity), "Histórico por mercado:"]
         for sym, h in self.history.items():
             lines.append(f"  {sym:<7} {h.render()}")
@@ -14459,7 +14460,7 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     def stage(msg: str) -> None:
         print(f"[{datetime.now(timezone.utc):%H:%M:%S} UTC] {msg}", flush=True)
 
-    stage(f"MARKET AI ENGINE {__version__} iniciando · modo {mode.value} · mercados {', '.join(symbols)}")
+    stage(f"MARKET AI ENGINE {__version__} · build {__build__} · iniciando · modo {mode.value} · mercados {', '.join(symbols)}")
     if args.source == "mt5":
 
         mcfg = MT5Config.from_env(env)

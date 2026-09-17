@@ -554,7 +554,8 @@ class MarketAIEngine:
         return text
 
     def status_text(self) -> str:
-        lines = [f"📋 MARKET AI STATUS · modo {self.mode.value} · mercados {', '.join(self.specs)}", self.perf.render(),
+        from . import __build__
+        lines = [f"📋 MARKET AI STATUS · modo {self.mode.value} · mercados {', '.join(self.specs)} · build {__build__}", self.perf.render(),
                  self.portfolio.render(self.open_exposures(), self.perf.equity), "Histórico por mercado:"]
         for sym, h in self.history.items():
             lines.append(f"  {sym:<7} {h.render()}")
