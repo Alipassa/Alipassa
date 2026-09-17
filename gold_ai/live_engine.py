@@ -234,7 +234,6 @@ class LiveExecutionEngine:
             note = (f"⚠️ lote limitado a {plan.lots:.2f} (MAX_LOT {self.limits.max_lot:g} / máx. da corretora {lim.max_lot:g}): risco real "
                     f"{plan.risk_usd:.2f} USD = {plan.risk_usd / planned:.0%} do planejado {planned:.2f} USD — resultado em R continua válido, em USD não")
             self.log(note)
-            plan.notes = (getattr(plan, "notes", "") + "\n" + note).strip()
             self._lot_cap_note = note
         if self.entry_gate is not None:
             blocked = self.entry_gate(self.symbol, sig.direction, plan.risk_usd)
