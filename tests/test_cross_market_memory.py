@@ -91,7 +91,7 @@ class RepairTests(unittest.TestCase):
             # build antiga: tudo resolvido com os candles do ouro
             gold = _flat(3600.0, 30, drift=-0.5)
             mem.auto_resolve(gold, T0 + timedelta(minutes=30), 9.0)         # sem symbol = comportamento antigo
-            mem.auto_resolve_trades(gold, T0 + timedelta(minutes=1))
+            mem.auto_resolve_trades(gold, T0 + timedelta(minutes=5))   # o live só resolve no ciclo seguinte
             res = {r["id"]: r["resultado"] for r in mem.conn.execute("SELECT id, resultado FROM predictions")}
             self.assertEqual(res[pe], "ERRO")       # 1,15 → 3 600: "subiu" → venda errada (o 0 % do EURUSD)
             self.assertEqual(res[pu], "ACERTO")     # 6 500 → 3 600: "caiu" → venda certa (o 100 % do US500)
@@ -115,6 +115,31 @@ class RepairTests(unittest.TestCase):
             self.assertEqual(tr["estopada"], 0)
             self.assertGreater(tr["max_r"], 1.0)
             self.assertEqual(mem.price_symbols(), ["EURUSD", "XAUUSD"])
+            mem.close()
+
+    def test_resimulates_closed_trades_and_keeps_prices_to_lived_period(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = PredictionMemory(os.path.join(d, "m.db"))
+            _insert_prediction(mem, "EURUSD", 1.15, "BAIXA", 0.0006, T0 + timedelta(hours=30))
+            te = mem.open_trade(_plan(Direction.BAIXA, 1.15, 1.1512, 0.0006), "PAPER", symbol="EURUSD")
+            mem.conn.execute("UPDATE trades SET aberta_em=? WHERE id=?", ((T0 + timedelta(hours=30)).isoformat(), te))
+            # perfil "fechado" com candles errados 20 min depois (fora da janela de detecção automática)
+            mem.conn.execute("UPDATE trades SET status='CLOSED', estopada=1, max_r=0.02, mae_r=1.0, fechada_em=? WHERE id=?",
+                             ((T0 + timedelta(hours=30, minutes=20)).isoformat(), te))
+            mem.conn.commit()
+            self.assertEqual(mem.contaminated_trades(), [])
+            days = [Candle(T0 + timedelta(minutes=m), 1.15 - 0.00001 * max(0, m - 1800), 1.15, 1.15 - 0.00001 * max(0, m - 1800), 1.15 - 0.00001 * max(0, m - 1800), 1.0)
+                    for m in range(1, 60 * 40)]
+            rep = mem.repair_cross_market(T0 + timedelta(hours=40), {"EURUSD": days})
+            self.assertEqual(rep["re_simuladas"], {"EURUSD": 1})
+            tr = mem.conn.execute("SELECT status, estopada, max_r FROM trades WHERE id=?", (te,)).fetchone()
+            self.assertEqual(tr["status"], "CLOSED")
+            self.assertEqual(tr["estopada"], 0)
+            self.assertGreater(tr["max_r"], 1.0)
+            # preços guardados só desde 4 h antes do 1º registro vivido, não os 40 h do M1
+            ps = mem.prices(symbol="EURUSD")
+            self.assertGreaterEqual(ps[0][0], T0 + timedelta(hours=26))
+            self.assertLess(len(ps), 15 * 60)
             mem.close()
 
 

@@ -1652,6 +1652,15 @@ def cmd_repair(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("(--dry-run: nada alterado)")
         return 0
+    last = mem.conn.execute("SELECT MAX(hora) FROM decisions").fetchone()[0]
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(last).astimezone(timezone.utc)).total_seconds() if last else None
+    except ValueError:
+        age = None
+    if age is not None and age < 180 and not args.force:
+        print(f"⛔ o LIVE parece estar rodando (última decisão gravada há {age:.0f} s): com a build antiga ele contamina de novo o que o repair "
+              f"reabre. Pare o LIVE, rode o repair e reinicie com a build nova (ou --force se tiver certeza de que o LIVE é a build nova).")
+        return 1
     rep = mem.repair_cross_market(datetime.now(timezone.utc), candles_by or None)
     print(f"previsões reabertas: {rep['previsoes'] or 0} · operações com perfil apagado: {rep['operacoes'] or 0} · decisões hipotéticas recalculadas: {rep['decisoes']} · preços sem mercado descartados: {rep['precos_descartados']}")
     if candles_by:
@@ -1806,6 +1815,7 @@ def _main(argv: list[str]) -> int:
     rp.add_argument("--db", default="gold_ai.db")
     rp.add_argument("--csv-dir", default=None, help="pasta com <SYM>_m1.csv (etapa 4 da pipeline) para resolver de novo")
     rp.add_argument("--dry-run", action="store_true", help="só mostra o que seria alterado")
+    rp.add_argument("--force", action="store_true", help="rodar mesmo com o LIVE gravando (só com a build nova no ar)")
     rp.set_defaults(func=cmd_repair)
 
     e = sub.add_parser("event", help="árvore de reação pré-evento e cadeia pós-evento (exemplo CPI)")

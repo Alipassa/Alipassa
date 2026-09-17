@@ -2606,8 +2606,9 @@ class PredictionMemory:
                      COALESCE(maxima_favoravel, 0) > ? * preco OR COALESCE(maxima_adversa, 0) > ? * preco
                      OR ABS(COALESCE(preco_final, preco) - preco) > ? * preco)""", (k, k, k)).fetchall()
 
-    def contaminated_trades(self, max_minutes: float = 2.0) -> list[sqlite3.Row]:
-        """Operações cujo perfil (stop/MFE/MAE) foi simulado com candles de outro mercado: 'estopada' no 1º candle."""
+    def contaminated_trades(self, max_minutes: float = 15.0) -> list[sqlite3.Row]:
+        """Operações cujo perfil (stop/MFE/MAE) foi simulado com candles de outro mercado: 'estopada' no 1º candle
+        (o live só resolve no ciclo seguinte, por isso a janela é de minutos, não de segundos)."""
         rows = self.conn.execute("SELECT id, ativo, status, aberta_em, fechada_em, estopada, resultado_r FROM trades WHERE status='CLOSED' AND estopada=1 AND fechada_em IS NOT NULL").fetchall()
         out = []
         for r in rows:
@@ -2642,18 +2643,51 @@ class PredictionMemory:
             rep["precos_descartados"] = self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
             self.conn.execute("DELETE FROM prices")
         self.conn.commit()
+        first = self.conn.execute("SELECT MIN(h) FROM (SELECT MIN(data || 'T' || hora) h FROM predictions UNION SELECT MIN(aberta_em) FROM trades UNION SELECT MIN(hora) FROM decisions)").fetchone()[0]
+        try:
+            since = datetime.fromisoformat(first).replace(tzinfo=timezone.utc) - timedelta(minutes=horizon_min) if first else None
+        except ValueError:
+            since = None
+        if since and since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
         for sym, candles in (candles_by_symbol or {}).items():
             cs = sorted(candles, key=lambda c: c.time)
             if not cs:
                 continue
-            self.store_prices(cs, sym)
+            self.store_prices([c for c in cs if since is None or c.time >= since], sym)   # só o período vivido: o Opportunity Engine compara decisões com preços do mesmo período
             atrs = [r["atr"] for r in self.conn.execute("SELECT atr FROM predictions WHERE ativo=? AND atr IS NOT NULL", (sym,)).fetchall()]
             default_thr = sorted(atrs)[len(atrs) // 2] if atrs else 0.0
             if default_thr > 0:
                 rep["re_resolvidas"][sym] = len(self.auto_resolve(cs, now, default_thr, horizon_min, symbol=sym))
-            rep["re_simuladas"][sym] = len(self.auto_resolve_trades(cs, now, symbol=sym))
+            rep["re_simuladas"][sym] = self._resimulate_closed_trades(cs, now, sym) + len(self.auto_resolve_trades(cs, now, symbol=sym))
             self.resolve_hypotheticals(now, horizon_min, symbol=sym)
         return rep
+
+    def _resimulate_closed_trades(self, cs: list, now: datetime, symbol: str) -> int:
+        """Refaz o perfil (max R, MAE, 1R…4R, estopada) de TODAS as operações fechadas do mercado cujo período os candles cobrem.
+        O perfil é função só dos candles: refazer com o M1 certo nunca inventa nada. Operações fora da cobertura ficam como estão."""
+        if not cs:
+            return 0
+        lo, hi = cs[0].time, cs[-1].time
+        n = 0
+        for row in self.conn.execute("SELECT * FROM trades WHERE status='CLOSED' AND ativo=?", (symbol,)).fetchall():
+            t0 = datetime.fromisoformat(row["aberta_em"])
+            if t0.tzinfo is None:
+                t0 = t0.replace(tzinfo=timezone.utc)
+            end = min(t0 + timedelta(minutes=row["horizonte_min"] or 240), now)
+            if not (lo <= t0 and hi >= end):
+                continue
+            status = "MANAGED_CLOSED" if row["resultado_r"] is not None else "OPEN"
+            self.conn.execute("UPDATE trades SET status=?, max_r=NULL, mae_r=NULL, hit_1r=NULL, hit_2r=NULL, hit_3r=NULL, hit_4r=NULL, "
+                              "estopada=NULL, resultados=NULL, fechada_em=NULL WHERE id=?", (status, row["id"]))
+            fresh = self.conn.execute("SELECT * FROM trades WHERE id=?", (row["id"],)).fetchone()
+            if self._simulate_trade_row(fresh, cs, now) is None:
+                # não fechou na simulação (não devia acontecer com cobertura completa): nunca deixar uma operação fechada como aberta
+                self.conn.execute("UPDATE trades SET status='CLOSED' WHERE id=?", (row["id"],))
+            else:
+                n += 1
+        self.conn.commit()
+        return n
 
     def close(self) -> None:
         self.conn.close()
@@ -15776,6 +15810,15 @@ def cmd_repair(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("(--dry-run: nada alterado)")
         return 0
+    last = mem.conn.execute("SELECT MAX(hora) FROM decisions").fetchone()[0]
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(last).astimezone(timezone.utc)).total_seconds() if last else None
+    except ValueError:
+        age = None
+    if age is not None and age < 180 and not args.force:
+        print(f"⛔ o LIVE parece estar rodando (última decisão gravada há {age:.0f} s): com a build antiga ele contamina de novo o que o repair "
+              f"reabre. Pare o LIVE, rode o repair e reinicie com a build nova (ou --force se tiver certeza de que o LIVE é a build nova).")
+        return 1
     rep = mem.repair_cross_market(datetime.now(timezone.utc), candles_by or None)
     print(f"previsões reabertas: {rep['previsoes'] or 0} · operações com perfil apagado: {rep['operacoes'] or 0} · decisões hipotéticas recalculadas: {rep['decisoes']} · preços sem mercado descartados: {rep['precos_descartados']}")
     if candles_by:
@@ -15929,6 +15972,7 @@ def _main(argv: list[str]) -> int:
     rp.add_argument("--db", default="gold_ai.db")
     rp.add_argument("--csv-dir", default=None, help="pasta com <SYM>_m1.csv (etapa 4 da pipeline) para resolver de novo")
     rp.add_argument("--dry-run", action="store_true", help="só mostra o que seria alterado")
+    rp.add_argument("--force", action="store_true", help="rodar mesmo com o LIVE gravando (só com a build nova no ar)")
     rp.set_defaults(func=cmd_repair)
 
     e = sub.add_parser("event", help="árvore de reação pré-evento e cadeia pós-evento (exemplo CPI)")
