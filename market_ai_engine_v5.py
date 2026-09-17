@@ -13974,11 +13974,31 @@ def cmd_history(args: argparse.Namespace) -> int:
     """BANCO HISTÓRICO DE EVENTOS/NOTÍCIAS (point-in-time): template · fetch-te · fetch-alfred · fetch-gdelt · rules · learn · stats."""
 
     env = load_env_file()
-    path = args.file
+    path = getattr(args, "file", None) or os.path.join("dados", "noticias_historicas.csv")
     exists = os.path.exists(path)
     hist = load_history(path) if exists else EventHistory()
-    start = date.fromisoformat(args.start) if args.start else date(2026, 1, 1)
-    end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date()
+    start = date.fromisoformat(args.start) if getattr(args, "start", None) else date(2026, 1, 1)
+    end = date.fromisoformat(args.end) if getattr(args, "end", None) else datetime.now(timezone.utc).date()
+    if args.action == "resample":
+        # M1 → H1 por mercado (dados/<SYM>_m1.csv → dados/<SYM>_h1.csv); USDX vira também DXY_h1.csv (o backtest lê DXY_h1.csv como dólar)
+        out_dir = args.out_dir or "dados"
+        symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
+        done = 0
+        for sym in symbols:
+            src = os.path.join(out_dir, f"{sym}_m1.csv")
+            if not os.path.exists(src):
+                print(f"{sym}: {src} não existe — rode a etapa 4/4b (history prices --tf M1) antes")
+                continue
+            m1 = _read_candles_csv(src)
+            h1 = resample_h1(m1)
+            dest = os.path.join(out_dir, f"{sym}_h1.csv")
+            save_candles(h1, dest)
+            print(f"{sym}: {len(m1):,} candles M1 → {len(h1):,} candles H1 ({h1[0].time:%d/%m/%Y} → {h1[-1].time:%d/%m/%Y}) → {dest}")
+            if sym == "USDX":
+                save_candles(h1, os.path.join(out_dir, "DXY_h1.csv"))
+                print(f"USDX: copiado como {os.path.join(out_dir, 'DXY_h1.csv')} (dólar do backtest)")
+            done += 1
+        return 0 if done else 1
     if args.action == "prices" and args.source == "dukascopy":
         # ticks bid/ask gratuitos (sem chave, sem MT5): por padrão só as horas ao redor dos eventos do banco
         http = HttpClient(cache_dir=DataEngineConfig().cache_dir, ttl=365 * 24 * 3600, timeout=90, retries=2)   # arquivos de hora podem ter MBs
@@ -14020,10 +14040,19 @@ def cmd_history(args: argparse.Namespace) -> int:
                 return 1
             ev_times = [e.published_at for e in hist.events if e.revised is None and e.category in ("MACRO", "CENTRAL_BANK") and start <= e.published_at.date() <= end]
             print(f"{len(ev_times)} eventos macro com hora exata entre {start} e {end}")
+        rw = getattr(args, "replace_window", None)
+        rw0 = rw1 = None
+        if rw:
+            rw0 = datetime.fromisoformat(rw[0]).replace(tzinfo=timezone.utc)
+            rw1 = datetime.fromisoformat(rw[1]).replace(tzinfo=timezone.utc)
         for sym in symbols:
             inst, sc = DUKA_INSTRUMENTS.get(sym, (sym, 1000.0))
             dest = os.path.join(out_dir, f"{sym}_ticks.csv")
             existing = load_ticks(dest, print) if os.path.exists(dest) else []       # ticks da corretora (spread real): ficam
+            if existing and rw0 is not None:
+                before = len(existing)
+                existing = [r for r in existing if not (rw0 <= r[0] < rw1)]           # janela com carimbo errado: sai e é refeita do cache
+                print(f"{sym}: {before - len(existing):,} ticks removidos na janela {rw0:%d/%m/%Y} → {rw1:%d/%m/%Y} (serão refeitos com o Dukascopy)")
             if existing:
                 print(f"{sym}: {len(existing):,} ticks já no arquivo ({existing[0][0]:%d/%m/%Y} → {existing[-1][0]:%d/%m/%Y}) — o Dukascopy só completa as horas vazias")
 
@@ -14066,15 +14095,27 @@ def cmd_history(args: argparse.Namespace) -> int:
             broker = symbol_map.get(sym) or (get_market(sym).mt5 if sym in MARKETS else sym)
             try:
                 if args.tf.upper() == "TICK":
-                    n = 0
+                    # INCREMENTAL: se o arquivo já existe, pede só o que falta desde o último tick gravado (a corretora entrega ~7 M ticks
+                    # de ouro por vez; repetir tudo levava horas). --full refaz do zero. As horas já gravadas (corretora ou Dukascopy) ficam.
+                    dest = os.path.join(out_dir, f"{sym}_ticks.csv")
+                    existing = load_ticks(dest, print) if (os.path.exists(dest) and not getattr(args, "full", False)) else []
+                    t = max(t0, existing[-1][0] - timedelta(hours=1)) if existing else t0
+                    if existing:
+                        print(f"{sym}: {len(existing):,} ticks já no arquivo (até {existing[-1][0]:%d/%m/%Y %H:%M} UTC) — pedindo só a partir daí")
                     rows = []
-                    t = t0
                     while t < t1:                      # ticks em blocos de 1 dia (volume grande)
                         tt = min(t + timedelta(days=1), t1)
                         rows += client.ticks_range(broker, t, tt)
                         t = tt
-                    n = save_ticks(rows, os.path.join(out_dir, f"{sym}_ticks.csv"))
-                    print(f"{sym} ({broker}): {n} ticks → {out_dir}/{sym}_ticks.csv")
+                    if existing:
+                        last = existing[-1][0]
+                        new_rows = [r for r in rows if r[0] > last]
+                        allt = sorted(existing + new_rows, key=lambda x: x[0])
+                        n = save_ticks(allt, dest)
+                        print(f"{sym} ({broker}): {len(new_rows):,} ticks novos · {n:,} no arquivo → {dest}")
+                    else:
+                        n = save_ticks(rows, dest)
+                        print(f"{sym} ({broker}): {n:,} ticks → {dest}")
                 else:
                     cs, t = [], t0
                     while t < t1:                      # candles em blocos de 14 dias: pedido único de meses de M1 excede o limite do terminal ("Invalid params")
@@ -15314,10 +15355,12 @@ def _main(argv: list[str]) -> int:
     sw.set_defaults(func=cmd_sweep)
 
     hi = sub.add_parser("history", help="BANCO HISTÓRICO point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats | list | prices (M1/ticks do MT5)")
-    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list", "prices"])
+    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list", "prices", "resample"])
     hi.add_argument("--tf", default="TICK", help="prices: TICK (ticks bid/ask) | M1 (mt5: blocos de 14 dias; dukascopy: candles diários, completa o CSV do MT5) | M5")
     hi.add_argument("--source", choices=["mt5", "dukascopy"], default="dukascopy", help="prices: dukascopy (ticks gratuitos, sem chave) | mt5 (terminal logado)")
-    hi.add_argument("--full", action="store_true", help="prices dukascopy: período inteiro (padrão: só horas ao redor dos eventos macro)")
+    hi.add_argument("--full", action="store_true", help="prices dukascopy: período inteiro (padrão: só horas ao redor dos eventos macro) · prices mt5 TICK: refaz do zero em vez de incremental")
+    hi.add_argument("--replace-window", nargs=2, metavar=("INICIO", "FIM"), default=None,
+                    help="prices dukascopy TICK: apaga os ticks já gravados entre INICIO e FIM (ex.: 2026-08-28 2026-09-17, carimbos errados) e refaz do cache")
     hi.add_argument("--before", type=int, default=4, help="prices dukascopy: horas antes de cada evento")
     hi.add_argument("--after", type=int, default=1, help="prices dukascopy: horas depois de cada evento")
     hi.add_argument("--scale", type=float, default=None, help="prices dukascopy: escala de preço do instrumento (padrão por mercado)")
