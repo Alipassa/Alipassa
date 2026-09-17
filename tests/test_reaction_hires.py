@@ -585,3 +585,28 @@ class MergeTicksByHourTests(unittest.TestCase):
         self.assertTrue(all(b == 1.1 for t, b, a in out if t.hour == 12))                         # nada do Dukascopy na hora da corretora
         self.assertTrue(all(b == 1.3 for t, b, a in out if t.hour == 13))
         self.assertEqual([t for t, _, _ in out], sorted(t for t, _, _ in out))
+
+
+class ResampleCommandTests(unittest.TestCase):
+    def test_history_resample_writes_h1_and_dxy(self):
+        import argparse
+        import io
+        import contextlib
+        import os
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from gold_ai import cli
+        from gold_ai.models import Candle
+        from gold_ai.reaction_hires import save_candles
+        t0 = datetime(2026, 3, 2, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as d:
+            for sym in ("XAUUSD", "USDX"):
+                save_candles([Candle(t0 + timedelta(minutes=i), 1 + i, 2 + i, 0.5 + i, 1.5 + i, 1) for i in range(180)], os.path.join(d, f"{sym}_m1.csv"))
+            args = argparse.Namespace(action="resample", markets="XAUUSD", extra="USDX", out_dir=d)
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.cmd_history(args)
+            self.assertEqual(rc, 0)
+            h1 = cli._read_candles_csv(os.path.join(d, "XAUUSD_h1.csv"))
+            self.assertEqual(len(h1), 3)
+            self.assertEqual(h1[0].high, 2 + 59)                       # máximo da hora
+            self.assertTrue(os.path.exists(os.path.join(d, "DXY_h1.csv")))

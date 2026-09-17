@@ -348,11 +348,33 @@ def cmd_history(args: argparse.Namespace) -> int:
     from .telegram import load_env_file
 
     env = load_env_file()
-    path = args.file
+    path = getattr(args, "file", None) or os.path.join("dados", "noticias_historicas.csv")
     exists = os.path.exists(path)
     hist = load_history(path) if exists else EventHistory()
-    start = date.fromisoformat(args.start) if args.start else date(2026, 1, 1)
-    end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date()
+    start = date.fromisoformat(args.start) if getattr(args, "start", None) else date(2026, 1, 1)
+    end = date.fromisoformat(args.end) if getattr(args, "end", None) else datetime.now(timezone.utc).date()
+    if args.action == "resample":
+        # M1 → H1 por mercado (dados/<SYM>_m1.csv → dados/<SYM>_h1.csv); USDX vira também DXY_h1.csv (o backtest lê DXY_h1.csv como dólar)
+        from .leadlag import resample_h1
+        from .reaction_hires import save_candles
+        out_dir = args.out_dir or "dados"
+        symbols = [x.strip().upper() for x in (args.markets + ("," + args.extra if args.extra else "")).split(",") if x.strip()]
+        done = 0
+        for sym in symbols:
+            src = os.path.join(out_dir, f"{sym}_m1.csv")
+            if not os.path.exists(src):
+                print(f"{sym}: {src} não existe — rode a etapa 4/4b (history prices --tf M1) antes")
+                continue
+            m1 = _read_candles_csv(src)
+            h1 = resample_h1(m1)
+            dest = os.path.join(out_dir, f"{sym}_h1.csv")
+            save_candles(h1, dest)
+            print(f"{sym}: {len(m1):,} candles M1 → {len(h1):,} candles H1 ({h1[0].time:%d/%m/%Y} → {h1[-1].time:%d/%m/%Y}) → {dest}")
+            if sym == "USDX":
+                save_candles(h1, os.path.join(out_dir, "DXY_h1.csv"))
+                print(f"USDX: copiado como {os.path.join(out_dir, 'DXY_h1.csv')} (dólar do backtest)")
+            done += 1
+        return 0 if done else 1
     if args.action == "prices" and args.source == "dukascopy":
         # ticks bid/ask gratuitos (sem chave, sem MT5): por padrão só as horas ao redor dos eventos do banco
         from .data import DataEngineConfig, HttpClient
@@ -1781,7 +1803,7 @@ def _main(argv: list[str]) -> int:
     sw.set_defaults(func=cmd_sweep)
 
     hi = sub.add_parser("history", help="BANCO HISTÓRICO point-in-time: template | fetch-te | fetch-alfred | fetch-gdelt | rules | learn | stats | list | prices (M1/ticks do MT5)")
-    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list", "prices"])
+    hi.add_argument("action", choices=["template", "fetch-te", "fetch-alfred", "fetch-gdelt", "rules", "learn", "stats", "list", "prices", "resample"])
     hi.add_argument("--tf", default="TICK", help="prices: TICK (ticks bid/ask) | M1 (mt5: blocos de 14 dias; dukascopy: candles diários, completa o CSV do MT5) | M5")
     hi.add_argument("--source", choices=["mt5", "dukascopy"], default="dukascopy", help="prices: dukascopy (ticks gratuitos, sem chave) | mt5 (terminal logado)")
     hi.add_argument("--full", action="store_true", help="prices dukascopy: período inteiro (padrão: só horas ao redor dos eventos macro)")
