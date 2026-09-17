@@ -1,9 +1,10 @@
 """GOLD AI ENGINE — Centro Global de Inteligência do Ouro (XAU/USD).
 
-Motor probabilístico de antecipação: transforma mundo → macro → mercados →
+Motor probabilístico de antecipação: transforma mundo → macro → mercado →
 comportamento → previsão em SCORE (-100..+100), PROBABILIDADE e CONFIANÇA,
 com detecção de pré-movimento, reversão, filtro anti-falso-sinal, anti-spam,
-registro de previsões e aprendizado.
+registro de previsões e aprendizado — e, na 3.0, execução no MetaTrader 5
+com gestão de risco, kill switch e monitor da operação.
 """
 
 from .models import (
@@ -38,5 +39,4 @@ __all__ = [
     "Stage",
 ]
 
-__version__ = "6.0.0"
-__build__ = "dev"          # o bundle grava aqui data/hora e commit da build (aparece no /STATUS e na partida)
+__version__ = "3.0.0"

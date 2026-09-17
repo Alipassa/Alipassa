@@ -1,5 +1,6 @@
 """Cliente HTTP mínimo (stdlib) com retries, timeout e cache em disco."""
 
+
 from __future__ import annotations
 
 import hashlib
@@ -59,51 +60,7 @@ class HttpClient:
                     text = resp.read().decode("utf-8", errors="replace")
                 self._cache_put(url, text)
                 return text
-            except urllib.error.HTTPError as e:  # pragma: no cover - rede
-                if e.code == 429:   # limite de requisições: repetir em segundos só prolonga o bloqueio — quem decide a espera é o chamador
-                    retry_after = e.headers.get("Retry-After") if e.headers else None
-                    raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests" + (f" (Retry-After {retry_after}s)" if retry_after else "")) from e
-                if 400 <= e.code < 500:      # erro do pedido (chave, parâmetro, 404): repetir não muda nada
-                    raise DataError(f"falha ao buscar {url}: {e}") from e
-                last = e
-                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
-            except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
-                last = e
-                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
-        raise DataError(f"falha ao buscar {url}: {last}")
-
-    def get_bytes(self, url: str, ttl: Optional[int] = None, allow_404: bool = False) -> bytes:
-        """Download binário (ex.: ticks .bi5 do Dukascopy). 404 com allow_404 → b'' (hora sem dados). Cache em disco por URL."""
-        ttl = self.ttl if ttl is None else ttl
-        p = self._cache_path(url)
-        if p:
-            pb = p + ".bin"
-            if os.path.exists(pb) and time.time() - os.path.getmtime(pb) < ttl:
-                with open(pb, "rb") as f:
-                    return f.read()
-        last: Optional[Exception] = None
-        for attempt in range(self.retries):
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": self.user_agent, "Accept": "*/*"})
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
-                    data = resp.read()
-                if p:
-                    with open(p + ".bin", "wb") as f:
-                        f.write(data)
-                return data
-            except urllib.error.HTTPError as e:  # pragma: no cover - rede
-                if e.code == 404 and allow_404:
-                    if p:
-                        with open(p + ".bin", "wb") as f:
-                            f.write(b"")
-                    return b""
-                if e.code == 429:
-                    raise DataError(f"falha ao buscar {url}: HTTP Error 429: Too Many Requests") from e
-                if 400 <= e.code < 500:
-                    raise DataError(f"falha ao buscar {url}: {e}") from e
-                last = e
-                time.sleep(min(8.0, 1.5 * (2 ** attempt)))
-            except (urllib.error.URLError, TimeoutError, OSError) as e:  # pragma: no cover - rede
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:  # pragma: no cover - rede
                 last = e
                 time.sleep(min(8.0, 1.5 * (2 ** attempt)))
         raise DataError(f"falha ao buscar {url}: {last}")

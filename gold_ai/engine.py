@@ -1,17 +1,17 @@
 """GoldAIEngine — ciclo de análise completo (Diretriz §2, §19, §20, §21, §36)."""
 
+
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from .config import HORIZONS, EngineConfig
+from .config import EngineConfig, HORIZONS
+from .models import Assessment, Direction, FactorScore, MarketSnapshot, Signal, Stage, TechnicalReading
 from .factors import SCORERS, accumulation_distribution, score_tecnico, sentiment_label, systemic_risk_index
+from .premove import analyze_premove, analyze_reversal
 from .events import next_high_impact_event
 from .evidence import edge_status, event_chain, evidence_level
-from .models import Assessment, Direction, FactorScore, MarketSnapshot, Signal, Stage, TechnicalReading
-from .premove import analyze_premove, analyze_reversal
 from .signals import SignalGate, classify, confirmations
 from .telegram import format_signal
 
@@ -33,14 +33,6 @@ class GoldAIEngine:
             factors.append(SCORERS[name](s, weight))
         tech, readings = score_tecnico(s, self.cfg.weights["tecnico"])
         factors.append(tech)
-        if self.cfg.factor_signs:
-            for f in factors:
-                sign = self.cfg.factor_signs.get(f.name, 1)
-                if sign == 0:
-                    f.score, f.available, f.rationale = 0.0, False, f"sem relação conhecida com {self.cfg.symbol}"
-                elif sign < 0:
-                    f.score = -f.score
-                    f.rationale = f"(sinal invertido para {self.cfg.symbol}) " + f.rationale
         return factors, readings
 
     @staticmethod
@@ -150,7 +142,6 @@ class GoldAIEngine:
 
     # ------------------------------------------------------------------ ciclo
     def analyze(self, s: MarketSnapshot) -> Assessment:
-        s.session_start = self._session_start()          # VWAP de sessão conforme o mercado (NY para índices; 22:00 UTC nos demais)
         factors, readings = self.score_factors(s)
         score = self.total_score(factors)
         systemic = systemic_risk_index(s)
@@ -191,10 +182,6 @@ class GoldAIEngine:
             confidence=conf, trend=trend, horizon=horizon, premove=premove, reversal=reversal, systemic_risk=systemic,
             sentiment_label=sentiment_label(s.sentiment), dominant_pressure=dominant, next_event=event, technical=readings,
             conclusion="", confirmations=[], zone=zone, regime=regime,
-            news_status=str(getattr(s, "news_status", "UNKNOWN") or "UNKNOWN"), reaction_status=str(getattr(s, "reaction_status", "SEM EVENTO") or "SEM EVENTO"),
-            reaction_pressure=float(getattr(s, "reaction_pressure", 0.0) or 0.0), flow_status=str(getattr(s, "flow_status", "SEM ANOMALIA") or "SEM ANOMALIA"),
-            flow_score=int(getattr(s, "flow_score", 0) or 0), flow_origin=str(getattr(s, "flow_origin", "—") or "—"),
-            anomalous_regime=bool(getattr(s, "anomalous_regime", False)),
         )
         a.confirmations = confirmations(a, a.direction if a.direction != Direction.LATERAL else premove.direction, self.cfg)
         a.evidence_level = evidence_level(a, s)
@@ -226,19 +213,8 @@ class GoldAIEngine:
     def evaluate_signal(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
         sig = self.gate.evaluate(a, new_event_key)
         if sig is not None:
-            sig.text = format_signal(sig, getattr(self.cfg, "symbol", "XAUUSD"))
+            sig.text = format_signal(sig)
         return sig
-
-    def _session_start(self) -> tuple[int, int]:
-        """Início da sessão para o VWAP: abertura de NY (13:30) em índices; 22:00 UTC (CME/forex) nos demais."""
-        try:
-            from .markets import MARKETS
-            spec = MARKETS.get(self.cfg.symbol)
-            if spec is not None and spec.session_hours_utc != (0, 24):
-                return (spec.session_hours_utc[0], 30 if spec.session_hours_utc[0] == 13 else 0)
-        except Exception:  # noqa: BLE001
-            pass
-        return (22, 0)
 
     def run_cycle(self, s: MarketSnapshot, new_event_key: Optional[str] = None) -> tuple[Assessment, Optional[Signal]]:
         a = self.analyze(s)

@@ -143,19 +143,3 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class NumpyLikeRatesTests(unittest.TestCase):
-    def test_rates_to_candles_accepts_array_without_truth_value(self):
-        """copy_rates_* devolve numpy structured array: `bool(array)` lança ValueError; a conversão não pode depender disso."""
-        from gold_ai.data.mt5 import rates_to_candles
-
-        class Row(dict):
-            dtype = type("dt", (), {"names": ("time", "open", "high", "low", "close", "tick_volume")})()
-
-        class ArrayLike(list):
-            def __bool__(self):
-                raise ValueError("The truth value of an array with more than one element is ambiguous")
-
-        rows = ArrayLike([Row(time=1_700_000_000 + 60 * i, open=1.0, high=2.0, low=0.5, close=1.5, tick_volume=10) for i in range(3)])
-        cs = rates_to_candles(rows, 3.0)
-        self.assertEqual(len(cs), 3)
-        self.assertEqual(cs[0].volume, 10.0)

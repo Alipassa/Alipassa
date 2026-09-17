@@ -57,17 +57,6 @@ class CalibrationTests(unittest.TestCase):
         self.assertAlmostEqual(rt(0.8), cal(0.8))
         self.assertEqual(IsotonicCalibrator()(0.7), 0.7)  # sem ajuste = identidade
 
-    def test_small_blocks_shrink_to_base_rate(self):
-        """24 episódios como os vividos: 0.66→36 % (n=11), 0.74→33 % (n=12) e UM caso a 0.84 que acertou.
-        Sem encolhimento o calibrador diria 0.84 → 100 %; com ele, o caso único quase não conta."""
-        pairs = [(0.66, i < 4) for i in range(11)] + [(0.74, i < 4) for i in range(12)] + [(0.84, True)]
-        cal = IsotonicCalibrator().fit(pairs)
-        self.assertLess(cal(0.84), 0.5)
-        self.assertLess(cal(0.70), 0.45)
-        self.assertGreater(cal(0.70), 0.25)
-        raw = IsotonicCalibrator().fit(pairs, shrink_k=0)
-        self.assertAlmostEqual(raw(0.84), 1.0)
-
     def test_engine_applies_calibrator(self):
         s = SampleSource("premove_alta").snapshot()
         raw = GoldAIEngine().analyze(s)

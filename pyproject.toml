@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gold-ai-engine"
-version = "4.0.0"
-description = "Centro Global de Inteligência do Ouro — motor probabilístico de antecipação para XAU/USD"
+version = "3.0.0"
+description = "GOLD AI ENGINE — inteligência preditiva do ouro (XAU/USD): notícias e movimentos de mercado → probabilidade → entrada antes da absorção"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,6 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+mt5 = ["MetaTrader5; sys_platform == 'win32'"]
 
 [project.scripts]
 gold-ai = "gold_ai.cli:main"

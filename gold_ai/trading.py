@@ -8,6 +8,7 @@ antes do stop? E qual estratégia de saída tem a melhor expectativa em R?
 Hipótese inicial: RISCO = 1R, ALVO = 3R. O simulador comprova ou rejeita.
 """
 
+
 from __future__ import annotations
 
 import statistics
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Iterable, Optional, Sequence
 
-from .models import Assessment, Candle, Direction, EvidenceLevel, MarketSnapshot, Signal, SignalType
+from .models import Assessment, Candle, Direction, MarketSnapshot, Signal, SignalType
 
 
 # --------------------------------------------------------------------------- modos e limites
@@ -390,7 +391,7 @@ class MaxProfitEngine:
 
 # --------------------------------------------------------------------------- NO TRADE + risco
 def no_trade_check(a: Assessment, limits: RiskLimits, spread: Optional[float] = None, min_confidence: float = 60.0,
-                   min_level: int = 2, max_spread: Optional[float] = None) -> list[str]:
+                   min_level: int = 2) -> list[str]:
     """Fatores conflitantes, confiança baixa ou spread alto → 🟡 NÃO OPERAR. Lista vazia = pode operar."""
     reasons: list[str] = []
     if not a.has_edge:
@@ -406,9 +407,8 @@ def no_trade_check(a: Assessment, limits: RiskLimits, spread: Optional[float] = 
         reasons.append(f"fatores conflitantes contra a direção: {', '.join(against)}")
     if a.premove.stage.value == "MOVIMENTO":
         reasons.append("movimento já ocorreu (não perseguir)")
-    lim_spread = max_spread if max_spread is not None else limits.max_spread
-    if spread is not None and spread > lim_spread:
-        reasons.append(f"spread {spread:g} > máximo do ativo {lim_spread:g}")
+    if spread is not None and spread > limits.max_spread:
+        reasons.append(f"spread {spread:.2f} > máximo {limits.max_spread:.2f}")
     return reasons
 
 

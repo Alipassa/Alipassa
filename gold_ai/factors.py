@@ -8,22 +8,19 @@ Princípio (§31): correlação não é causalidade. As funções procuram
 saturação suave para que nenhum fator isolado domine o score.
 """
 
+
 from __future__ import annotations
 
 import math
 from typing import Callable, Optional
 
 from .models import FactorScore, MarketSnapshot, Sentiment
-from .technical import analyze_multi_timeframe, volume_profile_signals
+from .technical import _clip, analyze_multi_timeframe, volume_profile_signals
 
 
 def _sat(x: float, scale: float) -> float:
     """Saturação suave em -1..+1 (tanh). `scale` é o valor que dá ~0.76."""
     return math.tanh(x / scale) if scale else 0.0
-
-
-def _clip(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 
 def _factor(name: str, weight: float, ratio: float, rationale: str, available: bool = True) -> FactorScore:
@@ -146,29 +143,11 @@ def score_fluxo(s: MarketSnapshot, w: float) -> FactorScore:
 
 
 # --------------------------------------------------------------------------- COT §8
-def cot_age_weight(age_days: Optional[float]) -> float:
-    """COT é semanal: até 10 dias peso cheio; decai linearmente até 0.3 em 21 dias; > 35 dias indisponível (0)."""
-    if age_days is None:
-        return 1.0
-    if age_days <= 10:
-        return 1.0
-    if age_days >= 35:
-        return 0.0
-    if age_days <= 21:
-        return 1.0 - 0.7 * (age_days - 10) / 11
-    return 0.3
-
-
 def score_cot(s: MarketSnapshot, w: float) -> FactorScore:
     if s.cot_managed_money_net_change is None and s.cot_managed_money_percentile is None:
         return _factor("cot", w, 0.0, "sem dados", available=False)
-    aw = cot_age_weight(s.cot_age_days)
-    if aw == 0.0:
-        return _factor("cot", w, 0.0, f"COT antigo demais ({s.cot_age_days:.0f} dias) — indisponível", available=False)
     ratio = 0.0
     notes: list[str] = []
-    if s.cot_age_days is not None:
-        notes.append(f"relatório {s.cot_report_date or ''} há {s.cot_age_days:.0f} dias (peso {aw:.0%})".strip())
     if s.cot_managed_money_net_change is not None:
         ratio += 0.6 * _sat(s.cot_managed_money_net_change, 15000.0)
         notes.append(f"managed money {s.cot_managed_money_net_change:+.0f} contratos/sem")
@@ -183,7 +162,7 @@ def score_cot(s: MarketSnapshot, w: float) -> FactorScore:
             notes.append("posicionamento vendido extremo (potencial short squeeze)")
     if s.cot_commercial_net_change is not None:
         ratio += 0.2 * _sat(s.cot_commercial_net_change, 15000.0)
-    return _factor("cot", w, ratio * aw, f"COT: {', '.join(notes) or 'neutro'}")
+    return _factor("cot", w, ratio, f"COT: {', '.join(notes) or 'neutro'}")
 
 
 # --------------------------------------------------------------------------- Opções §9
@@ -230,18 +209,6 @@ def sentiment_label(value: Optional[float]) -> Sentiment:
 
 
 def score_sentimento(s: MarketSnapshot, w: float) -> FactorScore:
-    """NEWS ENGINE: ausência = UNKNOWN (fator indisponível), nunca negativo. Com pressão de notícias
-    específica do mercado, ela domina; o sentimento agregado entra como complemento."""
-    if s.news_pressure is not None:
-        parts = [(_clip(s.news_pressure, -1, 1), 0.7)]
-        notes = [f"NEWS {s.news_status} (pressão {s.news_pressure:+.2f})"]
-        if s.sentiment is not None:
-            parts.append((_clip(s.sentiment, -1, 1), 0.3))
-            notes.append(sentiment_label(s.sentiment).value.lower())
-        ratio = sum(v * wt for v, wt in parts) / sum(wt for _, wt in parts)
-        return _factor("sentimento", w, ratio, "notícias: " + ", ".join(notes))
-    if s.news_status == "UNKNOWN" and s.sentiment is None and not s.news:
-        return _factor("sentimento", w, 0.0, "NEWS UNKNOWN — fonte indisponível (peso reduzido, não negativo)", available=False)
     if s.sentiment is None and not s.news:
         return _factor("sentimento", w, 0.0, "sem dados", available=False)
     parts: list[tuple[float, float]] = []  # (valor, peso)
@@ -265,7 +232,7 @@ def score_sentimento(s: MarketSnapshot, w: float) -> FactorScore:
 def score_tecnico(s: MarketSnapshot, w: float) -> tuple[FactorScore, list]:
     if not s.candles:
         return _factor("tecnico", w, 0.0, "sem candles", available=False), []
-    global_score, readings = analyze_multi_timeframe(s.candles, getattr(s, "session_start", (22, 0)))
+    global_score, readings = analyze_multi_timeframe(s.candles)
     valid = [r for r in readings if "dados insuficientes" not in r.notes]
     if not valid:
         return _factor("tecnico", w, 0.0, "dados insuficientes", available=False), readings

@@ -5,12 +5,14 @@ BAMLH0A0HYM2 (HY OAS, %), DFF (Fed Funds efetiva, %). Frequência diária, com d
 de um dia útil — usar para nível/tendência; variações intraday vêm do Yahoo.
 """
 
+
 from __future__ import annotations
 
 from datetime import date
 from typing import Optional
 
 from .http import DataError, HttpClient
+
 
 FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 

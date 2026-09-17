@@ -188,11 +188,10 @@ class GuardTests(unittest.TestCase):
         cmds = TelegramCommands(None, None)
         self.assertEqual(cmds.apply(["/STOP"], ks), ["STOP"])
         self.assertFalse(ks.new_entries_allowed()[0])
-        self.assertEqual(cmds.apply(["/RESUME", "/STATUS", "/FLOW"], ks), ["RESUME", "STATUS", "FLOW"])
+        self.assertEqual(cmds.apply(["/RESUME", "/STATUS"], ks), ["RESUME", "STATUS"])
         self.assertTrue(ks.new_entries_allowed()[0])
         self.assertEqual(cmds.apply(["/CLOSE"], ks), ["CLOSE_REQUESTED"])
         self.assertEqual(cmds.apply(["/CLOSE CONFIRM"], ks), ["CLOSE_CONFIRMED"])
-        self.assertEqual(cmds.apply(["/REINICIAR"], ks), ["RESTART"])
         self.assertEqual(cmds.poll(), [])  # sem token → inativo
 
     def test_adaptive_trailing(self):
@@ -210,7 +209,7 @@ class LiveCycleTests(unittest.TestCase):
         self.assertIsNotNone(res.signal)
         self.assertTrue(res.decision.startswith("🟢 PAPER OPEN"))
         self.assertEqual(len(eng.managed), 1)
-        self.assertTrue(any("MARKET AI" in m and "SELL XAUUSD" in m for m in res.messages))
+        self.assertTrue(any("GOLD AI" in m and "SELL XAUUSD" in m for m in res.messages))
         tr = eng.managed[0]
         self.assertGreater(tr.plan.lots, 0)
         # próximo ciclo: cenário virou → tese invalidada → encerra, capital atualizado
@@ -337,99 +336,3 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class DailyTargetTests(unittest.TestCase):
-    def test_target_is_a_lock_not_an_obligation(self):
-        from datetime import datetime, timezone
-        from gold_ai.guard import GuardLimits, PerformanceEngine
-        lim = GuardLimits.from_env({"RISK_PER_TRADE": "3", "MAX_DAILY_LOSS": "6", "DAILY_TARGET": "10", "MAX_LOT": "1.0"})
-        self.assertEqual((lim.risk_per_trade_pct, lim.daily_target_pct, lim.max_daily_loss_pct), (3.0, 10.0, 6.0))
-        p = PerformanceEngine(lim, 10000.0)
-        t = datetime(2026, 9, 14, 13, 0, tzinfo=timezone.utc)
-        p.roll_day(t)
-        self.assertEqual(p.risk_usd, 300.0)                      # 3% de 10 000
-        self.assertEqual(p.daily_target_usd, 1000.0)
-        self.assertAlmostEqual(p.r_to_target(), 3.33, places=2)  # +3,33R líquidos para +10%
-        self.assertEqual(p.blocks(t), [])                        # meta longe: nada bloqueia, nada obriga
-        p.record_result(600.0, t, "t1")                          # +2R → risco passa a 3% de 10 600 (compounding, nunca por perda)
-        self.assertEqual(p.risk_usd, 318.0)
-        self.assertFalse(p.target_reached)
-        p.record_result(-318.0, t, "t2")                         # −1R: risco cai junto com o capital; nunca sobe para recuperar
-        self.assertEqual(p.risk_usd, round(10282.0 * 0.03, 2))
-        p.record_result(750.0, t, "t3")                          # dia +1 032 ≥ 1 000 → META
-        self.assertTrue(p.target_reached)
-        self.assertTrue(any("META DIÁRIA ATINGIDA" in b for b in p.blocks(t)))
-        self.assertFalse(p.trading_stop)                         # meta ≠ stop por perda
-        self.assertIn("META ATINGIDA", p.render())
-        p.roll_day(datetime(2026, 9, 15, 0, 5, tzinfo=timezone.utc))
-        self.assertFalse(p.target_reached)                       # dia novo, trava liberada
-        self.assertEqual(p.blocks(datetime(2026, 9, 15, 0, 5, tzinfo=timezone.utc)), [])
-        # perda diária 6% = duas perdas cheias
-        q = PerformanceEngine(lim, 10000.0)
-        q.record_result(-300.0, t); q.record_result(-300.0, t)
-        self.assertTrue(q.trading_stop)
-
-
-class BrokerSyncBaselineTests(unittest.TestCase):
-    def test_first_sync_is_baseline_not_daily_result(self):
-        from datetime import datetime, timezone
-        from gold_ai.guard import GuardLimits, PerformanceEngine
-        perf = PerformanceEngine(GuardLimits(risk_per_trade_pct=3.0, daily_target_pct=10.0), 10000.0)
-        now = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
-        perf.sync_equity(50000.0, now)
-        self.assertEqual(perf.equity, 50000.0)
-        self.assertEqual(perf.daily_pnl, 0.0)
-        self.assertFalse(perf.target_reached)
-        self.assertEqual(perf.blocks(now), [])
-        self.assertAlmostEqual(perf.risk_usd, 1500.0)
-        perf.sync_equity(50250.0, now)          # a partir da segunda leitura, a variação é resultado do dia
-        self.assertEqual(perf.daily_pnl, 250.0)
-
-
-class RestoreBaselineTests(unittest.TestCase):
-    def test_legacy_baseline_sync_does_not_lock_target(self):
-        from datetime import datetime, timezone
-        from gold_ai.guard import GuardLimits, PerformanceEngine
-        from gold_ai.memory import PredictionMemory
-        mem = PredictionMemory(":memory:")
-        now = datetime(2026, 9, 15, 10, 45, tzinfo=timezone.utc)
-        mem.record_equity(now, 50000.0, 40000.0, "sync broker")          # versão antiga: diferença 10 000 → 50 000 gravada como lucro
-        mem.record_equity(now, 50120.0, 120.0, "sync broker")            # resultado real de operação
-        self.assertEqual(mem.neutralize_baseline_syncs(), 1)
-        perf = PerformanceEngine(GuardLimits(daily_target_pct=10.0), 50000.0)
-        perf.restore(mem.account_rows(), now)
-        self.assertEqual(perf.daily_pnl, 120.0)
-        self.assertFalse(perf.target_reached)
-        mem.close()
-
-
-class StopSideValidationTests(unittest.TestCase):
-    """'Invalid stops' (10016) nunca deve chegar ao broker: lado errado é barrado antes; TP do lado errado sai sem TP."""
-
-    def test_sell_with_stop_below_price_is_refused_before_sending(self):
-        from gold_ai.models import Direction
-        from gold_ai.trading import TradePlan
-        b = BrokerSim(bid=1.14784, ask=1.14790)
-        ex = ExecutionEngine(MT5Client(MT5Config(symbol="EURUSD"), mt5=b))
-        p = TradePlan(Direction.BAIXA, 1.14784, 1.14608, 0.00176, NOW, targets={"3R": 1.14256}, recommended="3R", lots=0.1, risk_usd=17.6)
-        rep = ex.open(p)
-        self.assertFalse(rep.ok)
-        self.assertIn("SL do lado errado", rep.error)
-        self.assertEqual(b.sent, [])                                    # nada enviado
-
-    def test_sell_with_target_above_price_is_sent_without_tp(self):
-        from gold_ai.models import Direction
-        from gold_ai.trading import TradePlan
-        b = BrokerSim(bid=1.14784, ask=1.14790)
-        ex = ExecutionEngine(MT5Client(MT5Config(symbol="EURUSD"), mt5=b))
-        p = TradePlan(Direction.BAIXA, 1.14784, 1.15000, 0.00216, NOW, targets={"3R": 1.15000}, recommended="3R", lots=0.1, risk_usd=21.6)
-        rep = ex.open(p)
-        self.assertEqual(b.sent[-1]["tp"], 0.0)
-        self.assertGreater(b.sent[-1]["sl"], 1.14790)
-        self.assertTrue(any("sem TP" in m for m in rep.mismatches))
-
-    def test_rejection_message_carries_the_request(self):
-        b = BrokerSim(reject=True)
-        ex = ExecutionEngine(MT5Client(MT5Config(), mt5=b))
-        rep = ex.open(plan_long())
-        self.assertIn("pedido: BUY", rep.error)
-        self.assertIn("stops level", rep.error)

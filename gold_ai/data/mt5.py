@@ -1,3 +1,20 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from ..models import Candle, Direction, MarketSnapshot, Signal, SignalType
+from ..technical import _atr
+
+
+try:  # pragma: no cover - o pacote só existe no Windows com o terminal instalado
+    import MetaTrader5 as _mt5  # type: ignore
+except Exception:  # noqa: BLE001
+    _mt5 = None
+
+
 """MetaTrader 5 — fonte de candles reais do broker e executor com autorização explícita.
 
 Requer o pacote `MetaTrader5` (Windows) e o terminal instalado:
@@ -8,21 +25,9 @@ resto do MarketSnapshot com o DataEngine (DXY, juros, FRED, COT, notícias).
 `MT5Executor` NUNCA envia ordem sem `authorize=True` — por padrão apenas simula.
 """
 
-from __future__ import annotations
 
-import json
-import os
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
 
-from ..models import Candle, Direction, MarketSnapshot, Signal, SignalType
-from ..technical import atr as _atr
 
-try:  # pragma: no cover - só existe no Windows com o terminal instalado
-    import MetaTrader5 as _mt5  # type: ignore
-except Exception:  # noqa: BLE001
-    _mt5 = None
 
 TF_TO_MT5 = {"M1": "TIMEFRAME_M1", "M5": "TIMEFRAME_M5", "M15": "TIMEFRAME_M15", "M30": "TIMEFRAME_M30",
              "H1": "TIMEFRAME_H1", "H4": "TIMEFRAME_H4", "D1": "TIMEFRAME_D1", "W1": "TIMEFRAME_W1"}
@@ -50,12 +55,11 @@ class MT5Error(RuntimeError):
     pass
 
 
-def rates_to_candles(rates: Any, server_offset_hours: float = 0.0) -> list[Candle]:
-    """Converte o array de `copy_rates_from_pos` (time, open, high, low, close, tick_volume, spread, real_volume).
-    O MT5 carimba no horário do SERVIDOR da corretora (Pepperstone: GMT+2/+3): `server_offset_hours` converte para UTC."""
+def rates_to_candles(rates: Any) -> list[Candle]:
+    """Converte o array de `copy_rates_from_pos` (time, open, high, low, close, tick_volume, spread, real_volume)."""
     out: list[Candle] = []
-    for r in (rates if rates is not None else []):      # numpy: "truth value of an array" — nunca `rates or []`
-        t = datetime.fromtimestamp(int(r["time"]) - int(server_offset_hours * 3600), tz=timezone.utc)
+    for r in (rates if rates is not None else []):  # numpy array não tem valor-verdade
+        t = datetime.fromtimestamp(int(r["time"]), tz=timezone.utc)
         vol = float(r["real_volume"]) if _has(r, "real_volume") else 0.0
         if vol <= 0:
             vol = float(r["tick_volume"]) if _has(r, "tick_volume") else 0.0
@@ -91,94 +95,10 @@ class MT5Client:
         if self.cfg.login:
             kwargs.update(login=self.cfg.login, password=self.cfg.password, server=self.cfg.server)
         if not self.mt5.initialize(**kwargs):
-            err = self.mt5.last_error()
-            code = err[0] if isinstance(err, (tuple, list)) and err else None
-            hints = {
-                -6: "Authorization failed: o terminal abriu mas não há conta autorizada. Abra o terminal da corretora, faça login na conta (demo ou real) e "
-                    "deixe-o aberto; ou defina MT5_LOGIN, MT5_PASSWORD e MT5_SERVER no .env (ex.: MT5_SERVER=Pepperstone-Demo).",
-                -10003: "IPC initialize failed: caminho do terminal64.exe incorreto em MT5_PATH ou terminal de outro usuário do Windows.",
-                -10004: "IPC timeout: o terminal demorou a responder; abra-o manualmente e tente de novo.",
-                -2: "Invalid params: confira MT5_PATH (use barras invertidas) e MT5_LOGIN numérico.",
-            }
-            raise MT5Error(f"initialize falhou: {err}. {hints.get(code, 'Confira MT5_PATH, se o terminal está aberto e logado, e se o pacote MetaTrader5 é da mesma arquitetura (64 bits) do Python.')}")
+            raise MT5Error(f"initialize falhou: {self.mt5.last_error()}")
         if not self.mt5.symbol_select(self.cfg.symbol, True):
             raise MT5Error(f"símbolo {self.cfg.symbol} indisponível: {self.mt5.last_error()}")
         self.connected = True
-        self.server_offset_hours = self._detect_server_offset()
-
-    OFFSET_CACHE = os.environ.get("GOLD_AI_OFFSET_CACHE") or os.path.join(os.path.expanduser("~"), ".gold_ai_mt5_offset.json")
-
-    def _detect_server_offset(self) -> float:
-        """Fuso do servidor da corretora: compara o carimbo do último tick com o relógio UTC local. SÓ confia quando o tick é
-        FRESCO (≤ 2 h) e o resíduo é pequeno — em fim de semana/feriado o último tick é velho e o cálculo sairia errado.
-        Nesses casos usa o último valor detectado (cache) ou 0 com aviso. MT5_UTC_OFFSET_HOURS no .env força um valor."""
-        forced = os.environ.get("MT5_UTC_OFFSET_HOURS") or getattr(self.cfg, "utc_offset_hours", None)
-        self.offset_note = ""
-        if forced not in (None, ""):
-            self.offset_note = "forçado por MT5_UTC_OFFSET_HOURS"
-            return float(forced)
-        # o tick MAIS RECENTE entre vários símbolos: o ouro para 1 h por dia (manutenção) e um tick de 1 h atrás faz o fuso
-        # sair 1 h menor (UTC+2 em vez de +3) sem nenhum resíduo que denuncie — FX 24/5 evita isso
-        ts = 0.0
-        for sym in dict.fromkeys([self.cfg.symbol, "EURUSD", "USDJPY", "GBPUSD", "XAUUSD", "AUDUSD"]):
-            try:
-                t = self.mt5.symbol_info_tick(sym)
-                ts = max(ts, float(getattr(t, "time", 0) or 0))
-            except Exception:  # noqa: BLE001
-                continue
-        now = datetime.now(timezone.utc).timestamp()
-        if not ts:                      # terminal sem tick nenhum (ou simulado): nada a inferir
-            self.offset_note = "sem tick para inferir o fuso — 0 (defina MT5_UTC_OFFSET_HOURS se necessário)"
-            return 0.0
-        if ts:
-            raw = (ts - now) / 3600.0
-            off = float(round(raw))
-            fresh = abs(raw - off) <= 0.25 and abs(off) <= 14 and abs(ts - now - off * 3600) <= 15 * 60   # tick com ≤ 15 min
-            if fresh:
-                try:
-                    with open(self.OFFSET_CACHE, encoding="utf-8") as f:
-                        prev = float(json.load(f).get("offset"))
-                    if prev != off:
-                        self.offset_note = f"detectado pelo último tick (mudou de {prev:+.0f}h para {off:+.0f}h — horário de verão do servidor?)"
-                except (OSError, ValueError, TypeError, KeyError):
-                    pass
-                try:
-                    with open(self.OFFSET_CACHE, "w", encoding="utf-8") as f:
-                        json.dump({"offset": off, "at": datetime.now(timezone.utc).isoformat()}, f)
-                except OSError:
-                    pass
-                self.offset_note = self.offset_note or "detectado pelo último tick"
-                return off
-        try:
-            with open(self.OFFSET_CACHE, encoding="utf-8") as f:
-                cached = json.load(f)
-            self.offset_note = f"último tick antigo (mercado fechado?) — usando o fuso detectado em {cached.get('at', '')[:16]}"
-            return float(cached["offset"])
-        except (OSError, ValueError, KeyError):
-            self.offset_note = "AVISO: sem tick recente e sem cache — fuso 0; defina MT5_UTC_OFFSET_HOURS no .env (Pepperstone: 2 no inverno, 3 no verão)"
-            return 0.0
-
-    def symbol_spec(self, symbol: Optional[str] = None):
-        """Especificação de execução real do símbolo (symbol_info): dígitos, tick, valor do tick, passo de lote, stops level, filling."""
-        from ..markets import SymbolSpec, default_symbol_spec
-        sym = symbol or self.cfg.symbol
-        base = default_symbol_spec(sym)
-        try:
-            info = self.mt5.symbol_info(sym)
-        except Exception:  # noqa: BLE001
-            info = None
-        if info is None:
-            return base
-        g = lambda k, d: (getattr(info, k, None) if getattr(info, k, None) not in (None, 0, 0.0) else d)  # noqa: E731
-        fm = int(getattr(info, "filling_mode", 0) or 0)
-        filling = "FOK" if fm & 1 and not fm & 2 else "IOC" if fm & 2 else base.filling
-        spread_pts = float(getattr(info, "spread", 0) or 0)
-        point = float(g("point", base.point))
-        spec = SymbolSpec(sym, int(g("digits", base.digits)), float(g("trade_tick_size", base.tick_size)), float(g("trade_tick_value", base.tick_value_usd)),
-                          float(g("volume_min", base.volume_min)), float(g("volume_max", base.volume_max)), float(g("volume_step", base.volume_step)),
-                          int(getattr(info, "trade_stops_level", 0) or 0), int(getattr(info, "trade_freeze_level", 0) or 0),
-                          base.max_spread or max(2 * spread_pts * point, 2 * point), base.max_slippage or max(spread_pts * point, point), filling, "mt5")
-        return spec
 
     def close(self) -> None:
         if self.connected:
@@ -189,40 +109,7 @@ class MT5Client:
         rates = self.mt5.copy_rates_from_pos(self.cfg.symbol, getattr(self.mt5, TF_TO_MT5[tf]), 0, n or BARS[tf])
         if rates is None:
             raise MT5Error(f"copy_rates_from_pos({tf}) falhou: {self.mt5.last_error()}")
-        return rates_to_candles(rates, getattr(self, "server_offset_hours", 0.0))
-
-    def rates_range(self, symbol: str, tf: str, start: datetime, end: datetime) -> list[Candle]:
-        """Histórico por intervalo (copy_rates_range) — M1 costuma existir por anos na corretora."""
-        if not self.mt5.symbol_select(symbol, True):
-            raise MT5Error(f"símbolo {symbol} indisponível: {self.mt5.last_error()}")
-        off = getattr(self, "server_offset_hours", 0.0)
-        shift = timedelta(hours=off)
-        rates = self.mt5.copy_rates_range(symbol, getattr(self.mt5, TF_TO_MT5[tf]), start + shift, end + shift)   # pedido em hora do servidor
-        if rates is None:
-            raise MT5Error(f"copy_rates_range({symbol},{tf}) falhou: {self.mt5.last_error()}")
-        return rates_to_candles(rates, off)
-
-    def ticks_range(self, symbol: str, start: datetime, end: datetime) -> list[tuple[datetime, float, float]]:
-        """Ticks (time_msc, bid, ask) por intervalo (copy_ticks_range, COPY_TICKS_INFO) — a corretora guarda semanas/meses."""
-        if not self.mt5.symbol_select(symbol, True):
-            raise MT5Error(f"símbolo {symbol} indisponível: {self.mt5.last_error()}")
-        flags = getattr(self.mt5, "COPY_TICKS_INFO", 1)
-        off = getattr(self, "server_offset_hours", 0.0)
-        shift = timedelta(hours=off)
-        ticks = self.mt5.copy_ticks_range(symbol, start + shift, end + shift, flags)
-        if ticks is None:
-            raise MT5Error(f"copy_ticks_range({symbol}) falhou: {self.mt5.last_error()}")
-        out = []
-        last_bid = last_ask = None
-        for r in ticks:
-            ms = (int(r["time_msc"]) if _has(r, "time_msc") else int(r["time"]) * 1000) - int(off * 3600 * 1000)
-            bid = float(r["bid"]) if _has(r, "bid") and r["bid"] else last_bid
-            ask = float(r["ask"]) if _has(r, "ask") and r["ask"] else last_ask
-            if bid is None or ask is None:
-                continue
-            last_bid, last_ask = bid, ask
-            out.append((datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc), bid, ask))
-        return out
+        return rates_to_candles(rates)
 
     def tick(self) -> tuple[float, float]:
         t = self.mt5.symbol_info_tick(self.cfg.symbol)

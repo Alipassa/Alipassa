@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Gera o entrypoint único `market_ai_engine_v6.py` a partir do pacote `gold_ai/`.
+"""Gera o entrypoint único `gold_ai_engine_v3.py` a partir do pacote `gold_ai/`.
 
 Uso:  python tools/build_single_file.py
-O arquivo gerado é o ÚNICO bundle suportado; versões anteriores (v1/v2) foram removidas
-para evitar execução acidental da versão errada. Bundles v1/v2/v3 foram removidos.
+O arquivo gerado é o ÚNICO bundle suportado. `python -m gold_ai …` e `python gold_ai_engine_v3.py …` são equivalentes.
 """
 
 from __future__ import annotations
@@ -13,12 +12,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "market_ai_engine_v6.py"
-VERSION = "6.0.0"
+OUT = ROOT / "gold_ai_engine_v3.py"
+VERSION = "3.0.0"
 
 
 def build_stamp() -> str:
-    """data/hora da build + commit (com '+' se gold_ai/ tem mudanças não commitadas): aparece no /STATUS e na partida do live."""
+    """data/hora da build + commit (com '+' se gold_ai/ tem mudanças não commitadas): aparece na partida do live."""
     import subprocess
     from datetime import datetime, timezone
     try:
@@ -31,40 +30,15 @@ def build_stamp() -> str:
 
 BUILD = build_stamp()
 
-
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
-         "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "data/dukascopy", "trading", "monitor",
-         "markets", "news_engine", "reaction", "reaction_hires", "flow_anomaly", "history", "data/history_sources", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "ablation", "doctor", "lifecycle", "exit_lab", "edge_bank", "leadlag", "autotune", "portfolio_sim",
-    "matrix", "efficiency", "false_signal", "diagnose", "propagation", "live_engine", "data/multi", "market_engine", "cli"]
+         "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "trading", "monitor",
+         "execution", "guard", "validation", "evaluation", "opportunity", "live_engine", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
-"""MARKET AI ENGINE 6.0 — informação explícita (news/macro) + informação IMPLÍCITA (fluxo anômalo) · reação temporal · propagação entre ativos.
-
-6.0 = 5.x + memória por mercado (cada previsão resolvida só com o preço do seu mercado) + probabilidade calibrada no vivido (com
-encolhimento) + DIRECTION DIAGNOSTIC (por que perdeu · matriz fator × mercado · corretora × Yahoo) + LEADER PROPAGATION
-(impulso no líder → atrasados, aprendido na 1ª metade e testado na 2ª) + /REINICIAR + carimbo de build.
+"""GOLD AI ENGINE 3.0 — LIVE EXECUTION ENGINE — entrypoint único (XAU/USD).
 
 Gerado por tools/build_single_file.py a partir do pacote gold_ai/ (versão {VERSION}).
-Equivalente a `python -m gold_ai`. Único bundle suportado (v1–v5 removidos). 5.0 = núcleo 4.0 + FLOW ANOMALY ENGINE + REACTION ENGINE.
-
-5.0 — FLOW ANOMALY ENGINE: "existe um movimento que revela uma informação que ainda não conhecemos?" FLOW SCORE 0–100,
-assinaturas A/B/C, origem A–E (NUNCA 'compra de banco central': fluxo institucional provável, origem desconhecida), evento
-IMPLÍCITO no REACTION ENGINE → relógio nos atrasados → LEAD-LAG → PRESSÃO LATENTE → PRE-MOVE → OPPORTUNITY → ASSET SELECTOR.
-    python market_ai_engine_v6.py flow --markets XAUUSD,US500,EURUSD,USDJPY,WTI   # FLOW SCORE agora + propagação
-
-REGRA CENTRAL: maximizar o aproveitamento das oportunidades estatisticamente válidas, a expectancy e o potencial de ganho,
-mantendo o risco controlado — sem sacrificar captura de oportunidades em busca de uma taxa de acerto artificialmente alta.
-Alvo = acerto + captura + expectancy + ganho + controle de drawdown (docs/MISSAO.md).
-
-"Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor vantagem
-estatística disponível naquele momento, respeitando risco, correlação, qualidade dos dados e custo de
-execução." A IA não precisa operar ouro; precisa encontrar onde existe vantagem.
-
-XAUUSD · EURUSD · US500 · USDJPY · WTI (fase 1) → 📡 DATA ENGINE (macro uma vez + candles por mercado)
-→ 🧠 PREDICTION ENGINE (cérebro único; cada mercado declara o sinal de cada fator)
-→ 🔥 OPPORTUNITY ENGINE → 🏆 ASSET SELECTOR (histórico ajustado à amostra × oportunidade atual × decay)
-→ 📐 PORTFOLIO EXPOSURE (correlação; mesma aposta três vezes ≠ diversificação) → RISK ENGINE (capital único)
-→ TRADE ENGINE → MT5 → confirmação → 🔄 TRADE MONITOR 24/7 → ADAPTIVE EXIT → resultado → capital
+Equivalente a `python -m gold_ai`. Não existem outros bundles suportados.
 
 🌎 MUNDO → 📡 DATA ENGINE (Yahoo · FRED · CFTC · RSS · calendário · MetaTrader 5)
 → MARKET SNAPSHOT → 🧠 PREDICTION ENGINE (score · probabilidade · confiança · pré-movimento)
@@ -79,18 +53,13 @@ XAUUSD · EURUSD · US500 · USDJPY · WTI (fase 1) → 📡 DATA ENGINE (macro 
 Modos: 🟢 PAPER (padrão) · 🟡 AUTHORIZE · 🟠 SEMI-LIVE · 🔴 LIVE (exige --authorize)
 Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 
-Uso (4.0, multi-mercado):
-    python market_ai_engine_v6.py markets                                              # ranking agora, não opera
-    python market_ai_engine_v6.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
-    python market_ai_engine_v6.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000   # estimativa de lucro OOS
-    python market_ai_engine_v6.py sweep --start 2026-01-01 --market US500        # piso de vantagem escolhido no treino de cada fold
-    python market_ai_engine_v6.py history fetch-alfred|fetch-te|fetch-gdelt      # banco histórico point-in-time de eventos/notícias
-    python market_ai_engine_v6.py compare-news --start 2026-01-01 --markets US500,XAUUSD   # Preço só × +Macro (A) × +Macro+News (B)
-    python market_ai_engine_v6.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
-    python market_ai_engine_v6.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI [--csv-dir dados/]
-Uso (3.0, um mercado):
-    python market_ai_engine_v6.py live --source mt5 --mode paper|authorize|semi-live|live [--authorize] --send
-    python market_ai_engine_v6.py status | stats | validate | simulate | calibrate | backtest | metrics | demo | event
+Uso:
+    python gold_ai_engine_v3.py demo
+    python gold_ai_engine_v3.py live --source mt5 --mode paper --send
+    python gold_ai_engine_v3.py live --source mt5 --mode authorize --send [--authorize]
+    python gold_ai_engine_v3.py live --source mt5 --mode semi-live --send
+    python gold_ai_engine_v3.py live --source mt5 --mode live --authorize --send
+    python gold_ai_engine_v3.py status | stats | validate | simulate | calibrate | backtest | metrics | event
 
 Credenciais e limites no .env (ver .env.example). Sem dependências externas (MetaTrader5 opcional, Windows).
 """
@@ -113,7 +82,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -155,7 +124,7 @@ ALIAS = re.compile(r"^(\s*)from (\.|\.\.)[\w.]* import (.+)$")
 
 
 def _alias_lines(ln: str) -> list[str]:
-    """`from .x import a as b, c` → [`b = a`]: no bundle tudo já está no mesmo módulo, mas o apelido precisa existir."""
+    """`from .x import a as b` → [`b = a`]: no bundle tudo já está no mesmo módulo, mas o apelido precisa existir."""
     m = ALIAS.match(ln)
     if not m:
         return []
@@ -171,6 +140,7 @@ def _alias_lines(ln: str) -> list[str]:
 
 
 def strip_imports(text: str) -> str:
+    """Remove imports relativos e da stdlib (todos já estão no cabeçalho do bundle); imports locais dentro de funções também."""
     out, multi, buf = [], False, ""
     for ln in text.splitlines():
         if multi:
@@ -193,10 +163,6 @@ def build() -> str:
     parts = [HEADER]
     for name in ORDER:
         body = strip_imports((ROOT / "gold_ai" / f"{name}.py").read_text(encoding="utf-8"))
-        if name == "technical":
-            body += "\n\n\n_atr = atr  # alias usado pelo Data Engine, MT5 e avaliação"
-        if name == "factors":
-            body = body.replace('def _clip(x: float, lo: float, hi: float) -> float:\n    return max(lo, min(hi, x))\n\n\n', "")
         if name == "data/mt5":
             body = re.sub(r"try:  # pragma: no cover.*?_mt5 = None\n", "", body, flags=re.S)
         if name == "trading":

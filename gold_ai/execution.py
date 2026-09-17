@@ -5,14 +5,16 @@ Uma ordem só é considerada executada depois de confirmada no broker; qualquer 
 entre o que foi pedido e o que foi aberto é ⚠️ EXECUTION MISMATCH.
 """
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from .models import Direction
 from .trading import TradePlan
+
 
 MAGIC = 20260914
 
@@ -70,46 +72,10 @@ class BrokerPosition:
 class ExecutionEngine:
     """Executa e confirma ordens no MT5 (o objeto `mt5` é injetável para testes)."""
 
-    def __init__(self, client, price_tol: Optional[float] = None, sl_tol: Optional[float] = None, max_slippage: Optional[float] = None, deviation: int = 20) -> None:
+    def __init__(self, client, price_tol: float = 0.05, sl_tol: float = 0.05, max_slippage: float = 0.30, deviation: int = 20) -> None:
         self.client = client
         self.mt5 = client.mt5
-        self._price_tol, self._sl_tol, self._max_slippage, self.deviation = price_tol, sl_tol, max_slippage, deviation
-
-    # ------------------------------------------------------------------ especificação do símbolo (symbol_info): dígitos, tick, lote, stops level, filling
-    @property
-    def spec(self):
-        sp = getattr(self, "_spec", None)
-        if sp is None or sp.symbol != self.client.cfg.symbol:
-            from .markets import default_symbol_spec
-            sp = self.client.symbol_spec() if hasattr(self.client, "symbol_spec") else default_symbol_spec(self.client.cfg.symbol)
-            self._spec = sp
-        return sp
-
-    def digits(self, symbol: Optional[str] = None) -> int:
-        return self.spec.digits
-
-    def point(self, symbol: Optional[str] = None) -> float:
-        return self.spec.point
-
-    def rnd(self, x: Optional[float], symbol: Optional[str] = None) -> Optional[float]:
-        return None if x is None else self.spec.round_price(x)
-
-    def filling(self):
-        mt5 = self.mt5
-        name = {"FOK": "ORDER_FILLING_FOK", "RETURN": "ORDER_FILLING_RETURN"}.get(self.spec.filling, "ORDER_FILLING_IOC")
-        return getattr(mt5, name, getattr(mt5, "ORDER_FILLING_IOC", 2))
-
-    @property
-    def price_tol(self) -> float:      # tolerâncias em unidades de preço do símbolo (padrão: spread máximo do ativo)
-        return self._price_tol if self._price_tol is not None else max(self.spec.max_spread, 5 * self.spec.point)
-
-    @property
-    def sl_tol(self) -> float:
-        return self._sl_tol if self._sl_tol is not None else max(self.spec.max_spread, 5 * self.spec.point)
-
-    @property
-    def max_slippage(self) -> float:
-        return self._max_slippage if self._max_slippage is not None else max(self.spec.max_slippage, 3 * self.spec.point)
+        self.price_tol, self.sl_tol, self.max_slippage, self.deviation = price_tol, sl_tol, max_slippage, deviation
 
     # ------------------------------------------------------------------ leitura
     def positions(self, symbol: Optional[str] = None) -> list[BrokerPosition]:
@@ -136,43 +102,20 @@ class ExecutionEngine:
         buy = plan.direction == Direction.ALTA
         price = ask if buy else bid
         tp = plan.targets.get(plan.recommended) if plan.recommended in plan.targets else plan.targets.get("3R")
-        spec = self.spec
-        stop = plan.stop
-        # distância mínima real: stops level da corretora OU o spread (o broker mede o SL da venda contra o ASK e o da compra contra o BID)
-        min_dist = max(spec.min_stop_distance(), abs(ask - bid) + spec.point)
-        # lado certo: compra → SL abaixo do bid e TP acima do ask; venda → SL acima do ask e TP abaixo do bid ('Invalid stops' 10016 se não)
-        if (buy and stop >= bid) or ((not buy) and stop <= ask):
-            rep = ExecutionReport(0.0, self.rnd(stop), self.rnd(tp) if tp else None, price)
-            rep.error = (f"SL do lado errado do preço — não enviado: {'compra' if buy else 'venda'} a {price} com SL {stop} "
-                         f"(bid {bid} / ask {ask}); plano inconsistente (entrada da zona ≠ preço de mercado?)")
+        rep = ExecutionReport(plan.lots or 0.0, round(plan.stop, 2), round(tp, 2) if tp else None, price)
+        if not plan.lots:
+            rep.error = "lote zero"
             return rep
-        if buy and abs(bid - stop) < min_dist:
-            stop = bid - min_dist
-        if (not buy) and abs(stop - ask) < min_dist:
-            stop = ask + min_dist
-        if tp is not None and ((buy and tp <= ask + min_dist) or ((not buy) and tp >= bid - min_dist)):
-            tp = None                                            # alvo do lado errado/perto demais: entra sem TP (o gestor de posição cuida)
-        vol = spec.normalize_volume(plan.lots or 0.0)
-        rep = ExecutionReport(vol, self.rnd(stop), self.rnd(tp) if tp else None, price)
-        if not vol:
-            rep.error = f"lote {plan.lots} abaixo do mínimo {spec.volume_min} / passo {spec.volume_step}"
-            return rep
-        if abs(stop - plan.stop) > 1e-12:
-            rep.mismatches.append(f"SL ajustado ao stops level/spread ({spec.stops_level_points} pts, spread {ask - bid:.{spec.digits}f}): {plan.stop} → {rep.requested_sl}")
-        plan_tp = plan.targets.get(plan.recommended) if plan.recommended in plan.targets else plan.targets.get("3R")
-        if plan_tp and tp is None:
-            rep.mismatches.append(f"TP {plan_tp} do lado errado/perto demais do preço — enviado sem TP")
-        req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": self.client.cfg.symbol, "volume": vol,
+        req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": self.client.cfg.symbol, "volume": plan.lots,
                "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": price, "sl": rep.requested_sl, "tp": rep.requested_tp or 0.0,
-               "deviation": self.deviation, "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": self.filling()}
+               "deviation": self.deviation, "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC}
         res = mt5.order_send(req)
         if res is None:
             rep.error = f"order_send devolveu None: {mt5.last_error()}"
             return rep
         rep.retcode, rep.order, rep.deal = getattr(res, "retcode", None), getattr(res, "order", None), getattr(res, "deal", None)
         if rep.retcode != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
-            rep.error = (f"broker recusou: {getattr(res, 'comment', '')} (retcode {rep.retcode}) · pedido: {'BUY' if buy else 'SELL'} {vol} @ {price} "
-                         f"SL {rep.requested_sl} TP {rep.requested_tp or 0.0} · bid {bid} ask {ask} · stops level {spec.stops_level_points} pts · digits {spec.digits}")
+            rep.error = f"broker recusou: {getattr(res, 'comment', '')}"
             return rep
         return self.confirm(rep, plan)
 
@@ -187,7 +130,7 @@ class ExecutionEngine:
             rep.error = "posição não encontrada no broker após o envio"
             return rep
         rep.ticket, rep.fill_price, rep.real_volume, rep.real_sl, rep.real_tp = pos.ticket, pos.price_open, pos.volume, pos.sl, pos.tp
-        rep.slippage = round(abs(pos.price_open - rep.requested_price), self.digits())
+        rep.slippage = round(abs(pos.price_open - rep.requested_price), 2)
         rep.confirmed = True
         if abs(pos.volume - rep.requested_volume) > 1e-9:
             rep.mismatches.append(f"volume {pos.volume} ≠ pedido {rep.requested_volume}")
@@ -210,7 +153,7 @@ class ExecutionEngine:
     # ------------------------------------------------------------------ gestão no broker
     def modify(self, ticket: int, sl: Optional[float], tp: Optional[float]) -> bool:
         mt5 = self.mt5
-        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": self.client.cfg.symbol, "sl": self.rnd(sl) if sl else 0.0, "tp": self.rnd(tp) if tp else 0.0}
+        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": self.client.cfg.symbol, "sl": round(sl, 2) if sl else 0.0, "tp": round(tp, 2) if tp else 0.0}
         res = mt5.order_send(req)
         return res is not None and getattr(res, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009)
 
@@ -225,7 +168,7 @@ class ExecutionEngine:
         vol = round(min(volume or pos.volume, pos.volume), 2)
         req = {"action": mt5.TRADE_ACTION_DEAL, "position": ticket, "symbol": pos.symbol, "volume": vol,
                "type": mt5.ORDER_TYPE_SELL if buy else mt5.ORDER_TYPE_BUY, "price": bid if buy else ask, "deviation": self.deviation,
-               "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": self.filling()}
+               "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC}
         res = mt5.order_send(req)
         ok = res is not None and getattr(res, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009)
         return ok, (float(getattr(res, "price", 0.0)) or (bid if buy else ask)) if ok else None

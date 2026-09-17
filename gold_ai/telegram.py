@@ -1,17 +1,16 @@
 """Formatação e envio de alertas para o Telegram (Diretriz §23–§26)."""
 
+
 from __future__ import annotations
 
 import json
 import os
-import sys
 import urllib.parse
-import urllib.error
 import urllib.request
+from types import SimpleNamespace
 from typing import Optional
 
 from .models import Assessment, Direction, Signal, SignalType
-from .config import HORIZONS
 
 
 def _pct(x: float) -> str:
@@ -36,15 +35,9 @@ def _layer_line(a: Assessment, direction: Direction) -> list[str]:
     ]
 
 
-def _price_digits(price: float) -> int:
-    """Casas decimais pelo nível do preço: FX (< 10) 5 · JPY/petróleo (< 1000) 3 · ouro/índices 2."""
-    return 5 if price < 10 else 3 if price < 1000 else 2
-
-
 def _zone(a: Assessment) -> list[str]:
     z = a.zone
-    d = _price_digits(float(getattr(a, "price", 0.0) or 0.0))
-    fmt = lambda v: f"{v:.{d}f}" if v is not None else "n/d"  # noqa: E731
+    fmt = lambda v: f"{v:.2f}" if v is not None else "n/d"  # noqa: E731
     lines = []
     if z.get("entry_low") is not None:
         lines.append(f"Entrada: {fmt(z.get('entry_low'))}–{fmt(z.get('entry_high'))}")
@@ -54,27 +47,14 @@ def _zone(a: Assessment) -> list[str]:
     return lines
 
 
-MARKET_LABEL = {"XAUUSD": ("GOLD", "XAU/USD"), "US500": ("US500", "S&P 500 (US500)"), "EURUSD": ("EURUSD", "EUR/USD"),
-                "USDJPY": ("USDJPY", "USD/JPY"), "WTI": ("WTI", "Petróleo WTI"), "NAS100": ("NAS100", "Nasdaq 100"), "XAGUSD": ("SILVER", "XAG/USD")}
-
-
-def signal_label(sig_type, symbol: str = "XAUUSD") -> str:
-    """Nome do sinal com o rótulo do mercado: 'GOLD WATCH' → 'EURUSD WATCH' para EURUSD (o enum guarda o nome histórico GOLD)."""
-    name = MARKET_LABEL.get(str(symbol).upper(), (str(symbol).upper(), ""))[0]
-    value = getattr(sig_type, "value", str(sig_type))
-    return value.replace("GOLD ", f"{name} ", 1) if value.startswith("GOLD ") else value
-
-
-def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
+def format_signal(sig: Signal) -> str:
     a = sig.assessment
     d = sig.direction
     prob = a.prob_up if d == Direction.ALTA else a.prob_down if d == Direction.BAIXA else a.prob_flat
-    name, pair = MARKET_LABEL.get(symbol.upper(), (symbol.upper(), symbol.upper()))
-    digits = _price_digits(a.price)
-    price = f"Preço: {a.price:.{digits}f}"
+    price = f"Preço: {a.price:.2f}"
 
     if sig.type == SignalType.WATCH:
-        lines = [f"⚠️ {name} WATCH", pair, price, "",
+        lines = ["⚠️ GOLD WATCH", "XAU/USD", price, "",
                  f"Possível movimento de {'ALTA' if d == Direction.ALTA else 'BAIXA'}.", "",
                  f"Probabilidade: {_pct(prob)}", f"Confiança: {a.confidence:.0f}/100", f"Evidência: {a.evidence_level.label}",
                  f"Horizonte: {a.horizon}", "", "Fatores em observação:", *[f"• {r}" for r in sig.reasons[:4]], "",
@@ -83,7 +63,7 @@ def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
 
     if sig.type == SignalType.PRE_MOVE:
         emoji = "🟢 ALTA" if d == Direction.ALTA else "🔴 BAIXA"
-        lines = [f"⚠️ {name} PRE-MOVE — POSSÍVEL {'ALTA' if d == Direction.ALTA else 'BAIXA'}", pair, price, "",
+        lines = [f"⚠️ GOLD PRE-MOVE — POSSÍVEL {'ALTA' if d == Direction.ALTA else 'BAIXA'}", "XAU/USD", price, "",
                  "A IA detectou mudança em:", *[f"• {r}" for r in sig.reasons], "",
                  "mas o preço ainda não confirmou.", "",
                  f"Probabilidade de movimento: {_pct(a.premove.probability)}", f"Direção: {emoji}",
@@ -95,7 +75,7 @@ def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
 
     if sig.type == SignalType.REVERSAL:
         trend = a.reversal.current_trend.value
-        lines = [f"🔄 {name} REVERSAL ALERT", pair, price, "",
+        lines = ["🔄 GOLD REVERSAL ALERT", "XAU/USD", price, "",
                  f"Ouro está em tendência de {trend}, porém foram detectados sinais de {'distribuição' if trend == 'ALTA' else 'acumulação'}.", "",
                  "Indicadores:", *[f"• {e}" for e in a.reversal.evidence], "",
                  f"Resultado: 🔴 RISCO DE REVERSÃO ({a.reversal.risk:.0f}/100)", f"Score atual: {a.score:+.0f}", f"Horizonte: {a.horizon}"]
@@ -105,7 +85,7 @@ def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
         return "\n".join(lines)
 
     if sig.type == SignalType.RISK:
-        lines = [f"🚨 {name} SYSTEMIC RISK", pair, price, "",
+        lines = ["🚨 GOLD SYSTEMIC RISK", "XAU/USD", price, "",
                  f"RISCO SISTÊMICO: {a.systemic_risk:.0f}/100", "",
                  "Sinais de stress detectados (VIX, spreads, bolsas, bancos).",
                  "Reação do ouro pode ser não-linear: liquidação inicial (venda forçada) seguida de fluxo de proteção.", "",
@@ -114,11 +94,11 @@ def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
 
     buy = sig.type in (SignalType.BUY, SignalType.STRONG_BUY)
     confirmed = sig.trigger == "confirmação de movimento"
-    head = (f"🟢 {name} SIGNAL" if buy else f"🔴 {name} SIGNAL") if confirmed else (f"🚨 {name} AI ALERT" if buy else f"🔴 {name} AI ALERT")
+    head = ("🟢 GOLD SIGNAL" if buy else "🔴 GOLD SIGNAL") if confirmed else ("🚨 GOLD AI ALERT" if buy else "🔴 GOLD AI ALERT")
     bias = "🟢 COMPRA" if buy else "🔴 VENDA"
     if sig.type in (SignalType.STRONG_BUY, SignalType.STRONG_SELL):
         bias += " (FORTE)"
-    lines = [head, pair, price, "", bias, *(["PRE-MOVE CONFIRMADO"] if confirmed else []),
+    lines = [head, "XAU/USD", price, "", bias, *(["PRE-MOVE CONFIRMADO"] if confirmed else []),
              f"Score: {a.score:+.0f}", f"Probabilidade: {_pct(prob)}",
              f"Confiança: {a.confidence:.0f}/100", f"Evidência: {a.evidence_level.label}", f"Horizonte: {a.horizon}", "",
              "Motivos", *[f"• {r}" for r in sig.reasons], "",
@@ -134,35 +114,12 @@ def format_signal(sig: Signal, symbol: str = "XAUUSD") -> str:
     return "\n".join(lines)
 
 
-ENV_CANDIDATES = (".env", ".env.txt", "env", "env.txt")
-
-
-def env_file_candidates(path: str = ".env") -> list[str]:
-    """Onde o .env é procurado: pasta atual e pasta do script, com os nomes que o Windows costuma dar ao arquivo."""
-    if path != ".env":
-        return [path]
-    dirs = [os.getcwd()]
-    script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else ""
-    if script_dir and script_dir != dirs[0]:
-        dirs.append(script_dir)
-    return [os.path.join(d, name) for d in dirs for name in ENV_CANDIDATES]
-
-
-def find_env_file(path: str = ".env") -> Optional[str]:
-    for cand in env_file_candidates(path):
-        if os.path.isfile(cand):
-            return cand
-    return None
-
-
 def load_env_file(path: str = ".env") -> dict[str, str]:
-    """Lê um .env simples (CHAVE=valor, aspas opcionais). Nunca versionar esse arquivo.
-    Aceita .env / .env.txt / env / env.txt na pasta atual ou na pasta do script."""
+    """Lê um .env simples (CHAVE=valor, aspas opcionais). Nunca versionar esse arquivo."""
     out: dict[str, str] = {}
-    found = find_env_file(path)
-    if not found:
+    if not os.path.exists(path):
         return out
-    with open(found, encoding="utf-8-sig") as f:
+    with open(path, encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
             if not ln or ln.startswith("#") or "=" not in ln:
@@ -186,61 +143,18 @@ class TelegramSender:
         self.quiet = quiet
         self.sent: list[str] = []
 
-    MAX_LEN = 3900          # limite do Telegram é 4096 caracteres por mensagem
-
-    @staticmethod
-    def chunks(text: str, limit: int = 3900) -> list[str]:
-        """Divide em pedaços ≤ limit, cortando em quebra de linha; um /STATUS longo vira 2–3 mensagens em vez de um erro 400."""
-        if len(text) <= limit:
-            return [text]
-        out, cur = [], ""
-        for line in text.split("\n"):
-            while len(line) > limit:                       # linha isolada maior que o limite: corta na marra
-                if cur:
-                    out.append(cur)
-                    cur = ""
-                out.append(line[:limit])
-                line = line[limit:]
-            if cur and len(cur) + 1 + len(line) > limit:
-                out.append(cur)
-                cur = line
-            else:
-                cur = line if not cur else cur + "\n" + line
-        if cur:
-            out.append(cur)
-        return out
-
     def send(self, text: str) -> bool:
-        """Nunca levanta exceção: um erro do Telegram (400 texto longo, rede fora, 429) é registrado e o robô continua o ciclo."""
         if self.dry_run:
             self.sent.append(text)
             if not self.quiet:
                 print("\n[TELEGRAM dry-run]\n" + text + "\n")
             return True
-        ok = True
-        for part in self.chunks(text, self.MAX_LEN):
-            ok = self._post(part) and ok
-        return ok
-
-    def _post(self, text: str) -> bool:
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         data = urllib.parse.urlencode({"chat_id": self.chat_id, "text": text, "disable_web_page_preview": "true"}).encode()
         req = urllib.request.Request(url, data=data, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
-                body = json.loads(resp.read().decode())
-                return bool(body.get("ok"))
-        except urllib.error.HTTPError as e:
-            detail = ""
-            try:
-                detail = json.loads(e.read().decode()).get("description", "")
-            except Exception:  # noqa: BLE001
-                pass
-            print(f"[telegram] falhou ({e.code}): {detail or e.reason} — mensagem de {len(text)} caracteres não entregue; o robô continua")
-            return False
-        except Exception as e:  # noqa: BLE001 — rede/DNS/timeout: nunca derrubar o ciclo por causa do Telegram
-            print(f"[telegram] falhou: {e} — o robô continua")
-            return False
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+            body = json.loads(resp.read().decode())
+            return bool(body.get("ok"))
 
 
 def format_decision(decision) -> str:
@@ -254,11 +168,11 @@ def format_monitor(tr, reading) -> str:
 
 
 # --------------------------------------------------------------------------- 3.0: TELEGRAM TRADE MANAGER
-def format_entry(plan, assessment, mode: str, execution=None, symbol: str = "XAUUSD") -> str:
-    side = f"🟢 BUY {symbol}" if plan.direction.value == "ALTA" else f"🔴 SELL {symbol}"
+def format_entry(plan, assessment, mode: str, execution=None) -> str:
+    side = "🟢 BUY" if plan.direction.value == "ALTA" else "🔴 SELL"
     tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
     rr = plan.recommended[0] if plan.recommended[:1].isdigit() else "3"
-    lines = ["🚨 MARKET AI", "", side, "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
+    lines = ["🚨 GOLD AI", "", f"{side} XAUUSD", "", f"Score: {assessment.score:+.0f}", f"Probabilidade: {max(assessment.prob_up, assessment.prob_down):.0%}",
              f"Confiança: {assessment.confidence:.0f}", "", f"Entrada: {plan.entry:.2f}", f"Stop: {plan.stop:.2f}", f"TP: {tp:.2f}" if tp else "TP: trailing",
              "", f"R:R = 1:{rr}", "", f"Lote: {plan.lots:.2f}" if plan.lots else "Lote: n/d", f"Risco: {plan.risk_usd:.2f} USD" if plan.risk_usd else "",
              "", "PRE-MOVE CONFIRMADO" if "CONFIRM" in plan.signal_type.upper() or "BUY" in plan.signal_type or "SELL" in plan.signal_type else plan.signal_type,
@@ -274,7 +188,6 @@ def format_protection(tr, reading) -> str:
 
 
 def format_scenario_change(tr, reading) -> str:
-    from types import SimpleNamespace
     first = tr.history[0] if len(tr.history) > 1 else SimpleNamespace(thesis_score=100.0, exit_score=0.0)
     return "\n".join(["⚠️ GOLD AI", "", "CENÁRIO ALTERADO", "", f"Score:\n{tr.thesis.score:+.0f} → {reading.trade_score:+.0f}", "",
                        f"Thesis:\n{first.thesis_score:.0f} → {reading.thesis_score:.0f}", "", f"Exit:\n{first.exit_score:.0f} → {reading.exit_score:.0f}", "",

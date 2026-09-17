@@ -6,14 +6,15 @@ O sistema não faz "notícia → sentimento → compra". Ele percorre:
 E precisa saber dizer "NÃO SEI" (sem vantagem estatística → não enviar).
 """
 
+
 from __future__ import annotations
 
 from datetime import timedelta
 from typing import Optional
 
 from .config import EngineConfig
-from .events import EVENT_GOLD_SENSITIVITY
 from .models import Assessment, Direction, EconomicEvent, EvidenceLevel, MarketSnapshot, Stage
+from .events import EVENT_GOLD_SENSITIVITY
 
 
 # --------------------------------------------------------------------------- nível de evidência
@@ -98,12 +99,4 @@ def event_chain(a: Assessment, s: MarketSnapshot) -> str:
         lines.append(f"9. Veredito: {a.evidence_level.label} → {d} {p:.0%} · confiança {a.confidence:.0f}/100")
     else:
         lines.append(f"9. Veredito: {a.edge_status}")
-    if s.news_chain:
-        lines.append(s.news_chain)
-    elif s.news_status == "UNKNOWN":
-        lines.append("NEWS: UNKNOWN — sem notícias/eventos identificados (peso reduzido, não negativo)")
-    if s.reaction_chain and s.reaction_status != "SEM EVENTO":
-        lines.append(s.reaction_chain)
-    if s.flow_chain and s.flow_status not in ("SEM ANOMALIA",):
-        lines.append(s.flow_chain)
     return "\n".join(lines)

@@ -1,5 +1,6 @@
 """Modelos de dados do GOLD AI ENGINE."""
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -154,27 +155,6 @@ class MarketSnapshot:
     # Sentimento (§12)
     sentiment: Optional[float] = None       # -1..+1
     sentiment_change: Optional[float] = None
-    # NEWS ENGINE (4.0): pressão específica do mercado; None = UNKNOWN (peso reduzido, nunca negativo)
-    news_pressure: Optional[float] = None   # -1..+1
-    news_status: str = "UNKNOWN"            # UNKNOWN | FAVORÁVEL | CONTRÁRIO | NEUTRO
-    news_chain: str = ""
-    # REACTION ENGINE (4.0): relógio de reação do evento mais relevante (assimetria temporal líderes × alvo)
-    reaction_status: str = "SEM EVENTO"     # SEM EVENTO | AGUARDANDO | PRESSÃO LATENTE | REAGIU | DIVERGÊNCIA | EXPIRADO
-    reaction_pressure: float = 0.0          # −1..+1
-    reaction_probability: Optional[float] = None
-    reaction_latency_min: Optional[float] = None
-    reaction_expected_min: Optional[float] = None
-    reaction_chain: str = ""
-    # FLOW ANOMALY ENGINE (5.0): informação implícita — movimento que revela algo que ainda não conhecemos
-    flow_score: int = 0
-    flow_status: str = "SEM ANOMALIA"       # SEM ANOMALIA | MOVIMENTO EXPLICADO | FLUXO ANÔMALO | REGIME ANÔMALO
-    flow_origin: str = "—"                  # A notícia · B macro · C intermarket · D institucional provável · E anômalo
-    flow_direction: float = 0.0
-    anomalous_regime: bool = False
-    flow_chain: str = ""
-    # COT: último dado válido conhecido + idade (semanal; o peso decai com a idade)
-    cot_age_days: Optional[float] = None
-    cot_report_date: Optional[str] = None
 
     # Correlatos (§3)
     silver_change_pct: Optional[float] = None
@@ -184,8 +164,6 @@ class MarketSnapshot:
 
     # Técnico: candles por timeframe (§17, §18)
     candles: dict[str, list[Candle]] = field(default_factory=dict)
-    price_source: str = ""             # "mt5" (corretora) | "yahoo" — no LIVE só se decide com o preço da corretora que executa
-    session_start: tuple[int, int] = (22, 0)   # início da sessão (hora, minuto UTC) para o VWAP de sessão — definido pelo motor conforme o mercado
 
     # Notícias e eventos (§13, §32)
     news: list[NewsItem] = field(default_factory=list)
@@ -293,14 +271,6 @@ class Assessment:
     has_edge: bool = False
     chain: str = ""                # raciocínio em cadeia do evento (9 passos)
     regime: str = "INDEFINIDO"     # BULLISH | BEARISH | RANGE | VOLATILE
-    # 5.2: estados do snapshot que o nível/contexto (Edge Bank) precisam ver — copiados pelo cérebro em analyze()
-    news_status: str = "UNKNOWN"
-    reaction_status: str = "SEM EVENTO"
-    reaction_pressure: float = 0.0
-    flow_status: str = "SEM ANOMALIA"
-    flow_score: int = 0
-    flow_origin: str = "—"
-    anomalous_regime: bool = False
 
     @property
     def direction(self) -> Direction:

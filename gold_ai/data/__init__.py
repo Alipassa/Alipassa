@@ -2,6 +2,7 @@
 
 Coletores gratuitos e sem chave: Yahoo Finance (candles/quotes), FRED (juros
 reais, breakeven, spreads), CFTC (COT), RSS (notícias) e calendário local.
+MetaTrader 5 (opcional, Windows) como fonte primária de preço e executor.
 """
 
 from .http import DataError, HttpClient

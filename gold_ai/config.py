@@ -1,5 +1,6 @@
 """Configuração do motor: pesos, limiares e horizontes (Diretriz §19, §21, §27, §28, §37)."""
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -51,6 +52,9 @@ TIMEFRAME_GROUPS: dict[str, tuple[str, ...]] = {
     "macrotendencia": ("D1", "W1"),
 }
 
+# Minutos de cada timeframe (usado pelo gerador sintético e pelo reamostrador do Yahoo).
+TF_MINUTES: dict[str, int] = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440, "W1": 10080}
+
 # Horizontes de previsão (Diretriz §21).
 HORIZONS: dict[str, str] = {
     "curtissimo": "5–30 min",
@@ -73,11 +77,6 @@ class EngineConfig:
 
     # Filtro contra falsos sinais (Diretriz §27).
     min_confirmations: int = 3
-    trade_mode: str = "seguir"         # TORNEIO 6.0 (só backtest): "seguir" = opera na direção do sinal · "inverter" = opera CONTRA todo sinal
-                                       # (hipótese: o modelo tem informação com o sinal trocado) · "fade_confirmacao" = contra só quando o estágio
-                                       # é CONFIRMAÇÃO/MOVIMENTO (hipótese: alerta depois do movimento = reversão). Nunca vira modo do live sem OOS.
-    block_range: bool = False          # FILTRO DE REGIME: sem sinal operacional quando o regime H4/D1 é RANGE (lateral). Parâmetro que o
-                                       # autotune testa (com × sem) — o histórico decide; BLOCK_RANGE=1 no .env força ligado no live
     # Contribuição mínima (fração do peso máximo) para uma família "confirmar".
     family_confirmation_ratio: float = 0.35
 
@@ -102,11 +101,6 @@ class EngineConfig:
 
     # Janela (min) antes de evento de alto impacto em que a confiança é penalizada.
     event_window_minutes: int = 90
-
-    # 4.0: sinal com que cada fator (calculado na convenção do ouro) afeta o mercado analisado.
-    # +1 mesma direção, −1 oposta, 0 sem relação conhecida (fator marcado como indisponível).
-    factor_signs: dict[str, int] = field(default_factory=dict)
-    symbol: str = "XAUUSD"
 
     # Vantagem estatística (GOLD AI 2.0 — "saber dizer NÃO SEI").
     min_edge_probability: float = 0.55

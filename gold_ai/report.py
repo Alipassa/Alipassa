@@ -1,10 +1,13 @@
 """Saída interna de cada ciclo (Diretriz §36)."""
 
+
 from __future__ import annotations
 
 from typing import Optional
 
+from .config import EngineConfig
 from .models import Assessment
+from .signals import classify
 
 
 def render_report(a: Assessment) -> str:
@@ -62,8 +65,6 @@ def render_report(a: Assessment) -> str:
 
 def render_dashboard(a: Assessment, expected_lead_min: Optional[float] = None) -> str:
     """Painel GOLD MARKET PREDICTION SYSTEM (caixa de largura fixa)."""
-    from .signals import classify
-    from .config import EngineConfig
 
     f = {x.name: x for x in a.factors}
 
@@ -89,7 +90,7 @@ def render_dashboard(a: Assessment, expected_lead_min: Optional[float] = None) -
         ("LEAD TIME", lead), ("EVIDÊNCIA", f"NÍVEL {int(a.evidence_level)}"),
         None,
         ("DXY", lab("dolar")), ("REAL YIELD", lab("juros_reais")), ("FED", lab("fed")), ("FLOW", lab("fluxo")),
-        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento") if f.get("sentimento") and f["sentimento"].available else "UNKNOWN"), ("GEO", lab("geopolitica")),
+        ("COT", lab("cot")), ("TECHNICAL", lab("tecnico")), ("NEWS", lab("sentimento")), ("GEO", lab("geopolitica")),
         None,
         ("STATUS", f"{status_emoji} {status}"),
         None,

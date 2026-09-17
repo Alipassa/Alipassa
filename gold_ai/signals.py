@@ -1,13 +1,14 @@
 """Classificação de sinais, filtro contra falsos sinais e regra anti-spam
 (Diretriz §23–§28, §37)."""
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from .config import FACTOR_FAMILIES, EngineConfig
+from .config import EngineConfig, FACTOR_FAMILIES
 from .models import Assessment, Direction, EvidenceLevel, Signal, SignalType, Stage
 
 
@@ -58,27 +59,8 @@ class SignalGate:
     last_reversal_alert: bool = False
     last_risk_alert: bool = False
     seen_events: set[str] = field(default_factory=set)
-    last_reason: str = ""   # motivo do último None (funil de entrada)
-    last_watch_at: Optional[datetime] = None          # anti-spam do WATCH: mesmo mercado/direção só a cada min_seconds_between_alerts
-    last_watch_direction: Optional[Direction] = None
-
-    def missing_for_signal(self, a: Assessment) -> str:
-        """O que faltou para o sinal operacional, em números: |score| contra o limiar de sinal e confirmações contra o mínimo.
-        Responde à pergunta 'por que não entrou?' na própria tela (SETUP = vantagem passou; OPPORTUNITY exige isto)."""
-        if getattr(self.cfg, "block_range", False) and str(getattr(a, "regime", "")).upper().startswith("RANGE"):
-            return "mercado lateral (regime RANGE) — filtro de regime ativo: só observação"
-        need = int(self.cfg.buy)
-        have = abs(a.score)
-        parts = []
-        if have < need:
-            parts.append(f"|score| {have:.0f} < {need} (faltam {need - have:.0f})")
-        n_conf = len(a.confirmations or [])
-        if n_conf < self.cfg.min_confirmations:
-            parts.append(f"confirmações {n_conf}/{self.cfg.min_confirmations}")
-        return " · ".join(parts) if parts else "limiares atingidos"
 
     def evaluate(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
-        self.last_reason = ""
         base_type = classify(a.score, self.cfg)
         direction = a.direction
         stage = a.premove.stage
@@ -88,11 +70,6 @@ class SignalGate:
 
         # 0. "NÃO SEI": sem vantagem estatística não há sinal direcional (risco/reversão continuam passando)
         directional_allowed = a.has_edge
-        # 0b. FILTRO DE REGIME (opcional, decidido pelo histórico): em mercado lateral não há sinal operacional — só observação
-        self.range_blocked = bool(getattr(self.cfg, "block_range", False) and str(getattr(a, "regime", "")).upper().startswith("RANGE"))
-        if self.range_blocked:
-            directional_allowed = False
-            self.last_reason = "mercado lateral (regime RANGE) — filtro de regime ativo"
 
         # 7. risco excepcional — tem prioridade e ignora intervalo mínimo
         if a.systemic_risk >= self.cfg.exceptional_systemic_risk and not self.last_risk_alert:
@@ -114,7 +91,6 @@ class SignalGate:
         if not directional_allowed:
             self.last_stage, self.last_direction, self.last_score = stage, direction, a.score
             self.last_type = SignalType.NEUTRAL
-            self.last_reason = "SEM_VANTAGEM"
             return None
 
         # 4. surgimento de pré-movimento (fundamentos antecipam o preço)
@@ -123,9 +99,7 @@ class SignalGate:
             direction = a.premove.direction
         # 4b. GOLD WATCH: nível 2 de evidência, ainda sem sinal operacional
         elif base_type == SignalType.NEUTRAL and a.evidence_level >= EvidenceLevel.L2_ALERTA \
-                and max(a.prob_up, a.prob_down) >= self.cfg.watch_min_probability and self.last_type != SignalType.WATCH \
-                and (self.last_watch_at is None or direction != self.last_watch_direction
-                     or (a.time - self.last_watch_at).total_seconds() >= self.cfg.min_seconds_between_alerts):
+                and max(a.prob_up, a.prob_down) >= self.cfg.watch_min_probability and self.last_type != SignalType.WATCH:
             sig_type, trigger = SignalType.WATCH, "evidência nível 2 — observação"
         # 5. confirmação de movimento
         elif stage == Stage.CONFIRMACAO and self.last_stage == Stage.PRE_MOVIMENTO and base_type != SignalType.NEUTRAL:
@@ -147,32 +121,26 @@ class SignalGate:
         self.last_stage, self.last_direction, self.last_score = stage, direction, a.score
         if sig_type is None:
             self.last_type = base_type
-            self.last_reason = "SCORE_SINAL" if base_type == SignalType.NEUTRAL else "ANTI_SPAM"
             return None
 
         # filtro §27: sinal direcional exige >= 3 confirmações independentes
         if sig_type in (SignalType.STRONG_BUY, SignalType.BUY, SignalType.SELL, SignalType.STRONG_SELL, SignalType.PRE_MOVE, SignalType.WATCH):
             if len(confs) < self.cfg.min_confirmations:
                 self.last_type = SignalType.NEUTRAL
-                self.last_reason = "CONFIRMACOES"
                 return None
             if stage == Stage.MOVIMENTO and sig_type != SignalType.PRE_MOVE:
                 # §22 estágio 3: não perseguir preço — rebaixa para neutro
                 self.last_type = SignalType.NEUTRAL
-                self.last_reason = "ESTAGIO_3"
                 return None
 
         # intervalo mínimo entre alertas do mesmo tipo/direção
         if self.last_sent_at and (a.time - self.last_sent_at).total_seconds() < self.cfg.min_seconds_between_alerts \
                 and sig_type == self.last_type and trigger not in ("mudança de direção", "surgimento de pré-movimento"):
-            self.last_reason = "INTERVALO_MINIMO"
             return None
         return self._emit(sig_type, direction, a, trigger or "")
 
     def _emit(self, sig_type: SignalType, direction: Direction, a: Assessment, trigger: str) -> Signal:
         self.last_sent_at = a.time
         self.last_type = sig_type
-        if sig_type == SignalType.WATCH:
-            self.last_watch_at, self.last_watch_direction = a.time, direction
         rs = reasons_for(a, direction) if direction != Direction.LATERAL else []
         return Signal(type=sig_type, direction=direction, assessment=a, reasons=rs, trigger=trigger)

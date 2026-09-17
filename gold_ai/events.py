@@ -1,6 +1,7 @@
 """Calendário de risco, análise pré-evento (árvore de reação) e pós-evento
 (Diretriz §32, §33, §34)."""
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .models import EconomicEvent, MarketSnapshot
+
 
 IMPACT_RANK = {"BAIXO": 1, "MÉDIO": 2, "ALTO": 3, "MUITO ALTO": 4}
 

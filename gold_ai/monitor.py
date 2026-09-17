@@ -9,6 +9,7 @@ decidir continuamente entre MANTER, PROTEGER, REDUZIR ou ENCERRAR a posição."
                  → MANTER (trailing) · PROTEGER (parcial) · REDUZIR · ESTENDER · ENCERRAR (invalidação)
 """
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

@@ -9,20 +9,21 @@ TRADE MONITOR (monitor.TradeMonitor). O núcleo preditivo (2.1–2.3) não é al
 Nasce em PAPER. LIVE exige autorização explícita.
 """
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from .engine import GoldAIEngine
-from .guard import GuardLimits, KillSwitch, PerformanceEngine, TelegramCommands, TradingMode, size_lots
-from .memory import PredictionMemory
 from .models import Assessment, Direction, MarketSnapshot, Signal, SignalType
-from .monitor import ManagedTrade, MonitorReading, Thesis, TradeMonitor, render_evolution, render_monitor
-from .report import render_dashboard, render_report
-from .telegram import (TelegramSender, format_entry, format_protection, format_result, format_scenario_change, format_status)
+from .memory import PredictionMemory
+from .telegram import TelegramSender, format_entry, format_protection, format_result, format_scenario_change, format_status
+from .engine import GoldAIEngine
 from .trading import MaxProfitEngine, StopEngine, TradePlan, no_trade_check
+from .monitor import ManagedTrade, MonitorReading, Thesis, TradeMonitor, render_evolution, render_monitor
+from .guard import GuardLimits, KillSwitch, PerformanceEngine, TelegramCommands, TradingMode, size_lots
+from .opportunity import DecisionRecord, classify_reason
 
 
 @dataclass
@@ -30,7 +31,6 @@ class CycleResult:
     assessment: Optional[Assessment]
     signal: Optional[Signal]
     decision: str = ""
-    pid: Optional[int] = None
     plan: Optional[TradePlan] = None
     readings: list[tuple[ManagedTrade, MonitorReading]] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
@@ -43,21 +43,7 @@ class LiveExecutionEngine:
     def __init__(self, mem: PredictionMemory, limits: GuardLimits, mode: TradingMode = TradingMode.PAPER, equity: float = 10000.0,
                  executor=None, sender: Optional[TelegramSender] = None, kill_switch: Optional[KillSwitch] = None,
                  commands: Optional[TelegramCommands] = None, horizon_min: int = 240, engine: Optional[GoldAIEngine] = None,
-                 log: Callable[[str], None] = print, authorized: bool = False, spec=None, perf: Optional[PerformanceEngine] = None,
-                 entry_gate: Optional[Callable] = None) -> None:
-        """`spec` (markets.MarketSpec) torna o motor específico de um mercado; `perf` permite capital compartilhado
-        entre mercados (4.0); `entry_gate(symbol, direction, risk_usd)` → lista de bloqueios do portfólio (exposição)."""
-        from .markets import get_market
-        self.spec = spec or get_market("XAUUSD")
-        self.symbol = self.spec.symbol
-        from .markets import default_symbol_spec
-        self.symbol_spec = default_symbol_spec(self.symbol)          # substituída pela do broker (symbol_info) quando há executor
-        if executor is not None and hasattr(executor, "spec"):
-            try:
-                self.symbol_spec = executor.spec
-            except Exception:  # noqa: BLE001
-                pass
-        self.entry_gate = entry_gate
+                 log: Callable[[str], None] = print, authorized: bool = False) -> None:
         self.mem, self.limits, self.mode = mem, limits, mode
         self.executor = executor                      # execution.ExecutionEngine (LIVE / SEMI_LIVE / AUTHORIZE com autorização)
         self.sender = sender or TelegramSender(dry_run=True)
@@ -65,21 +51,15 @@ class LiveExecutionEngine:
         self.commands = commands
         self.horizon = horizon_min
         self.engine = engine or GoldAIEngine()
-        self.risk_pct: Optional[float] = None       # ESCADA (5.2): % por operação deste mercado, definida pelo ciclo de vida; None = RISK_PER_TRADE
-        self.grade: str = "C"                       # HIERARQUIA DE EDGE: A comprovado · B promissor · C inconclusivo · D negativo (bloqueado)
-        self.grade_note: str = ""
-        self.allowed_risk: Optional[Callable] = None   # allowed_risk(symbol, direction) → (USD que ainda cabe, motivo) — dimensionamento conjunto
         self.log = log
         self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
         start_equity = mem.last_equity() or equity
-        self.perf = perf or PerformanceEngine(limits, start_equity)
+        self.perf = PerformanceEngine(limits, start_equity)
         if mem.last_equity() is None:
             mem.record_equity(datetime.now(timezone.utc), start_equity, None, "capital inicial")
-        if engine is not None and self.spec.factor_signs and not engine.cfg.factor_signs:
-            engine.cfg.factor_signs, engine.cfg.symbol = dict(self.spec.factor_signs), self.symbol
-        self.monitor = TradeMonitor(history=mem.r_stats(self.symbol))
-        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(self.symbol), horizon_min, limits.min_rr_to_structure)
-        self.managed: list[ManagedTrade] = mem.managed_trades(self.symbol)
+        self.monitor = TradeMonitor(history=mem.r_stats())
+        self.mpe = MaxProfitEngine(StopEngine(limits), mem.r_stats(), horizon_min, limits.min_rr_to_structure)
+        self.managed: list[ManagedTrade] = mem.managed_trades()
         self.tickets: dict[int, int] = {}             # trade_id → ticket no broker
         for tr in self.managed:
             row = mem.conn.execute("SELECT ticket FROM trades WHERE id=?", (tr.trade_id,)).fetchone()
@@ -96,12 +76,10 @@ class LiveExecutionEngine:
         return format_status(self.perf, self.ks, self.managed, self.mode.value)
 
     # ------------------------------------------------------------------ comandos
-    def handle_commands(self, res: CycleResult, now: datetime, price_hint: Optional[float] = None) -> None:
+    def handle_commands(self, res: CycleResult, now: datetime) -> None:
         if self.commands is None:
             return
         for action in self.commands.apply(self.commands.poll(), self.ks):
-            if action == "EDGE":
-                continue  # tratado pelo MarketAIEngine (LIVE EDGE sob demanda)
             if action == "STATUS":
                 self._send(self.status_text(), res)
             elif action in ("STOP", "PAUSE", "RESUME"):
@@ -109,24 +87,15 @@ class LiveExecutionEngine:
             elif action == "CLOSE_REQUESTED":
                 self._send(f"⚠️ /CLOSE solicitado para {len(self.managed)} posição(ões). Responda /CLOSE CONFIRM para encerrar.", res)
             elif action == "CLOSE_CONFIRMED":
-                self.close_all(now, res, price_hint)
+                for tr in list(self.managed):
+                    self._close_trade(tr, tr.r_at(tr.plan.entry), "MANUAL", now, res, price_hint=None)
                 self._send("🔴 posições encerradas por /CLOSE CONFIRM", res)
 
-    def close_all(self, now: datetime, res: CycleResult, price_hint: Optional[float] = None) -> None:
-        for tr in list(self.managed):
-            self._close_trade(tr, tr.r_at(price_hint if price_hint is not None else tr.plan.entry), "MANUAL", now, res, price_hint=price_hint)
-
     # ------------------------------------------------------------------ ciclo
-    def risk_usd(self) -> float:
-        """Risco financeiro por operação deste mercado: capital × escada (tier do ciclo de vida) ou × RISK_PER_TRADE."""
-        if self.risk_pct is None:
-            return self.perf.risk_usd
-        return round(self.perf.equity * float(self.risk_pct) / 100.0, 2)
-
-    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None, defer_entry: bool = False) -> CycleResult:
+    def run_cycle(self, snap: MarketSnapshot, new_event_key: Optional[str] = None) -> CycleResult:
         res = CycleResult(None, None)
         now = snap.time
-        self.handle_commands(res, now, snap.price)
+        self.handle_commands(res, now)
         if not snap.candles:
             res.notes.append("sem candles XAU — ciclo abortado")
             return res
@@ -135,67 +104,43 @@ class LiveExecutionEngine:
         if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
             eq = self.executor.account_equity()
             if eq:
-                before, first = self.perf.equity, not self.perf.synced
+                before = self.perf.equity
                 self.perf.sync_equity(eq, now)
-                if first:
-                    self.mem.record_equity(now, eq, None, "linha de base do broker")    # capital real da conta: NÃO é resultado do dia
-                elif abs(eq - before) > 0.005:
+                if abs(eq - before) > 0.005:
                     self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
         # resolve previsões e operações simuladas pendentes; atualiza histórico
-        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon, symbol=self.symbol):
+        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):
             res.notes.append(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
-        for tid, sim in self.mem.auto_resolve_trades(fine, now, symbol=self.symbol):
+        for tid, sim in self.mem.auto_resolve_trades(fine, now):
             pr = sim["profile"]
             res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
-        self.mpe.history = self.monitor.history = self.mem.r_stats(self.symbol)
+        self.mpe.history = self.monitor.history = self.mem.r_stats()
         self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
 
-        self.mem.store_prices(fine, self.symbol)
-        self.mem.resolve_hypotheticals(now, self.horizon, symbol=self.symbol)
+        self.mem.store_prices(fine)
+        self.mem.resolve_hypotheticals(now, self.horizon)
         a, sig = self.engine.run_cycle(snap, new_event_key=new_event_key)
         res.assessment, res.signal = a, sig
         # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
         for tr in list(self.managed):
             self._monitor_trade(tr, a, snap, fine, res)
-        res.pid = None
+        # DECISION ENGINE
         if sig is not None:
             self._send(sig.text, res)
-            res.pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon, symbol=self.symbol)
-        if defer_entry:
-            res.decision = "ANALISADO — decisão de entrada delegada ao Asset Selector" if sig is not None else self._no_signal_text(a)
-            return res
-        return self.enter(res, snap)
-
-    def _no_signal_text(self, a) -> str:
-        """'SEM SINAL' sempre com o motivo em números: com vantagem estatística, o que faltou para o limiar de sinal."""
-        if getattr(a, "has_edge", False):
-            return f"SEM SINAL — {a.edge_status} · faltou: {self.engine.gate.missing_for_signal(a)}"
-        return "SEM SINAL — " + a.edge_status
-
-    def enter(self, res: CycleResult, snap: MarketSnapshot, veto: Optional[str] = None) -> CycleResult:
-        """DECISION ENGINE. `veto` = motivo externo (Asset Selector/exposição) para não entrar neste ciclo."""
-        a, sig = res.assessment, res.signal
-        if a is None:
-            return res
-        if sig is not None and veto:
-            res.decision = veto
-        elif sig is not None:
-            res.decision = self._decide_entry(sig, a, snap, res.pid or 0, res)
+            pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon)
+            res.decision = self._decide_entry(sig, a, snap, pid, res)
         else:
-            res.decision = self._no_signal_text(a)
-        # OPPORTUNITY ENGINE + FUNIL: toda análise vira um registro (entrada, ou a primeira etapa em que caiu)
-        from .opportunity import DecisionRecord, classify_reason, funnel_stage
+            res.decision = "SEM SINAL — " + a.edge_status
+        # OPPORTUNITY ENGINE: toda oportunidade analisada vira um registro (entrada ou regra que bloqueou)
         direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
-        is_raw, stage = funnel_stage(a, sig, self.engine.gate.last_reason, res.decision, self.engine.cfg)
-        self.mem.record_decision(DecisionRecord(snap.time, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
-                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence), symbol=self.symbol, stage=stage, is_raw=is_raw)
+        self.mem.record_decision(DecisionRecord(now, a.price, a.score, direction.value, classify_reason(res.decision), res.decision,
+                                                snap.atr or 0.0, None, int(a.evidence_level), a.confidence))
         return res
 
     # ------------------------------------------------------------------ entrada
     def _decide_entry(self, sig: Signal, a: Assessment, snap: MarketSnapshot, pid: int, res: CycleResult) -> str:
         if sig.type not in self.EXECUTABLE or sig.direction == Direction.LATERAL:
-            from .telegram import signal_label
-            return f"NO_TRADE — sinal {signal_label(sig.type, self.symbol)} não é operacional"
+            return f"NO_TRADE — sinal {sig.type.value} não é operacional"
         allowed, why = self.ks.new_entries_allowed()
         if not allowed:
             return f"BLOQUEADA — {why}"
@@ -207,85 +152,25 @@ class LiveExecutionEngine:
         if self.executor is not None:
             try:
                 bid, ask = self.executor.client.tick()
-                spread = round(ask - bid, self.executor.digits())
+                spread = round(ask - bid, 2)
             except Exception:  # noqa: BLE001
                 spread = None
-        reasons = no_trade_check(a, self.limits, spread, max_spread=self.symbol_spec.max_spread or None)
+        reasons = no_trade_check(a, self.limits, spread)
         if reasons:
             return "🟡 NÃO OPERAR — " + "; ".join(reasons)
         # uma posição por ativo (memória + broker)
         if self.managed or (self.executor is not None and self.executor.positions()):
-            return f"BLOQUEADA — já existe posição ativa em {self.symbol} (MAX_POSITIONS)"
+            return "BLOQUEADA — já existe posição ativa em XAUUSD (MAX_POSITIONS)"
         plan = self.mpe.plan(a, snap, sig.direction, sig.type.value)
         res.plan = plan
         if not plan.viable:
             return "🟡 NÃO OPERAR — " + "; ".join(n for n in plan.notes if n.startswith("⚠️"))
-        # capital + risco + stop + contrato: valor do ponto e passo/mínimo de lote do BROKER quando conectado (USDJPY/CFDs dinâmicos)
-        ss = self.symbol_spec
-        pv = ss.point_value_usd if ss.source == "mt5" and ss.point_value_usd > 0 else self.spec.point_value_usd
-        lim = self.limits
-        if ss.source == "mt5":
-            import copy as _copy
-            lim = _copy.copy(self.limits)
-            lim.min_lot, lim.lot_step, lim.max_lot = ss.volume_min, ss.volume_step, min(self.limits.max_lot, ss.volume_max)
-        # HIERARQUIA DE EDGE: D nunca opera; C só com risco de amostra > 0
-        if self.grade == "D" or self.risk_usd() <= 0:
-            return f"BLOQUEADA — hierarquia de edge: {self.grade_note or 'grau ' + self.grade} (não opera até revalidar)"
-        planned = self.risk_usd()
-        budget = planned
-        joint_note = ""
-        if self.allowed_risk is not None:                # DIMENSIONAMENTO CONJUNTO: divide o orçamento correlacionado, não triplica a aposta
-            room, why = self.allowed_risk(self.symbol, sig.direction)
-            if room < planned:
-                budget = max(0.0, room)
-                joint_note = f"risco {planned:.2f} → {budget:.2f} USD pelo {why}"
-        plan.lots, plan.risk_usd = size_lots(lim, budget, plan.r_value, pv)
+        plan.lots, plan.risk_usd = size_lots(self.limits, self.perf.risk_usd, plan.r_value)   # capital + risco + stop + contrato
         if not plan.lots:
-            return (f"BLOQUEADA — {joint_note}: não comporta o lote mínimo" if joint_note else
-                    f"BLOQUEADA — risco de {planned:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}")
-        if joint_note:
-            self.log(f"📐 {self.symbol}: {joint_note}")
-            res.messages.append(f"📐 {self.symbol}: dimensionada pelo risco conjunto — {joint_note}")
-        # CUSTO LÍQUIDO ANTES DA ENTRADA: edge bruto − (spread + slippage + comissão) em R; custo acima de MAX_COST_R do stop → descarta
-        try:
-            bid, ask = self.executor.client.tick() if self.executor is not None else (None, None)
-            spread_px = (ask - bid) if (bid is not None and ask is not None) else float(self.spec.typical_spread or 0.0)
-        except Exception:  # noqa: BLE001
-            spread_px = float(self.spec.typical_spread or 0.0)
-        slip_px = min(float(self.limits.max_slippage or 0.0), 0.02 * float(snap.atr or 0.0)) if snap.atr else 0.0
-        comm_px = (self.limits.commission_per_lot * plan.lots / (plan.lots * pv)) if (pv and plan.lots and self.limits.commission_per_lot) else 0.0
-        cost_r = (spread_px + slip_px + comm_px) / plan.r_value if plan.r_value else 0.0
-        p_raw = max(float(getattr(a, "prob_up", 0.0)), float(getattr(a, "prob_down", 0.0)))
-        # PROBABILIDADE CALIBRADA OBRIGATÓRIA: com calibrador, a.prob já é a observada; sem calibrador, encolhe para 50% antes do edge
-        if getattr(self.engine, "calibrator", None) is not None:
-            p_hit, p_note = p_raw, "calibrada"
-        else:
-            shrink = float(getattr(self.limits, "prob_shrink_uncalibrated", 0.5))
-            p_hit, p_note = 0.5 + (p_raw - 0.5) * shrink, f"declarada {p_raw:.0%} → encolhida (sem calibrador)"
-        tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
-        rr = abs(tp - plan.entry) / plan.r_value if (tp and plan.r_value) else 3.0
-        gross_r = p_hit * rr - (1.0 - p_hit)
-        net_r = gross_r - cost_r
-        self.log(f"💸 {self.symbol}: edge bruto {gross_r:+.2f}R (p {p_hit:.0%} {p_note} × {rr:.1f}R) − custo {cost_r:.2f}R (spread {spread_px:g} + slip {slip_px:g} + com {comm_px:g}) = líquido {net_r:+.2f}R")
-        if cost_r > self.limits.max_cost_r:
-            return f"DESCARTADA — custo {cost_r:.2f}R > MAX_COST_R {self.limits.max_cost_r:g}R (stop {plan.r_value:g} pequeno demais para pagar spread {spread_px:g} + slippage {slip_px:g})"
-        if net_r <= 0:
-            return f"DESCARTADA — edge líquido {net_r:+.2f}R ≤ 0 (bruto {gross_r:+.2f}R − custo {cost_r:.2f}R)"
-        if planned > 0 and plan.risk_usd < 0.5 * planned:
-            # o teto de lote (MAX_LOT / volume_max da corretora) cortou o risco: a escada e a meta em USD deixam de valer — dizer na hora
-            note = (f"⚠️ lote limitado a {plan.lots:.2f} (MAX_LOT {self.limits.max_lot:g} / máx. da corretora {lim.max_lot:g}): risco real "
-                    f"{plan.risk_usd:.2f} USD = {plan.risk_usd / planned:.0%} do planejado {planned:.2f} USD — resultado em R continua válido, em USD não")
-            self.log(note)
-            self._lot_cap_note = note
-        if self.entry_gate is not None:
-            blocked = self.entry_gate(self.symbol, sig.direction, plan.risk_usd)
-            if blocked:
-                return "BLOQUEADA — exposição de carteira: " + "; ".join(blocked)
+            return f"BLOQUEADA — risco de {self.perf.risk_usd:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
         self.log(plan.render())
-        cap_note = getattr(self, "_lot_cap_note", "")
-        self._lot_cap_note = ""
         if self.mode == TradingMode.AUTHORIZE and not self.authorized:
-            self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render() + (("\n" + cap_note) if cap_note else ""), res)
+            self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render(), res)
             return "AGUARDANDO AUTORIZAÇÃO"
         execution = None
         if self.mode != TradingMode.PAPER:
@@ -299,23 +184,19 @@ class LiveExecutionEngine:
             if execution.mismatches:
                 self._send("⚠️ " + execution.render(), res)
                 if any(m.startswith("SL real") for m in execution.mismatches):
-                    ok_close, _ = self.executor.close(execution.ticket)
-                    if ok_close:
-                        return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
-                    self._send(f"🚨 {self.symbol}: SL divergente E o broker recusou fechar #{execution.ticket} — posição REAL assumida pelo monitor com o SL real", res)
-                    if execution.real_sl:
-                        plan.stop = execution.real_sl
+                    self.executor.close(execution.ticket)
+                    return "EXECUTION MISMATCH — posição sem SL correto foi encerrada por segurança"
             self.authorized = False
-        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon, symbol=self.symbol)
+        tid = self.mem.open_trade(plan, self.mode.value, pid, self.horizon)
         thesis = Thesis.from_assessment(a, plan.direction)
         tr = ManagedTrade(tid, plan, thesis)
         if execution is not None:
             self.tickets[tid] = execution.ticket
             tr.plan.entry = execution.fill_price or plan.entry
         self.mem.save_thesis(tid, thesis, tr.state_dict())
-        self.mem.save_execution(tid, execution, self.perf.equity, self.risk_pct if self.risk_pct is not None else self.limits.risk_per_trade_pct, a)
+        self.mem.save_execution(tid, execution, self.perf.equity, self.limits.risk_per_trade_pct, a)
         self.managed.append(tr)
-        self._send(format_entry(plan, a, self.mode.value, execution, self.symbol) + (("\n" + cap_note) if cap_note else ""), res)
+        self._send(format_entry(plan, a, self.mode.value, execution), res)
         return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
 
     # ------------------------------------------------------------------ monitor
@@ -340,12 +221,7 @@ class LiveExecutionEngine:
             return
         if from_path:
             if tr.status == "CLOSED" and ticket and self.executor is not None and self.executor.position(ticket) is not None:
-                ok, price = self.executor.close(ticket)        # stop lógico tocado antes de sincronizar com o broker
-                if not ok:
-                    self._revert_close(tr, before, res, "stop lógico")
-                    return
-                if price is not None:
-                    tr.result_r = round(tr.realized_r + before[0] * tr.r_at(price), 3)
+                self.executor.close(ticket)                    # stop lógico tocado antes de sincronizar com o broker
             elif tr.status == "OPEN" and ticket and self.executor is not None and abs(tr.stop_r - before[1]) > 1e-9:
                 self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
         else:
@@ -381,46 +257,25 @@ class LiveExecutionEngine:
                 reading.action, reading.note = "PROTEGER", reading.note + " (aguardando confirmação para encerrar)"
                 return
             ok, price = self.executor.close(ticket)
-            if not ok:
-                self._revert_close(tr, before, res, reading.note or "ENCERRAR")
-                reading.action, reading.note = "MANTER", (reading.note + " (broker recusou o fechamento — nova tentativa no próximo ciclo)")
-                return
-            if price is not None:
-                tr.result_r = round(tr.realized_r + remaining_before * tr.r_at(price), 3)   # preço REAL de saída
+            if ok and price is not None:
+                tr.result_r = round(tr.realized_r + (remaining_before) * tr.r_at(price), 3) if tr.result_r is None else tr.result_r
             return
         if tr.remaining < remaining_before:  # parcial (PROTEGER/REDUZIR)
             pos = self.executor.position(ticket)
-            sent = False
             if pos is not None:
                 vol = round(pos.volume * (1 - tr.remaining / remaining_before), 2)
                 vol = max(self.limits.min_lot, vol)
                 if vol < pos.volume:
-                    sent, _ = self.executor.close(ticket, vol, "GoldAI partial")
-            if not sent:   # lote mínimo / recusa: desfaz a parcial local para a contabilidade seguir o broker
-                credited = tr.realized_r
-                tr.realized_r = round(tr.realized_r - (remaining_before - tr.remaining) * reading.current_r, 3) if credited else 0.0
-                tr.remaining = remaining_before
-                reading.note = reading.note + " (parcial não executada no broker: lote mínimo/recusa)"
+                    self.executor.close(ticket, vol, "GoldAI partial")
         if abs(tr.stop_r - stop_before) > 1e-9:
             self.executor.modify(ticket, tr.price_at_r(tr.stop_r), None if tr.extending else (tr.plan.targets.get(tr.plan.recommended) or None))
-
-    def _revert_close(self, tr: ManagedTrade, before: tuple, res: CycleResult, why: str) -> None:
-        """O broker recusou fechar: a posição REAL continua aberta, logo a local também (nunca órfã). Tenta de novo no próximo ciclo."""
-        tr.status, tr.close_reason, tr.result_r, tr.closed_at = "OPEN", "", None, None
-        tr.remaining = before[0]
-        self._send(f"⚠️ #{tr.trade_id:05d} {self.symbol}: broker RECUSOU o fechamento ({why}); posição mantida sob monitor, nova tentativa no próximo ciclo", res)
 
     def _close_trade(self, tr: ManagedTrade, r_exit: float, reason: str, now: datetime, res: CycleResult, price_hint: Optional[float]) -> None:
         ticket = self.tickets.get(tr.trade_id)
         if ticket and self.executor is not None:
             ok, price = self.executor.close(ticket)
-            if not ok:
-                self._send(f"⚠️ #{tr.trade_id:05d} {self.symbol}: broker recusou o fechamento manual; posição continua aberta", res)
-                return
-            if price is not None:
+            if ok and price is not None:
                 r_exit = tr.r_at(price)
-        elif price_hint is not None:
-            r_exit = tr.r_at(price_hint)
         tr.close(r_exit, reason, now)
         self._finalize(tr, now, res)
 
@@ -434,11 +289,8 @@ class LiveExecutionEngine:
         lead = next((h.time for h in tr.history if h.current_r >= 1.0), None)
         lead_min = (lead - tr.plan.time).total_seconds() / 60 if lead else None
         self.mem.save_financial_result(tr.trade_id, pnl, round(minutes, 1), lead_min)
-        if self.executor is not None and self.mode in (TradingMode.LIVE, TradingMode.SEMI_LIVE):
-            self.mem.record_equity(now, self.perf.equity, None, f"trade #{tr.trade_id} {tr.close_reason} (capital do broker via sync)")   # sync_equity já contabilizou
-        else:
-            self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
-            self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
+        self.perf.record_result(pnl, now, f"trade #{tr.trade_id}")
+        self.mem.record_equity(now, self.perf.equity, pnl, f"trade #{tr.trade_id} {tr.close_reason}")
         self.log(render_evolution(tr))
         self.log(self.perf.render())
         if tr.close_reason in ("TESE INVALIDADA", "EXIT SCORE"):
@@ -449,7 +301,3 @@ class LiveExecutionEngine:
         self.tickets.pop(tr.trade_id, None)
         if self.perf.trading_stop:
             self._send("🚨 TRADING STOP — perda diária máxima atingida; sem novas entradas hoje", res)
-        if self.perf.target_reached and not getattr(self, "_target_announced", None) == self.perf.day:
-            self._target_announced = self.perf.day
-            self._send(f"🎯 META DIÁRIA ATINGIDA — {self.perf.daily_pct:+.1f}% hoje ({self.perf.daily_pnl:+.2f} USD). Ganho protegido: sem novas entradas até amanhã; "
-                       "posições abertas seguem com o monitor.", res)
