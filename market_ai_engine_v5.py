@@ -1880,8 +1880,10 @@ CREATE TABLE IF NOT EXISTS decisions (
     r_hipotetico REAL, resolvido INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS prices (
-    hora TEXT PRIMARY KEY,
-    close REAL NOT NULL
+    hora TEXT NOT NULL,
+    ativo TEXT NOT NULL DEFAULT 'XAUUSD',
+    close REAL NOT NULL,
+    PRIMARY KEY (hora, ativo)
 );
 CREATE TABLE IF NOT EXISTS edge_reports (
     data TEXT PRIMARY KEY,
@@ -1958,6 +1960,14 @@ class PredictionMemory:
             cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if "ativo" not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN ativo TEXT DEFAULT 'XAUUSD'")
+        pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(prices)").fetchall()}
+        if "ativo" not in pcols:
+            # 5.x: preços por mercado — a tabela antiga (hora única) guardava só o primeiro mercado de cada minuto
+            self.conn.executescript("""
+                CREATE TABLE prices_v2 (hora TEXT NOT NULL, ativo TEXT NOT NULL DEFAULT 'XAUUSD', close REAL NOT NULL, PRIMARY KEY (hora, ativo));
+                INSERT OR IGNORE INTO prices_v2 (hora, ativo, close) SELECT hora, 'XAUUSD', close FROM prices;
+                DROP TABLE prices;
+                ALTER TABLE prices_v2 RENAME TO prices;""")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(decisions)").fetchall()}
         if "etapa" not in cols:
             self.conn.execute("ALTER TABLE decisions ADD COLUMN etapa TEXT")
@@ -2037,12 +2047,12 @@ class PredictionMemory:
 
     # ------------------------------------------------------------------ aprendizado
     def accuracy(self, by: str = "sessao") -> list[dict]:
-        """TAXA DE ACERTO por: sessao | hora | previsao | horizonte | estagio | evento | score_bucket | sinal_tipo."""
+        """TAXA DE ACERTO por: sessao | hora | previsao | horizonte | estagio | evento | score_bucket | sinal_tipo | ativo."""
         if by == "score_bucket":
             key = "CASE WHEN score>=70 THEN '>=70' WHEN score>=50 THEN '50-69' WHEN score>-50 THEN '-49..49' WHEN score>-70 THEN '-69..-50' ELSE '<=-70' END"
         elif by == "hora":
             key = "substr(hora,1,2)"
-        elif by in ("sessao", "previsao", "horizonte", "estagio", "evento", "sinal_tipo", "nivel_evidencia"):
+        elif by in ("sessao", "previsao", "horizonte", "estagio", "evento", "sinal_tipo", "nivel_evidencia", "ativo"):
             key = by
         else:
             raise ValueError(by)
@@ -2076,12 +2086,16 @@ class PredictionMemory:
         return sorted(out, key=lambda x: -x["poder"])
 
     # ------------------------------------------------------------------ 2.1: resolução automática no loop live
-    def auto_resolve(self, candles: Iterable, now: datetime, default_threshold: float, horizon_min: int = 240) -> list[tuple[int, Outcome]]:
+    def auto_resolve(self, candles: Iterable, now: datetime, default_threshold: float, horizon_min: int = 240,
+                     symbol: Optional[str] = None) -> list[tuple[int, Outcome]]:
         """Resolve previsões pendentes usando os candles mais recentes (M1/M5): ACERTO/ERRO quando o preço
-        tocar ±limiar (1 ATR da previsão, ou `default_threshold`) dentro do horizonte; LATERAL ao expirar."""
+        tocar ±limiar (1 ATR da previsão, ou `default_threshold`) dentro do horizonte; LATERAL ao expirar.
+
+        `symbol`: só as previsões DESSE mercado — os candles são de um mercado só; sem o filtro, a previsão do
+        EURUSD (1,15) era comparada com o preço do ouro (3 600) e "resolvia" no primeiro candle."""
         cs = sorted(candles, key=lambda c: c.time)
         done: list[tuple[int, Outcome]] = []
-        for row in self.pending():
+        for row in self.pending(symbol):
             start = datetime.fromisoformat(f"{row['data']}T{row['hora']}").replace(tzinfo=timezone.utc)
             horizon = row["horizonte_min"] or horizon_min
             path = [(c.time, c.close) for c in cs if start < c.time <= start + timedelta(minutes=horizon)]
@@ -2110,8 +2124,9 @@ class PredictionMemory:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def open_trades(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM trades WHERE status IN ('OPEN','MANAGED_CLOSED') ORDER BY id").fetchall()
+    def open_trades(self, symbol: Optional[str] = None) -> list[sqlite3.Row]:
+        w, args = self._where_symbol(symbol, "AND")
+        return self.conn.execute(f"SELECT * FROM trades WHERE status IN ('OPEN','MANAGED_CLOSED'){w} ORDER BY id", args).fetchall()
 
     # ------------------------------------------------------------------ 3.0: execução, capital, resultado
     def save_execution(self, trade_id: int, report, capital: float, risk_pct: float, assessment=None) -> None:
@@ -2268,29 +2283,37 @@ class PredictionMemory:
     def exit_learning(self) -> str:
         return exit_learning(self.exit_learning_rows())
 
-    def auto_resolve_trades(self, candles: Iterable, now: datetime) -> list[tuple[int, dict]]:
-        """Simula cada operação aberta com os candles reais (todas as estratégias). Fecha quando o stop
-        inicial é tocado, quando todas as estratégias saíram, ou ao expirar o horizonte."""
+    def _simulate_trade_row(self, row: sqlite3.Row, cs: list, now: datetime) -> Optional[dict]:
+        """Simula uma operação com candles do SEU mercado; grava o perfil (max R, MAE, 1R…4R, estopada) quando fecha."""
 
+        t0 = datetime.fromisoformat(row["aberta_em"])
+        horizon = row["horizonte_min"] or 240
+        if not any(c.time > t0 for c in cs):
+            return None
+        plan = TradePlan(Direction(row["direcao"]), row["entrada"], row["stop"], row["atr"] or 0.0, t0)
+        sim = simulate_all(plan, cs, horizon)
+        prof = sim["profile"]
+        expired = now >= t0 + timedelta(minutes=horizon) or prof.horizon_reached
+        all_closed = all(r.exit_reason != "OPEN" for r in sim["details"].values())
+        if not (prof.stopped or expired or all_closed):
+            return None
+        if row["status"] == "MANAGED_CLOSED" and not (prof.stopped or expired):
+            return None  # segue acompanhando até o stop inicial ou o horizonte
+        self.conn.execute(
+            """UPDATE trades SET status='CLOSED', max_r=?, mae_r=?, hit_1r=?, hit_2r=?, hit_3r=?, hit_4r=?, estopada=?, resultados=?, fechada_em=? WHERE id=?""",
+            (prof.max_r_before_stop, prof.mae_r, int(prof.hit(1)), int(prof.hit(2)), int(prof.hit(3)), int(prof.hit(4)),
+             int(prof.stopped), json.dumps(sim["results"]), now.isoformat(), row["id"]))
+        return sim
+
+    def auto_resolve_trades(self, candles: Iterable, now: datetime, symbol: Optional[str] = None) -> list[tuple[int, dict]]:
+        """Simula cada operação aberta com os candles reais (todas as estratégias). Fecha quando o stop
+        inicial é tocado, quando todas as estratégias saíram, ou ao expirar o horizonte.
+        `symbol`: só as operações desse mercado (os candles são de um mercado só)."""
         cs = sorted(candles, key=lambda c: c.time)
         done: list[tuple[int, dict]] = []
-        for row in self.open_trades():
-            t0 = datetime.fromisoformat(row["aberta_em"])
-            horizon = row["horizonte_min"] or 240
-            if not any(c.time > t0 for c in cs):
-                continue
-            plan = TradePlan(Direction(row["direcao"]), row["entrada"], row["stop"], row["atr"] or 0.0, t0)
-            sim = simulate_all(plan, cs, horizon)
-            prof = sim["profile"]
-            expired = now >= t0 + timedelta(minutes=horizon) or prof.horizon_reached
-            all_closed = all(r.exit_reason != "OPEN" for r in sim["details"].values())
-            if prof.stopped or expired or all_closed:
-                if row["status"] == "MANAGED_CLOSED" and not (prof.stopped or expired):
-                    continue  # segue acompanhando até o stop inicial ou o horizonte
-                self.conn.execute(
-                    """UPDATE trades SET status='CLOSED', max_r=?, mae_r=?, hit_1r=?, hit_2r=?, hit_3r=?, hit_4r=?, estopada=?, resultados=?, fechada_em=? WHERE id=?""",
-                    (prof.max_r_before_stop, prof.mae_r, int(prof.hit(1)), int(prof.hit(2)), int(prof.hit(3)), int(prof.hit(4)),
-                     int(prof.stopped), json.dumps(sim["results"]), now.isoformat(), row["id"]))
+        for row in self.open_trades(symbol):
+            sim = self._simulate_trade_row(row, cs, now)
+            if sim is not None:
                 done.append((row["id"], sim))
         if done:
             self.conn.commit()
@@ -2382,29 +2405,43 @@ class PredictionMemory:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def store_prices(self, candles: Iterable) -> int:
-        rows = [(c.time.astimezone(timezone.utc).isoformat(), c.close) for c in candles]
+    def store_prices(self, candles: Iterable, symbol: str = "XAUUSD") -> int:
+        rows = [(c.time.astimezone(timezone.utc).isoformat(), symbol, c.close) for c in candles]
         if not rows:
             return 0
-        self.conn.executemany("INSERT OR IGNORE INTO prices (hora, close) VALUES (?,?)", rows)
+        self.conn.executemany("INSERT OR IGNORE INTO prices (hora, ativo, close) VALUES (?,?,?)", rows)
         self.conn.commit()
         return len(rows)
 
-    def prices(self, since: Optional[datetime] = None) -> list[tuple[datetime, float]]:
-        q = "SELECT hora, close FROM prices" + (" WHERE hora >= ?" if since else "") + " ORDER BY hora"
-        rows = self.conn.execute(q, (since.isoformat(),) if since else ()).fetchall()
+    def prices(self, since: Optional[datetime] = None, symbol: Optional[str] = None) -> list[tuple[datetime, float]]:
+        """Fechamentos gravados pelo live. `symbol=None` = todos os mercados misturados — só faz sentido em banco de um mercado."""
+        conds, args = [], []
+        if since:
+            conds.append("hora >= ?"); args.append(since.isoformat())
+        if symbol:
+            conds.append("ativo = ?"); args.append(symbol)
+        q = "SELECT hora, close FROM prices" + ((" WHERE " + " AND ".join(conds)) if conds else "") + " ORDER BY hora"
+        rows = self.conn.execute(q, tuple(args)).fetchall()
         return [(datetime.fromisoformat(r["hora"]), r["close"]) for r in rows]
 
-    def resolve_hypotheticals(self, now: datetime, horizon_min: int = 240) -> int:
-        """Preenche o resultado hipotético (3R, stop 1.2 ATR) das decisões bloqueadas com os preços gravados."""
+    def price_symbols(self) -> list[str]:
+        return [r["ativo"] for r in self.conn.execute("SELECT DISTINCT ativo FROM prices ORDER BY ativo").fetchall()]
 
-        rows = self.conn.execute("SELECT * FROM decisions WHERE resolvido=0 AND acao NOT IN ('ENTRADA','SEM_SINAL') AND direcao IN ('ALTA','BAIXA')").fetchall()
+    def resolve_hypotheticals(self, now: datetime, horizon_min: int = 240, symbol: Optional[str] = None) -> int:
+        """Preenche o resultado hipotético (3R, stop 1.2 ATR) das decisões bloqueadas com os preços gravados
+        DO MESMO MERCADO da decisão (`symbol=None` = todos os mercados, cada um com os seus preços)."""
+
+        w, wargs = self._where_symbol(symbol, "AND")
+        rows = self.conn.execute(f"SELECT * FROM decisions WHERE resolvido=0 AND acao NOT IN ('ENTRADA','SEM_SINAL') AND direcao IN ('ALTA','BAIXA'){w}", wargs).fetchall()
         if not rows:
             return 0
-        prices = self.prices()
-        candles = [Candle(t, p, p, p, p, 0.0) for t, p in prices]
+        candles_by: dict[str, list] = {}
         n = 0
         for r in rows:
+            sym = r["ativo"] or "XAUUSD"
+            if sym not in candles_by:
+                candles_by[sym] = [Candle(t, p, p, p, p, 0.0) for t, p in self.prices(symbol=sym)]
+            candles = candles_by[sym]
             t0 = datetime.fromisoformat(r["hora"])
             rec = DecisionRecord(t0, r["preco"], r["score"], r["direcao"], r["acao"], r["motivo"] or "", r["atr"] or 0.0)
             expired = now >= t0 + timedelta(minutes=horizon_min)
@@ -2453,7 +2490,10 @@ class PredictionMemory:
     def opportunity_report(self, horizon_min: int = 240, since: Optional[datetime] = None, symbol: Optional[str] = None):
 
         decisions = self.decisions(since, symbol)
-        prices = self.prices(since)
+        syms = self.price_symbols()
+        if symbol is None and len(syms) > 1:
+            return self._opportunity_report_all(syms, horizon_min, since)
+        prices = self.prices(since, symbol)
         w, args = self._where_symbol(symbol)
         entries = [(datetime.fromisoformat(r["aberta_em"]), r["direcao"]) for r in self.conn.execute(f"SELECT aberta_em, direcao FROM trades{w}", args).fetchall()]
         w2, args2 = self._where_symbol(symbol, "AND")
@@ -2464,6 +2504,28 @@ class PredictionMemory:
         # decisões bloqueadas com resultado hipotético também alimentam a curva de limiar
         trade_rows += [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         return opportunity_report(decisions, prices, entries, threshold, horizon_min, trade_rows)
+
+    def _opportunity_report_all(self, symbols: list[str], horizon_min: int, since: Optional[datetime]):
+        """Vários mercados no banco: movimentos e capturas contados mercado a mercado (cada um com o SEU preço) e somados;
+        análises, entradas, atribuição e curva de limiar sobre todas as decisões."""
+
+        parts = [self.opportunity_report(horizon_min, since, sym) for sym in symbols]
+        decisions = self.decisions(since, None)
+        analyzed = [d for d in decisions if d.action != "SEM_SINAL"] or list(decisions)
+        n_entries = sum(1 for d in decisions if d.action == "ENTRADA")
+        entry_rate = (n_entries / len(analyzed)) if analyzed else None
+        n_moves = sum(p.n_moves for p in parts)
+        captured = sum(p.n_captured for p in parts)
+        capture = (captured / n_moves) if n_moves else None
+        trade_rows = [{"score": r["score_entrada"] or 0.0, "r": r["resultado_r"]} for r in
+                      self.conn.execute("SELECT score_entrada, resultado_r FROM trades WHERE resultado_r IS NOT NULL").fetchall()]
+        trade_rows += [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
+        ref = parts[0]
+        overfilter = (entry_rate is not None and len(analyzed) >= 20 and entry_rate < ref.min_entry_rate) or \
+                     (capture is not None and n_moves >= 10 and capture < ref.min_capture_rate)
+        return OpportunityReport(max(p.period_hours for p in parts), n_moves, captured, capture, len(analyzed), n_entries, entry_rate, overfilter,
+                                 attribution([d for d in decisions if d.action != "ENTRADA"]), threshold_curve(trade_rows),
+                                 ref.min_entry_rate, ref.min_capture_rate)
 
     def resolved_records(self, dedupe_episodes: bool = False) -> list[dict]:
         """Previsões resolvidas (ACERTO/ERRO). `dedupe_episodes`: uma por (ativo, direção, hora cheia) — alertas repetidos a cada ciclo
@@ -2528,8 +2590,70 @@ class PredictionMemory:
                              r["sinal_tipo"] or "", r["preco"], threshold, r["nivel_evidencia"] or 0, r["probabilidade"], r["confianca"]) for r in rows]
         return evaluate(sigs, list(path), threshold, horizon_min)
 
-    def pending(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM predictions WHERE resultado IS NULL ORDER BY id").fetchall()
+    def pending(self, symbol: Optional[str] = None) -> list[sqlite3.Row]:
+        w, args = self._where_symbol(symbol, "AND")
+        return self.conn.execute(f"SELECT * FROM predictions WHERE resultado IS NULL{w} ORDER BY id", args).fetchall()
+
+    # ------------------------------------------------------------------ 5.x: contaminação entre mercados
+    CONTAMINATION_RATIO = 0.2   # movimento > 20 % do preço dentro do horizonte = preço de OUTRO mercado (ouro 3 600 × EURUSD 1,15)
+
+    def contaminated_predictions(self) -> list[sqlite3.Row]:
+        """Previsões resolvidas com preço de outro mercado: MFE/MAE ou preço final a mais de 20 % do preço da previsão."""
+        k = self.CONTAMINATION_RATIO
+        return self.conn.execute(
+            """SELECT id, ativo, resultado, preco, preco_final, maxima_favoravel, maxima_adversa FROM predictions
+               WHERE resultado IN ('ACERTO','ERRO') AND preco > 0 AND (
+                     COALESCE(maxima_favoravel, 0) > ? * preco OR COALESCE(maxima_adversa, 0) > ? * preco
+                     OR ABS(COALESCE(preco_final, preco) - preco) > ? * preco)""", (k, k, k)).fetchall()
+
+    def contaminated_trades(self, max_minutes: float = 2.0) -> list[sqlite3.Row]:
+        """Operações cujo perfil (stop/MFE/MAE) foi simulado com candles de outro mercado: 'estopada' no 1º candle."""
+        rows = self.conn.execute("SELECT id, ativo, status, aberta_em, fechada_em, estopada, resultado_r FROM trades WHERE status='CLOSED' AND estopada=1 AND fechada_em IS NOT NULL").fetchall()
+        out = []
+        for r in rows:
+            try:
+                dt = (datetime.fromisoformat(r["fechada_em"]) - datetime.fromisoformat(r["aberta_em"])).total_seconds() / 60
+            except (TypeError, ValueError):
+                continue
+            if dt <= max_minutes:
+                out.append(r)
+        return out
+
+    def repair_cross_market(self, now: datetime, candles_by_symbol: Optional[dict] = None, horizon_min: int = 240) -> dict:
+        """Desfaz o que foi resolvido com preço de outro mercado e, se houver candles M1 por mercado, resolve de novo.
+
+        1. previsões contaminadas → voltam a pendentes;  2. operações 'estopadas' no 1º candle → perfil apagado
+        (voltam a OPEN/MANAGED_CLOSED para a simulação certa);  3. resultados hipotéticos das decisões → recalculados;
+        4. tabela de preços: se o banco tem mais de um mercado, o que foi gravado sem símbolo é descartado."""
+        rep: dict = {"previsoes": {}, "operacoes": {}, "decisoes": 0, "precos_descartados": 0, "re_resolvidas": {}, "re_simuladas": {}}
+        for r in self.contaminated_predictions():
+            rep["previsoes"][r["ativo"]] = rep["previsoes"].get(r["ativo"], 0) + 1
+            self.conn.execute("UPDATE predictions SET resultado=NULL, tempo_ate_reacao_min=NULL, maxima_favoravel=NULL, maxima_adversa=NULL, "
+                              "preco_final=NULL, resolvido_em=NULL WHERE id=?", (r["id"],))
+        for r in self.contaminated_trades():
+            rep["operacoes"][r["ativo"]] = rep["operacoes"].get(r["ativo"], 0) + 1
+            status = "MANAGED_CLOSED" if r["resultado_r"] is not None else "OPEN"
+            self.conn.execute("UPDATE trades SET status=?, max_r=NULL, mae_r=NULL, hit_1r=NULL, hit_2r=NULL, hit_3r=NULL, hit_4r=NULL, "
+                              "estopada=NULL, resultados=NULL, fechada_em=NULL WHERE id=?", (status, r["id"]))
+        cur = self.conn.execute("UPDATE decisions SET resolvido=0, r_hipotetico=NULL WHERE resolvido=1 AND acao NOT IN ('ENTRADA','SEM_SINAL')")
+        rep["decisoes"] = cur.rowcount
+        symbols = {r["ativo"] for r in self.conn.execute("SELECT DISTINCT ativo FROM predictions UNION SELECT DISTINCT ativo FROM trades UNION SELECT DISTINCT ativo FROM decisions").fetchall()}
+        if len(symbols) > 1 or candles_by_symbol:
+            rep["precos_descartados"] = self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
+            self.conn.execute("DELETE FROM prices")
+        self.conn.commit()
+        for sym, candles in (candles_by_symbol or {}).items():
+            cs = sorted(candles, key=lambda c: c.time)
+            if not cs:
+                continue
+            self.store_prices(cs, sym)
+            atrs = [r["atr"] for r in self.conn.execute("SELECT atr FROM predictions WHERE ativo=? AND atr IS NOT NULL", (sym,)).fetchall()]
+            default_thr = sorted(atrs)[len(atrs) // 2] if atrs else 0.0
+            if default_thr > 0:
+                rep["re_resolvidas"][sym] = len(self.auto_resolve(cs, now, default_thr, horizon_min, symbol=sym))
+            rep["re_simuladas"][sym] = len(self.auto_resolve_trades(cs, now, symbol=sym))
+            self.resolve_hypotheticals(now, horizon_min, symbol=sym)
+        return rep
 
     def close(self) -> None:
         self.conn.close()
@@ -13142,16 +13266,16 @@ class LiveExecutionEngine:
                 elif abs(eq - before) > 0.005:
                     self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
         # resolve previsões e operações simuladas pendentes; atualiza histórico
-        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):
+        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon, symbol=self.symbol):
             res.notes.append(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
-        for tid, sim in self.mem.auto_resolve_trades(fine, now):
+        for tid, sim in self.mem.auto_resolve_trades(fine, now, symbol=self.symbol):
             pr = sim["profile"]
             res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
         self.mpe.history = self.monitor.history = self.mem.r_stats(self.symbol)
         self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
 
-        self.mem.store_prices(fine)
-        self.mem.resolve_hypotheticals(now, self.horizon)
+        self.mem.store_prices(fine, self.symbol)
+        self.mem.resolve_hypotheticals(now, self.horizon, symbol=self.symbol)
         a, sig = self.engine.run_cycle(snap, new_event_key=new_event_key)
         res.assessment, res.signal = a, sig
         # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão
@@ -15598,6 +15722,9 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """Ajusta o calibrador isotônico com as previsões resolvidas no SQLite e salva em JSON (usado por `live --calibrator`)."""
     mem = PredictionMemory(args.db)
+    warn = _contamination_warning(mem)
+    if warn:
+        print(warn + "\n")
     print("BRUTO (todas as previsões resolvidas):")
     print(mem.calibration().render())
     rep = mem.calibration(dedupe_episodes=True)
@@ -15617,11 +15744,56 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _contamination_warning(mem: PredictionMemory) -> str:
+    """Previsões/operações resolvidas com o preço de OUTRO mercado (defeito das builds anteriores a 5.x em modo multi-mercado)."""
+    p, t = mem.contaminated_predictions(), mem.contaminated_trades()
+    if not p and not t:
+        return ""
+    by: dict[str, int] = {}
+    for r in p:
+        by[r["ativo"]] = by.get(r["ativo"], 0) + 1
+    det = ", ".join(f"{k} {v}" for k, v in sorted(by.items()))
+    return (f"⚠️ MEMÓRIA CONTAMINADA: {len(p)} previsão(ões) resolvida(s) com preço de outro mercado ({det}) e {len(t)} operação(ões) "
+            f"'estopadas' no 1º candle — as taxas de acerto abaixo NÃO valem. Rode: python market_ai_engine_v5.py repair --csv-dir dados")
+
+
+def cmd_repair(args: argparse.Namespace) -> int:
+    """Desfaz a contaminação entre mercados na memória e resolve de novo com o M1 de cada mercado (dados/<SYM>_m1.csv)."""
+
+    mem = PredictionMemory(args.db)
+    p, t = mem.contaminated_predictions(), mem.contaminated_trades()
+    print(f"banco {args.db}: {len(p)} previsão(ões) e {len(t)} operação(ões) resolvidas com preço de outro mercado")
+    candles_by: dict[str, list] = {}
+    if args.csv_dir:
+        syms = {r["ativo"] for r in mem.conn.execute("SELECT DISTINCT ativo FROM predictions UNION SELECT DISTINCT ativo FROM trades UNION SELECT DISTINCT ativo FROM decisions").fetchall()}
+        for sym in sorted(syms):
+            path = os.path.join(args.csv_dir, f"{sym}_m1.csv")
+            if os.path.exists(path):
+                candles_by[sym] = _read_candles_csv(path)
+                print(f"  {sym}: {len(candles_by[sym]):,} candles M1 de {path}")
+            else:
+                print(f"  {sym}: sem {path} — previsões voltam a pendentes e ficam à espera do live (só resolve o que os candles cobrirem)")
+    if args.dry_run:
+        print("(--dry-run: nada alterado)")
+        return 0
+    rep = mem.repair_cross_market(datetime.now(timezone.utc), candles_by or None)
+    print(f"previsões reabertas: {rep['previsoes'] or 0} · operações com perfil apagado: {rep['operacoes'] or 0} · decisões hipotéticas recalculadas: {rep['decisoes']} · preços sem mercado descartados: {rep['precos_descartados']}")
+    if candles_by:
+        print(f"re-resolvidas com o M1 certo: {rep['re_resolvidas']} · operações re-simuladas: {rep['re_simuladas']}")
+    print(f"pendentes agora: {len(mem.pending())}")
+    print("depois: python market_ai_engine_v5.py calibrate  (refaz o calibrador com os resultados certos)")
+    mem.close()
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
+    warn = _contamination_warning(mem)
+    if warn:
+        print(warn + "\n")
     pending = mem.pending()
     print(f"Previsões pendentes (sem resultado): {len(pending)} — resolva com PredictionMemory.resolve(id, caminho_de_preço, limiar)")
-    for by in args.by:
+    for by in (args.by or ["sessao", "previsao", "score_bucket", "estagio", "nivel_evidencia", "sinal_tipo", "ativo"]):
         print(f"\nTAXA DE ACERTO por {by}:")
         rows = mem.accuracy(by)
         if not rows:
@@ -15749,8 +15921,15 @@ def _main(argv: list[str]) -> int:
 
     s = sub.add_parser("stats", help="taxa de acerto e poder preditivo dos fatores")
     s.add_argument("--db", default="gold_ai.db")
-    s.add_argument("--by", nargs="*", default=["sessao", "previsao", "score_bucket", "estagio", "nivel_evidencia"])
+    s.add_argument("--by", nargs="*", action="extend", default=None,
+                   help="chaves: sessao hora previsao horizonte estagio evento score_bucket sinal_tipo nivel_evidencia ativo (várias: --by ativo estagio)")
     s.set_defaults(func=cmd_stats)
+
+    rp = sub.add_parser("repair", help="desfaz previsões/operações resolvidas com preço de OUTRO mercado e resolve de novo com o M1 certo")
+    rp.add_argument("--db", default="gold_ai.db")
+    rp.add_argument("--csv-dir", default=None, help="pasta com <SYM>_m1.csv (etapa 4 da pipeline) para resolver de novo")
+    rp.add_argument("--dry-run", action="store_true", help="só mostra o que seria alterado")
+    rp.set_defaults(func=cmd_repair)
 
     e = sub.add_parser("event", help="árvore de reação pré-evento e cadeia pós-evento (exemplo CPI)")
     e.add_argument("--actual", type=float, default=None)

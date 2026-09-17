@@ -685,6 +685,22 @@ outcome = mem.resolve(pid, path, threshold=atr)
 mem.accuracy("sessao"); mem.accuracy("score_bucket"); mem.factor_power()
 ```
 
+## Memória por mercado e `repair`
+
+Cada previsão, operação simulada e decisão hipotética é resolvida **só com o preço do seu mercado**. Até a build 4739a5c, em modo
+multi-mercado, a memória resolvia todas as previsões pendentes com os candles do primeiro mercado que chegava no ciclo: a previsão
+do EURUSD (1,15) era comparada com o ouro (3 600) e "resolvia" no primeiro candle — venda = ERRO, compra = ACERTO — e o US500
+(6 500) ao contrário. Isso produzia calibração "70 % → 9 %", lead time de 1 minuto e MFE 0,02R que não eram do mercado.
+
+`stats` e `calibrate` avisam quando o banco tem esse tipo de registro. Para consertar (com o LIVE parado):
+
+```
+python market_ai_engine_v5.py repair --csv-dir dados      # reabre o que foi resolvido com preço errado e resolve de novo com <SYM>_m1.csv
+python market_ai_engine_v5.py calibrate                   # refaz o calibrador com os resultados certos
+```
+
+Sem o M1 de um mercado, as previsões dele voltam a pendentes e nunca são inventadas.
+
 ## Aviso
 
 Motor probabilístico de apoio à decisão. Não garante resultados e não executa ordens: a

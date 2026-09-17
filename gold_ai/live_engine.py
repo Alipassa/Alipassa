@@ -142,16 +142,16 @@ class LiveExecutionEngine:
                 elif abs(eq - before) > 0.005:
                     self.mem.record_equity(now, eq, round(eq - before, 2), "sync broker")
         # resolve previsões e operações simuladas pendentes; atualiza histórico
-        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon):
+        for pid, out in self.mem.auto_resolve(fine, now, snap.atr or 5.0, self.horizon, symbol=self.symbol):
             res.notes.append(f"[memória] previsão #{pid} → {out.result} (lead {out.time_to_reaction_min}, MFE {out.mfe}, MAE {out.mae})")
-        for tid, sim in self.mem.auto_resolve_trades(fine, now):
+        for tid, sim in self.mem.auto_resolve_trades(fine, now, symbol=self.symbol):
             pr = sim["profile"]
             res.notes.append(f"[trade] operação #{tid} resolvida no horizonte → max {pr.max_r_before_stop:.2f}R, MAE {pr.mae_r:.2f}R")
         self.mpe.history = self.monitor.history = self.mem.r_stats(self.symbol)
         self.engine.expected_lead_min = self.mem.lead_time_stats()["media"]
 
-        self.mem.store_prices(fine)
-        self.mem.resolve_hypotheticals(now, self.horizon)
+        self.mem.store_prices(fine, self.symbol)
+        self.mem.resolve_hypotheticals(now, self.horizon, symbol=self.symbol)
         a, sig = self.engine.run_cycle(snap, new_event_key=new_event_key)
         res.assessment, res.signal = a, sig
         # 🔄 TRADE MONITOR — toda posição aberta é reavaliada antes de qualquer nova decisão

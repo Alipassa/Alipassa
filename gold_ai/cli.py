@@ -1597,6 +1597,9 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """Ajusta o calibrador isotônico com as previsões resolvidas no SQLite e salva em JSON (usado por `live --calibrator`)."""
     mem = PredictionMemory(args.db)
+    warn = _contamination_warning(mem)
+    if warn:
+        print(warn + "\n")
     print("BRUTO (todas as previsões resolvidas):")
     print(mem.calibration().render())
     rep = mem.calibration(dedupe_episodes=True)
@@ -1616,11 +1619,57 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _contamination_warning(mem: PredictionMemory) -> str:
+    """Previsões/operações resolvidas com o preço de OUTRO mercado (defeito das builds anteriores a 5.x em modo multi-mercado)."""
+    p, t = mem.contaminated_predictions(), mem.contaminated_trades()
+    if not p and not t:
+        return ""
+    by: dict[str, int] = {}
+    for r in p:
+        by[r["ativo"]] = by.get(r["ativo"], 0) + 1
+    det = ", ".join(f"{k} {v}" for k, v in sorted(by.items()))
+    return (f"⚠️ MEMÓRIA CONTAMINADA: {len(p)} previsão(ões) resolvida(s) com preço de outro mercado ({det}) e {len(t)} operação(ões) "
+            f"'estopadas' no 1º candle — as taxas de acerto abaixo NÃO valem. Rode: python market_ai_engine_v5.py repair --csv-dir dados")
+
+
+def cmd_repair(args: argparse.Namespace) -> int:
+    """Desfaz a contaminação entre mercados na memória e resolve de novo com o M1 de cada mercado (dados/<SYM>_m1.csv)."""
+    from datetime import datetime, timezone
+
+    mem = PredictionMemory(args.db)
+    p, t = mem.contaminated_predictions(), mem.contaminated_trades()
+    print(f"banco {args.db}: {len(p)} previsão(ões) e {len(t)} operação(ões) resolvidas com preço de outro mercado")
+    candles_by: dict[str, list] = {}
+    if args.csv_dir:
+        syms = {r["ativo"] for r in mem.conn.execute("SELECT DISTINCT ativo FROM predictions UNION SELECT DISTINCT ativo FROM trades UNION SELECT DISTINCT ativo FROM decisions").fetchall()}
+        for sym in sorted(syms):
+            path = os.path.join(args.csv_dir, f"{sym}_m1.csv")
+            if os.path.exists(path):
+                candles_by[sym] = _read_candles_csv(path)
+                print(f"  {sym}: {len(candles_by[sym]):,} candles M1 de {path}")
+            else:
+                print(f"  {sym}: sem {path} — previsões voltam a pendentes e ficam à espera do live (só resolve o que os candles cobrirem)")
+    if args.dry_run:
+        print("(--dry-run: nada alterado)")
+        return 0
+    rep = mem.repair_cross_market(datetime.now(timezone.utc), candles_by or None)
+    print(f"previsões reabertas: {rep['previsoes'] or 0} · operações com perfil apagado: {rep['operacoes'] or 0} · decisões hipotéticas recalculadas: {rep['decisoes']} · preços sem mercado descartados: {rep['precos_descartados']}")
+    if candles_by:
+        print(f"re-resolvidas com o M1 certo: {rep['re_resolvidas']} · operações re-simuladas: {rep['re_simuladas']}")
+    print(f"pendentes agora: {len(mem.pending())}")
+    print("depois: python market_ai_engine_v5.py calibrate  (refaz o calibrador com os resultados certos)")
+    mem.close()
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     mem = PredictionMemory(args.db)
+    warn = _contamination_warning(mem)
+    if warn:
+        print(warn + "\n")
     pending = mem.pending()
     print(f"Previsões pendentes (sem resultado): {len(pending)} — resolva com PredictionMemory.resolve(id, caminho_de_preço, limiar)")
-    for by in args.by:
+    for by in (args.by or ["sessao", "previsao", "score_bucket", "estagio", "nivel_evidencia", "sinal_tipo", "ativo"]):
         print(f"\nTAXA DE ACERTO por {by}:")
         rows = mem.accuracy(by)
         if not rows:
@@ -1749,8 +1798,15 @@ def _main(argv: list[str]) -> int:
 
     s = sub.add_parser("stats", help="taxa de acerto e poder preditivo dos fatores")
     s.add_argument("--db", default="gold_ai.db")
-    s.add_argument("--by", nargs="*", default=["sessao", "previsao", "score_bucket", "estagio", "nivel_evidencia"])
+    s.add_argument("--by", nargs="*", action="extend", default=None,
+                   help="chaves: sessao hora previsao horizonte estagio evento score_bucket sinal_tipo nivel_evidencia ativo (várias: --by ativo estagio)")
     s.set_defaults(func=cmd_stats)
+
+    rp = sub.add_parser("repair", help="desfaz previsões/operações resolvidas com preço de OUTRO mercado e resolve de novo com o M1 certo")
+    rp.add_argument("--db", default="gold_ai.db")
+    rp.add_argument("--csv-dir", default=None, help="pasta com <SYM>_m1.csv (etapa 4 da pipeline) para resolver de novo")
+    rp.add_argument("--dry-run", action="store_true", help="só mostra o que seria alterado")
+    rp.set_defaults(func=cmd_repair)
 
     e = sub.add_parser("event", help="árvore de reação pré-evento e cadeia pós-evento (exemplo CPI)")
     e.add_argument("--actual", type=float, default=None)
