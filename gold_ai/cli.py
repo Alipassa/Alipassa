@@ -885,6 +885,66 @@ def cmd_flow(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_propagation(args: argparse.Namespace) -> int:
+    """LEADER PROPAGATION ENGINE 6.0: impulso no líder → atrasados que o histórico diz que acompanham → TESTES A→E (dados/<SYM>_m1.csv ou ticks)."""
+    from .leader_propagation import LeaderPropagationEngine, PropagationConfig, Series, save_json, split_time
+    from .markets import MARKETS, get_market
+    from .reaction_hires import PricePath, load_ticks
+
+    csv_dir = args.csv_dir or "dados"
+    symbols = [x.strip().upper() for x in args.markets.split(",") if x.strip()]
+    leaders = [x.strip().upper() for x in (args.leaders or args.markets).split(",") if x.strip()]
+    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc) if args.start else None
+    end = (datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) + timedelta(days=1)) if args.end else None
+    lo = (start - timedelta(days=3)) if start else None
+    series: dict = {}
+    resolution = "M1"
+    for sym in symbols:
+        spread = get_market(sym).typical_spread * args.spread_mult if sym in MARKETS else 0.0
+        p_c, p_t = os.path.join(csv_dir, f"{sym}_m1.csv"), os.path.join(csv_dir, f"{sym}_ticks.csv")
+        if os.path.exists(p_c) and args.tf.upper() != "TICK":
+            cs = [c for c in _read_candles_csv(p_c) if (lo is None or c.time >= lo) and (end is None or c.time <= end)]
+            path, kind = PricePath.from_candles(cs, spread, 1), "M1"
+        elif os.path.exists(p_t):
+            tk = [t for t in load_ticks(p_t, print) if (lo is None or t[0] >= lo) and (end is None or t[0] <= end)]
+            path, kind = PricePath.from_ticks(tk).resample(1), "M1 (reamostrado dos ticks)"
+        else:
+            print(f"{sym}: nem {p_c} nem {p_t} existem — rode `history prices --tf M1` (mt5) ou `history prices` (dukascopy)")
+            continue
+        if len(path.q) < 500:
+            print(f"{sym}: só {len(path.q)} cotações no período — ignorado")
+            continue
+        series[sym] = Series(sym, path, args.impulse_min, args.lookback)
+        print(f"{sym}: {len(path.q):,} cotações {kind} · {path.q[0].time:%d/%m/%Y} → {path.q[-1].time:%d/%m/%Y} · spread {spread:g}")
+    if len(series) < 2:
+        print("precisa de pelo menos 2 mercados com M1/ticks (líder + atrasado)")
+        return 1
+    news = []
+    if args.events and os.path.exists(args.events):
+        from .history import MACRO_CATEGORIES, load_history
+        hist = load_history(args.events)
+        news = [(e.timestamp, e.kind) for e in hist.events if e.category in MACRO_CATEGORIES and e.actual is not None]
+        print(f"banco histórico: {len(news)} releases macro (marca 'c/ notícia' nos impulsos ±30 min)")
+    cfg = PropagationConfig(args.impulse_min, args.z, args.min_move_atr, args.lookback, args.lag_z, args.horizon, args.eval_min, args.cooldown, args.min_n,
+                            args.p_min, args.edge_min, args.take_quantile, args.delay, args.latency, args.slippage, args.commission_atr, args.max_targets,
+                            args.equity, args.risk)
+    eng = LeaderPropagationEngine(series, cfg, leaders, news, print)
+    imps = eng.detect(start, end)
+    print(f"impulsos detectados: {len(imps)} em {len(eng.leaders)} líder(es) · percorrendo em ordem cronológica (walk-forward por construção)…")
+    eng.run(start, end)
+    split = split_time(imps)
+    text = eng.render(split, resolution)
+    print(text)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"relatório salvo em {args.out}")
+    if args.json:
+        save_json(eng.to_json(split), args.json)
+        print(f"json salvo em {args.json}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """DOCTOR: tudo está funcionando? qual a eficiência? — painel por camada com ação, e leitura do que está provado."""
     from .doctor import run_doctor
@@ -1700,7 +1760,7 @@ def _contamination_warning(mem: PredictionMemory) -> str:
         by[r["ativo"]] = by.get(r["ativo"], 0) + 1
     det = ", ".join(f"{k} {v}" for k, v in sorted(by.items()))
     return (f"⚠️ MEMÓRIA CONTAMINADA: {len(p)} previsão(ões) resolvida(s) com preço de outro mercado ({det}) e {len(t)} operação(ões) "
-            f"'estopadas' no 1º candle — as taxas de acerto abaixo NÃO valem. Rode: python market_ai_engine_v5.py repair --csv-dir dados")
+            f"'estopadas' no 1º candle — as taxas de acerto abaixo NÃO valem. Rode: python market_ai_engine_v6.py repair --csv-dir dados")
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
@@ -1737,7 +1797,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
     if candles_by:
         print(f"re-resolvidas com o M1 certo: {rep['re_resolvidas']} · operações re-simuladas: {rep['re_simuladas']}")
     print(f"pendentes agora: {len(mem.pending())}")
-    print("depois: python market_ai_engine_v5.py calibrate  (refaz o calibrador com os resultados certos)")
+    print("depois: python market_ai_engine_v6.py calibrate  (refaz o calibrador com os resultados certos)")
     mem.close()
     return 0
 
@@ -2095,6 +2155,38 @@ def _main(argv: list[str]) -> int:
     fl.add_argument("--lead-usd", default="USDX", help="learn: símbolo do índice do dólar em <csv-dir>/<SYM>_m1.csv (líder)")
     fl.add_argument("--step", type=int, default=5, help="learn: passo do replay em minutos")
     fl.set_defaults(func=cmd_flow)
+
+    pg = sub.add_parser("propagation", help="6.0 LEADER PROPAGATION ENGINE: impulso no líder → atrasados que o histórico diz que acompanham → TESTES A→E (M1/ticks, líquido de custo)")
+    pg.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI")
+    pg.add_argument("--leaders", default=None, help="quem pode ser líder (padrão: todos os --markets; ex.: XAUUSD)")
+    pg.add_argument("--csv-dir", default=None, help="pasta com <SYM>_m1.csv (ou <SYM>_ticks.csv, reamostrado para M1)")
+    pg.add_argument("--tf", default="M1", help="M1 (padrão) | TICK (força os ticks reamostrados para M1)")
+    pg.add_argument("--start", default="2026-01-01")
+    pg.add_argument("--end", default=None)
+    pg.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"), help="banco histórico: marca impulsos com release macro nos ±30 min")
+    pg.add_argument("--impulse-min", type=int, default=3, help="janela do impulso em minutos")
+    pg.add_argument("--z", type=float, default=3.0, help="limiar estatístico: |Δ| ≥ z × desvio-padrão das variações da janela")
+    pg.add_argument("--min-move-atr", type=float, default=0.25, help="e |Δ| ≥ este tanto do ATR horário")
+    pg.add_argument("--lookback", type=float, default=24.0, help="horas da janela do desvio-padrão")
+    pg.add_argument("--lag-z", type=float, default=1.0, help="alvo atrasado = |z do alvo| abaixo disto no instante do impulso")
+    pg.add_argument("--horizon", type=int, default=60, help="minutos de medição e limite máximo da operação")
+    pg.add_argument("--eval-min", type=int, default=30, help="minuto em que a direção do alvo é julgada")
+    pg.add_argument("--cooldown", type=int, default=60, help="minutos sem novo impulso do mesmo líder")
+    pg.add_argument("--min-n", type=int, default=10, help="casos concluídos mínimos (relação e sombras) para entrar")
+    pg.add_argument("--p-min", type=float, default=0.55, help="probabilidade encolhida mínima da direção prevista")
+    pg.add_argument("--edge-min", type=float, default=0.0, help="expectancy-sombra líquida mínima em ATR")
+    pg.add_argument("--take-quantile", type=float, default=0.35, help="quantil da fração transmitida usado como alvo adaptativo")
+    pg.add_argument("--delay", type=float, default=60.0, help="segundos do instante conhecido até a ordem (M1: 60 = próxima barra)")
+    pg.add_argument("--latency", type=float, default=0.5)
+    pg.add_argument("--slippage", type=float, default=0.02, help="ATR por perna")
+    pg.add_argument("--commission-atr", type=float, default=0.0, help="comissão ida e volta em ATR do alvo")
+    pg.add_argument("--spread-mult", type=float, default=1.0, help="multiplica o spread típico do mercado (M1 não tem bid/ask)")
+    pg.add_argument("--max-targets", type=int, default=4)
+    pg.add_argument("--equity", type=float, default=10000.0)
+    pg.add_argument("--risk", type=float, default=1.0, help="%% do capital por operação (1R = stop)")
+    pg.add_argument("--out", default=None, help="relatório em texto (ex.: propagacao.txt)")
+    pg.add_argument("--json", default=None, help="impulsos, lag map, testes e operações em JSON (ex.: propagacao.json)")
+    pg.set_defaults(func=cmd_propagation)
 
     dc = sub.add_parser("doctor", help="tudo está funcionando? qual a eficiência? — painel por camada (✅ ⚠️ ❌) com ação e leitura do que está provado")
     dc.add_argument("--mt5", action="store_true", help="testa a conexão com o MetaTrader 5 (terminal aberto)")

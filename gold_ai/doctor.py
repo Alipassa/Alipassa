@@ -75,7 +75,7 @@ def run_doctor(env: dict, db_path: str = "gold_ai.db", events_path: str = os.pat
     keys = ("TOKEN_TELEGRAM", "CHAT_ID", "MT5_PATH", "RISK_PER_TRADE", "MAX_DAILY_LOSS", "FRED_API_KEY")
     missing = [k for k in keys if not env.get(k)]
     if not envf:
-        rep.add(".env", "❌", "não encontrado na pasta", "salve o .env na mesma pasta do market_ai_engine_v5.py")
+        rep.add(".env", "❌", "não encontrado na pasta", "salve o .env na mesma pasta do market_ai_engine_v6.py")
     elif missing:
         rep.add(".env", "⚠️", f"{envf} · faltam: {', '.join(missing)}", "preencha as chaves que faltam")
     else:

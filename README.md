@@ -1,4 +1,4 @@
-# MARKET AI ENGINE 5.0
+# MARKET AI ENGINE 6.0
 
 > **Regra central do projeto** — "MAXIMIZAR O APROVEITAMENTO DAS OPORTUNIDADES ESTATISTICAMENTE VÁLIDAS, MAXIMIZAR A EXPECTANCY E O
 > POTENCIAL DE GANHO, MANTENDO O RISCO CONTROLADO — SEM SACRIFICAR CAPTURA DE OPORTUNIDADES EM BUSCA DE UMA TAXA DE ACERTO
@@ -16,6 +16,41 @@ reais, Fed, inflação, geopolítica, fluxo, COT, opções, sentimento, técnico
 **Telegram** e **registro/aprendizado** das previsões.
 
 Python 3.10+, sem dependências externas.
+
+## ⚡ 6.0 — LEADER PROPAGATION ENGINE (robô novo)
+
+O robô **não precisa prever o primeiro movimento**. Ele detecta que o movimento **já começou no ativo líder** e entra nos ativos que o
+histórico diz que costumam reagir depois — só onde existe **edge líquido comprovado**. É um teste completamente separado do MARKET AI
+ENGINE: em vez de cada ativo gerar o próprio sinal, o líder é o sensor e os atrasados são os instrumentos de captura.
+
+```text
+MOVIMENTO BRUSCO no líder → detectar (M1/ticks) → direção → magnitude → procurar ATRASADOS → entrar na direção que o
+histórico mostrar (mesma ou oposta) → capturar a parte previsível da propagação → SAIR
+```
+
+| Peça | O que faz |
+|---|---|
+| **DETECTOR** | impulso = variação em 3 min ≥ `--z` (3σ) desvios das variações das últimas 24 h **e** ≥ 0,25 ATR horário — limiar estatístico, nunca "+0,20 %" fixo |
+| **LEADER** | no instante do impulso cada outro ativo é **atrasado** (\|z\| < 1), **parcial** (já andou) ou **simultâneo** (co-líder, não é atrasado); LEADER BOARD diz quem se mexe primeiro |
+| **LAG MAP** | líder × direção → alvo: direção final, tempo até reagir, MFE, MAE, fração do impulso transmitida — cada medição só existe em t + 60 min |
+| **REACTION CLOCK** | P(alvo sobe \| líder subiu) × P(desce), encolhida para 50 % conforme n; reação mediana/P25/P75; continuação; magnitude esperada |
+| **OPORTUNIDADE** | alvo adaptativo = quantil da fração transmitida × impulso do líder (em ATR do alvo); **operações-sombra** com os mesmos custos dão a expectancy líquida do par antes de qualquer entrada real |
+| **EXECUÇÃO** | entra só com n ≥ `--min-n`, P̂ ≥ `--p-min` e expectancy-sombra líquida > 0 (spread + slippage + comissão já descontados); nunca duas operações no mesmo alvo |
+| **SAÍDA** | take adaptativo · stop 0,5 ATR (1R) · tempo limite 2× a mediana do tempo de reação — pega o deslocamento e sai |
+
+**TESTES A → E** com os mesmos impulsos e custos: **A** cada ativo sozinho (o líder opera o próprio impulso) · **B** líder → 1 atrasado ·
+**C** → 2 · **D** → 3 · **E** → 4 (melhor edge-sombra primeiro) · **INGÊNUA** (todo atrasado na direção do líder, sem relógio). Para cada
+um: n, acerto, expectancy, R líquido, PF, retorno (capital composto), drawdown, custo, minutos por operação, posições simultâneas,
+1ª × 2ª metade, por alvo, por líder, por sessão, com/sem notícia e por tipo de saída. Walk-forward por construção: em cada impulso o
+motor só conhece medições e sombras já concluídas.
+
+```bash
+python market_ai_engine_v6.py propagation --markets XAUUSD,US500,EURUSD,USDJPY,WTI --start 2026-01-01 --out propagacao.txt --json propagacao.json
+python market_ai_engine_v6.py propagation --leaders XAUUSD --markets XAUUSD,US500,EURUSD,USDJPY,WTI --z 2.5 --min-n 20   # só o ouro como líder
+```
+Lê `dados/<SYM>_m1.csv` (ou `<SYM>_ticks.csv`, reamostrado para M1). `scripts/rodar_propagacao.bat` roda os dois relatórios em dois cliques;
+é também a etapa 8j do `rodar_tudo.bat` / `rodar_resultados.bat`. A hipótese só está provada onde B→E supera A e a INGÊNUA com n ≥ 20 e
+expectancy líquida positiva nas duas metades. O relatório é mapa, não gatilho: nada entra no live sem o ciclo de vida.
 
 ## 4.0 — MARKET AI ENGINE
 
@@ -44,10 +79,10 @@ Limites novos no `.env`: `MAX_TOTAL_OPEN_RISK`, `MAX_CORRELATED_RISK`, `MAX_PORT
 e `MT5_SYMBOL_<ATIVO>` para símbolos do broker. Nenhum filtro de entrada novo: os vetos do 4.0 são exclusivamente de portfólio e de prioridade.
 
 ```bash
-python market_ai_engine_v5.py markets                                                          # ranking agora (não opera)
-python market_ai_engine_v5.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
-python market_ai_engine_v5.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI --csv-dir dados/   # <SYMBOL>_h1.csv por mercado
-python market_ai_engine_v5.py stats                                                            # inclui resultado por ativo
+python market_ai_engine_v6.py markets                                                          # ranking agora (não opera)
+python market_ai_engine_v6.py live --markets EURUSD,US500,XAUUSD,USDJPY,WTI --source mt5 --mode paper --send
+python market_ai_engine_v6.py validate --markets EURUSD,US500,XAUUSD,USDJPY,WTI --csv-dir dados/   # <SYMBOL>_h1.csv por mercado
+python market_ai_engine_v6.py stats                                                            # inclui resultado por ativo
 ```
 
 ## 🚨 LIVE EDGE — o teste definitivo da 4.0
@@ -77,8 +112,8 @@ Não precisamos acreditar que EURUSD é melhor. Os dados mostram.
 ## 💰 Estimativa de lucro num período (ex.: janeiro de 2026 → hoje)
 
 ```bash
-python market_ai_engine_v5.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000 --risk 0.5
-python market_ai_engine_v5.py estimate --start 2026-01-01 --markets XAUUSD --csv-dir dados/     # com CSVs próprios (<SYMBOL>_h1.csv, DXY_h1.csv, US10Y_h1.csv)
+python market_ai_engine_v6.py estimate --start 2026-01-01 --markets EURUSD,US500,XAUUSD,USDJPY,WTI --equity 10000 --risk 0.5
+python market_ai_engine_v6.py estimate --start 2026-01-01 --markets XAUUSD --csv-dir dados/     # com CSVs próprios (<SYMBOL>_h1.csv, DXY_h1.csv, US10Y_h1.csv)
 ```
 
 O comando baixa o histórico H1 do período (Yahoo, em janelas de 60 dias) para cada mercado, mais DXY, Treasury 10Y, VIX e S&P,
@@ -126,9 +161,9 @@ Estados: `AGUARDANDO` · `PRESSÃO LATENTE` · `REAGIU` · `DIVERGÊNCIA` · `EX
 P(direção) histórica do tipo de evento e é ajustada pela evidência atual; sem histórico (n < 3) o relógio diz isso.
 
 ```bash
-python market_ai_engine_v5.py reaction learn --markets XAUUSD,US500,USDJPY   # banco histórico × preço H1 (tempos em múltiplos de 60 min)
-python market_ai_engine_v5.py reaction stats                                   # o que o live viveu (resolução por ciclo/M5)
-python market_ai_engine_v5.py reaction clock --markets XAUUSD,US500            # relógio agora
+python market_ai_engine_v6.py reaction learn --markets XAUUSD,US500,USDJPY   # banco histórico × preço H1 (tempos em múltiplos de 60 min)
+python market_ai_engine_v6.py reaction stats                                   # o que o live viveu (resolução por ciclo/M5)
+python market_ai_engine_v6.py reaction clock --markets XAUUSD,US500            # relógio agora
 ```
 
 No `live --markets` o relógio roda a cada ciclo, amostra USD/yields/alvo por evento e, ao fechar o horizonte, grava a reação no
@@ -138,9 +173,9 @@ SQLite (`reactions`): o sistema aprende com os eventos que viveu. No backtest co
 horas ao redor de cada evento macro do banco (−4 h … +1 h), o que dá janeiro → setembro inteiro com poucos milhares de arquivos:
 
 ```bash
-python market_ai_engine_v5.py history prices --markets XAUUSD,US500,EURUSD,USDJPY,WTI --extra USDX --start 2026-01-01   # dados/<SYM>_ticks.csv
-python market_ai_engine_v5.py reaction learn --tf TICK --markets XAUUSD,US500,EURUSD,USDJPY,WTI --lead-usd USDX --out prova_ticks.txt
-python market_ai_engine_v5.py history prices --source mt5 --tf M1 --markets XAUUSD --start 2026-01-01   # alternativa: MT5 logado
+python market_ai_engine_v6.py history prices --markets XAUUSD,US500,EURUSD,USDJPY,WTI --extra USDX --start 2026-01-01   # dados/<SYM>_ticks.csv
+python market_ai_engine_v6.py reaction learn --tf TICK --markets XAUUSD,US500,EURUSD,USDJPY,WTI --lead-usd USDX --out prova_ticks.txt
+python market_ai_engine_v6.py history prices --source mt5 --tf M1 --markets XAUUSD --start 2026-01-01   # alternativa: MT5 logado
 ```
 Instrumentos Dukascopy: XAUUSD, EURUSD, USDJPY, USA500IDXUSD (US500), LIGHTCMDUSD (WTI), DOLLARIDXUSD (USDX). Confira o
 primeiro tick impresso (escala de preço) antes de confiar.
@@ -177,20 +212,20 @@ O histórico H1 gratuito não tem notícias nem calendário; por isso o backtest
 sentiment, xau_effect, us500_effect, eurusd_effect, usdjpy_effect, wti_effect, effect_source, surprise_basis, tone, volume`.
 
 ```bash
-python market_ai_engine_v5.py history template                       # cria dados/noticias_historicas.csv (preencha ou importe)
-python market_ai_engine_v5.py history fetch-te --start 2026-01-01    # Trading Economics point-in-time (TE_API_KEY no .env)
-python market_ai_engine_v5.py history fetch-alfred                   # FRED/ALFRED: valor inicialmente publicado + revisões (FRED_API_KEY)
-python market_ai_engine_v5.py history fetch-gdelt                    # GDELT: manchetes mais relevantes de CADA DIA + volume por tema (1 chamada/tema/janela; --enrich = tom)
+python market_ai_engine_v6.py history template                       # cria dados/noticias_historicas.csv (preencha ou importe)
+python market_ai_engine_v6.py history fetch-te --start 2026-01-01    # Trading Economics point-in-time (TE_API_KEY no .env)
+python market_ai_engine_v6.py history fetch-alfred                   # FRED/ALFRED: valor inicialmente publicado + revisões (FRED_API_KEY)
+python market_ai_engine_v6.py history fetch-gdelt                    # GDELT: manchetes mais relevantes de CADA DIA + volume por tema (1 chamada/tema/janela; --enrich = tom)
                                                                      #   continua de onde parou (dados/*.progress.json); janelas com falha são refeitas na próxima execução
-python market_ai_engine_v5.py history rules                          # efeito por ativo a partir das regras macro
-python market_ai_engine_v5.py history learn --markets XAUUSD,US500   # efeito empírico: o preço 60 min depois decide (≥ 8 eventos)
-python market_ai_engine_v5.py history stats
+python market_ai_engine_v6.py history rules                          # efeito por ativo a partir das regras macro
+python market_ai_engine_v6.py history learn --markets XAUUSD,US500   # efeito empírico: o preço 60 min depois decide (≥ 8 eventos)
+python market_ai_engine_v6.py history stats
 
 # TESTE A (macro) e TESTE B (macro + news): mesma janela, mesmo piso, walk-forward OOS
-python market_ai_engine_v5.py compare-news --start 2026-01-01 --markets US500,XAUUSD
+python market_ai_engine_v6.py compare-news --start 2026-01-01 --markets US500,XAUUSD
 # qualquer comando histórico pode usar o banco
-python market_ai_engine_v5.py estimate --start 2026-01-01 --markets US500 --events dados/noticias_historicas.csv --news-mode macro
-python market_ai_engine_v5.py sweep --start 2026-01-01 --market US500 --events dados/noticias_historicas.csv
+python market_ai_engine_v6.py estimate --start 2026-01-01 --markets US500 --events dados/noticias_historicas.csv --news-mode macro
+python market_ai_engine_v6.py sweep --start 2026-01-01 --market US500 --events dados/noticias_historicas.csv
 ```
 
 - **Sem look-ahead de revisão**: `published_at ≤ t` decide o que é visível; a revisão substitui o valor só depois de publicada.
@@ -286,7 +321,7 @@ Origem: A notícia conhecida · B macro conhecido · C fluxo intermarket · D fl
 ## 🩺 Tudo está funcionando? Qual a eficiência? — `doctor`
 
 ```bash
-python market_ai_engine_v5.py doctor --mt5 --telegram      # ou 2 cliques em verificar.bat
+python market_ai_engine_v6.py doctor --mt5 --telegram      # ou 2 cliques em verificar.bat
 ```
 Painel por camada com ✅ ⚠️ ❌ e a ação correspondente: `.env`, Telegram (envia teste), MT5 (conecta, mostra bid/ask e fuso),
 banco de eventos (cobertura MACRO/NEWS), ticks/M1 por símbolo, líder USD, REACTION EDGE, memória do live (análises, previsões,
@@ -341,7 +376,7 @@ da amostra, n=24"). O mercado sozinho não veta aqui: isso é o grau D do ciclo 
 **Eficiência do dia (`dia`, `/DIA`).** Todo dia, por mercado: análises, episódios em SETUP e em OPPORTUNITY, entradas, captura
 (entradas ÷ episódios com sinal), operações fechadas, R, USD, acerto, minutos por operação, R hipotético das oportunidades não
 operadas, risco planejado × real (denuncia lote travado por `MAX_LOT`), motivos mais comuns de não entrar e saídas. Automático às
-`DAILY_REPORT_UTC` (padrão 21, fecho de Nova York); `-1` desliga. `python market_ai_engine_v5.py dia --day 2026-09-16` para um dia passado.
+`DAILY_REPORT_UTC` (padrão 21, fecho de Nova York); `-1` desliga. `python market_ai_engine_v6.py dia --day 2026-09-16` para um dia passado.
 
 **Filtro de mercado lateral.** O regime de cada mercado já é classificado em H4/D1 (BULLISH, BEARISH, RANGE, VOLATILE). Com
 `block_range` ligado, em RANGE o robô não gera sinal operacional, só observação, e a tela diz "mercado lateral (regime RANGE) — filtro
@@ -357,8 +392,8 @@ resultado por ativo, por tipo de evento e nas duas metades do período. A célul
 parâmetros só pelo autotune e pelo ciclo de vida (20/30/50). Saída `matriz.txt` + `matriz.json`.
 
 ```
-python market_ai_engine_v5.py matrix --start 2026-01-01 --markets XAUUSD,US500,EURUSD,USDJPY,WTI --out matriz.txt
-python market_ai_engine_v5.py matrix --confirmations 1,2,3 --positions 1,2 --risk 3 --cost 0.05 --out matriz.txt
+python market_ai_engine_v6.py matrix --start 2026-01-01 --markets XAUUSD,US500,EURUSD,USDJPY,WTI --out matriz.txt
+python market_ai_engine_v6.py matrix --confirmations 1,2,3 --positions 1,2 --risk 3 --cost 0.05 --out matriz.txt
 ```
 
 **Oportunidades de carteira.** O ciclo pode abrir até `MAX_ENTRIES_PER_CYCLE` entradas (padrão 3), em ordem de prioridade do Asset Selector, cada uma
@@ -386,7 +421,7 @@ Existem exatamente **duas** formas equivalentes de executar, ambas na versão 4.
 | Forma | Quando usar |
 | --- | --- |
 | `python -m gold_ai …` | trabalhando no repositório (pacote `gold_ai/`) |
-| `python market_ai_engine_v5.py …` | arquivo único gerado por `python tools/build_single_file.py` a partir do pacote |
+| `python market_ai_engine_v6.py …` | arquivo único gerado por `python tools/build_single_file.py` a partir do pacote |
 
 Bundles antigos (`gold_ai_engine.py`, `gold_ai_engine_v2.py`, `gold_ai_engine_v3.py`) **foram removidos** para impedir a execução
 acidental de uma versão errada. Se algum deles ainda existir na sua máquina, apague-o. O número da versão está em
@@ -688,13 +723,13 @@ mem.accuracy("sessao"); mem.accuracy("score_bucket"); mem.factor_power()
 ## Reiniciar ou parar o robô sem caçar janela
 
 `/REINICIAR` no Telegram, ou um arquivo `REINICIAR` na pasta do robô, faz o processo sair no fim do ciclo; o `rodar_live.bat` sobe
-de novo em 30 s com o `market_ai_engine_v5.py` que estiver na pasta (é assim que se troca de build). Com o arquivo `STOP_TRADING`
+de novo em 30 s com o `market_ai_engine_v6.py` que estiver na pasta (é assim que se troca de build). Com o arquivo `STOP_TRADING`
 presente, o `.bat` não sobe de novo: `STOP_TRADING` + `/REINICIAR` = desligado de vez (para `repair`, manutenção, etc.).
 
 ## Direction Diagnostic — por que perdeu?
 
 ```
-python market_ai_engine_v5.py diagnose --csv-dir dados --txt diagnostico.txt
+python market_ai_engine_v6.py diagnose --csv-dir dados --txt diagnostico.txt
 ```
 
 1. Cada operação OOS do walk-forward vira ACERTO · SAÍDA RUIM (chegou a 1R e devolveu) · ENTRADA RUIM (andou a favor e estopou) ·
@@ -715,8 +750,8 @@ do EURUSD (1,15) era comparada com o ouro (3 600) e "resolvia" no primeiro candl
 `stats` e `calibrate` avisam quando o banco tem esse tipo de registro. Para consertar (com o LIVE parado):
 
 ```
-python market_ai_engine_v5.py repair --csv-dir dados      # reabre o que foi resolvido com preço errado e resolve de novo com <SYM>_m1.csv
-python market_ai_engine_v5.py calibrate                   # refaz o calibrador com os resultados certos
+python market_ai_engine_v6.py repair --csv-dir dados      # reabre o que foi resolvido com preço errado e resolve de novo com <SYM>_m1.csv
+python market_ai_engine_v6.py calibrate                   # refaz o calibrador com os resultados certos
 ```
 
 Sem o M1 de um mercado, as previsões dele voltam a pendentes e nunca são inventadas.

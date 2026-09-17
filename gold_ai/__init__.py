@@ -38,5 +38,5 @@ __all__ = [
     "Stage",
 ]
 
-__version__ = "5.0.0"
+__version__ = "6.0.0"
 __build__ = "dev"          # o bundle grava aqui data/hora e commit da build (aparece no /STATUS e na partida)
