@@ -12671,13 +12671,23 @@ class LiveExecutionEngine:
         plan.lots, plan.risk_usd = size_lots(lim, self.risk_usd(), plan.r_value, pv)
         if not plan.lots:
             return f"BLOQUEADA — risco de {self.risk_usd():.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+        planned = self.risk_usd()
+        if planned > 0 and plan.risk_usd < 0.5 * planned:
+            # o teto de lote (MAX_LOT / volume_max da corretora) cortou o risco: a escada e a meta em USD deixam de valer — dizer na hora
+            note = (f"⚠️ lote limitado a {plan.lots:.2f} (MAX_LOT {self.limits.max_lot:g} / máx. da corretora {lim.max_lot:g}): risco real "
+                    f"{plan.risk_usd:.2f} USD = {plan.risk_usd / planned:.0%} do planejado {planned:.2f} USD — resultado em R continua válido, em USD não")
+            self.log(note)
+            plan.notes = (getattr(plan, "notes", "") + "\n" + note).strip()
+            self._lot_cap_note = note
         if self.entry_gate is not None:
             blocked = self.entry_gate(self.symbol, sig.direction, plan.risk_usd)
             if blocked:
                 return "BLOQUEADA — exposição de carteira: " + "; ".join(blocked)
         self.log(plan.render())
+        cap_note = getattr(self, "_lot_cap_note", "")
+        self._lot_cap_note = ""
         if self.mode == TradingMode.AUTHORIZE and not self.authorized:
-            self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render(), res)
+            self._send("🟡 AGUARDANDO AUTORIZAÇÃO\n" + plan.render() + (("\n" + cap_note) if cap_note else ""), res)
             return "AGUARDANDO AUTORIZAÇÃO"
         execution = None
         if self.mode != TradingMode.PAPER:
@@ -12707,7 +12717,7 @@ class LiveExecutionEngine:
         self.mem.save_thesis(tid, thesis, tr.state_dict())
         self.mem.save_execution(tid, execution, self.perf.equity, self.risk_pct if self.risk_pct is not None else self.limits.risk_per_trade_pct, a)
         self.managed.append(tr)
-        self._send(format_entry(plan, a, self.mode.value, execution, self.symbol), res)
+        self._send(format_entry(plan, a, self.mode.value, execution, self.symbol) + (("\n" + cap_note) if cap_note else ""), res)
         return f"{'🟢 POSITION OPEN' if execution else '🟢 PAPER OPEN'} #{tid:05d}"
 
     # ------------------------------------------------------------------ monitor

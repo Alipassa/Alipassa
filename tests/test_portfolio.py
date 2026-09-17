@@ -81,3 +81,14 @@ class MultiEntryCycleTests(unittest.TestCase):
             self.assertEqual(sum(1 for r in pc1.results.values() if r.decision.startswith("🟢 PAPER OPEN")), 1)
             self.assertTrue(any("PRIORIDADE" in r.decision for r in pc1.results.values()))
             mem.close(); mem2.close()
+
+
+class LotCapWarningTests(unittest.TestCase):
+    def test_entry_message_warns_when_max_lot_cuts_planned_risk(self):
+        """MAX_LOT=1 com 50 000 USD e 3%: US500 a 1 USD/ponto e stop 30 pontos = 30 USD de risco (2% do planejado) → aviso na entrada."""
+        from gold_ai.guard import GuardLimits, size_lots
+        lim = GuardLimits(risk_per_trade_pct=3.0, max_lot=1.0, min_lot=0.01, lot_step=0.01)
+        lots, risk = size_lots(lim, 1500.0, 30.0, 1.0)
+        self.assertEqual(lots, 1.0)
+        self.assertEqual(risk, 30.0)
+        self.assertLess(risk, 0.5 * 1500.0)
