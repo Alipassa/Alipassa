@@ -131,3 +131,54 @@ class Mt5PricesExportTests(unittest.TestCase):
             times = [ln.split(",")[0] for ln in lines[1:]]
             self.assertEqual(len(times), len(set(times)), "barras duplicadas nas bordas dos blocos")
             self.assertGreater(len(times), 200)
+
+    def test_m1_export_keeps_what_the_file_already_has(self):
+        """O terminal só guarda ~100 000 barras: exportar de novo NÃO pode apagar o M1 de janeiro que o Dukascopy completou."""
+        import os, tempfile
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from unittest import mock
+        from gold_ai import cli
+        from gold_ai.data import mt5 as mt5mod
+        from gold_ai.models import Candle
+        from gold_ai.reaction_hires import save_candles
+        from tests.test_mt5 import NumpyLike
+
+        class Fake:
+            TIMEFRAME_M1 = 1
+
+            def initialize(self, **kw):
+                return True
+
+            def last_error(self):
+                return (0, "")
+
+            def symbol_select(self, s, e):
+                return True
+
+            def symbol_info_tick(self, s):
+                return SimpleNamespace(bid=1.0, ask=1.1, time=int(datetime.now(timezone.utc).timestamp()))
+
+            def shutdown(self):
+                pass
+
+            def copy_rates_range(self, symbol, tf, start, end):
+                rows, t = [], max(start, datetime(2026, 2, 15, tzinfo=timezone.utc))   # o terminal só tem a partir de 15/02
+                while t < end:
+                    rows.append({"time": int(t.timestamp()), "open": 9, "high": 9, "low": 9, "close": 9, "tick_volume": 1, "spread": 1, "real_volume": 0})
+                    t += timedelta(hours=6)
+                return NumpyLike(rows)
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mt5mod, "_mt5", Fake()), \
+                mock.patch.dict(os.environ, {"MT5_UTC_OFFSET_HOURS": "0", "GOLD_AI_OFFSET_CACHE": os.path.join(d, "off.json")}):
+            dest = os.path.join(d, "XAUUSD_m1.csv")
+            old = [Candle(datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=6 * i), 1, 1, 1, 1, 1) for i in range(4 * 60)]   # jan → 1/mar (Dukascopy)
+            save_candles(old, dest)
+            rc = cli.main(["history", "prices", "--source", "mt5", "--tf", "M1", "--markets", "XAUUSD", "--start", "2026-01-01", "--end", "2026-03-01",
+                           "--out-dir", d, "--file", os.path.join(d, "none.csv")])
+            self.assertEqual(rc, 0)
+            got = cli._read_candles_csv(dest)
+            self.assertEqual(got[0].time, datetime(2026, 1, 1, tzinfo=timezone.utc))                  # janeiro continua lá
+            self.assertEqual(len(got), len({c.time for c in got}))
+            feb = next(c for c in got if c.time == datetime(2026, 2, 15, tzinfo=timezone.utc))
+            self.assertEqual(feb.close, 9)                                                               # a barra da corretora vence no carimbo coincidente

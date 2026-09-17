@@ -14779,11 +14779,18 @@ def cmd_history(args: argparse.Namespace) -> int:
                         if c.time not in seen:
                             seen.add(c.time)
                             uniq.append(c)
-                    n = save_candles(uniq, os.path.join(out_dir, f"{sym}_{args.tf.lower()}.csv"))
+                    dest = os.path.join(out_dir, f"{sym}_{args.tf.lower()}.csv")
+                    # o terminal só guarda as últimas ~100 000 barras: o que já está no arquivo (Dukascopy de janeiro, exportações antigas)
+                    # FICA; a barra da corretora vence quando o carimbo coincide. Nunca sobrescrever meses de histórico com 3 meses do terminal.
+                    existing = _read_candles_csv(dest) if os.path.exists(dest) else []
+                    kept = [c for c in existing if c.time not in seen]
+                    allc = sorted(kept + uniq, key=lambda c: c.time)
+                    n = save_candles(allc, dest)
                     first = min((c.time for c in uniq), default=None)
                     span = f" · de {first:%d/%m/%Y}" if first else ""
-                    print(f"{sym} ({broker}): {n} candles {args.tf.upper()}{span} → {out_dir}/{sym}_{args.tf.lower()}.csv")
-                    if first is not None and first > t0 + timedelta(days=7):
+                    extra = f" · {len(kept):,} já no arquivo mantidos (desde {allc[0].time:%d/%m/%Y})" if kept else ""
+                    print(f"{sym} ({broker}): {len(uniq)} candles {args.tf.upper()} do terminal{span}{extra} · {n} no arquivo → {dest}")
+                    if first is not None and first > t0 + timedelta(days=7) and not (kept and allc[0].time <= t0 + timedelta(days=7)):
                         print(f"  ⚠️ histórico começa em {first:%d/%m/%Y}, não em {t0:%d/%m/%Y}: o terminal limita as barras que guarda. No MT5: "
                               "Ferramentas → Opções → Gráficos → 'Máximo de barras no gráfico' = Unlimited (ou 1 000 000), reinicie o terminal, "
                               "abra um gráfico M1 do símbolo e repita este comando.")
