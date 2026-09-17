@@ -318,6 +318,20 @@ Nada aqui acrescenta indicador ou filtro. Tudo mede onde as oportunidades se per
 SQLite e medida 60 min depois (MFE/MAE em 5/15/30/60, CONTINUOU/REVERTEU/INDEFINIDO, minutos até confirmação); `flow --stats` mostra a tabela por
 ativo × origem e a estatística volta ao relógio da próxima anomalia (≥ 5 casos = informação; edge só com os tiers do ciclo de vida). Ver docs/DIRETRIZ.md, adendo 5.2.
 
+**Hierarquia de edge (5.2).** Cada mercado recebe uma letra pelo ciclo de vida, nunca por uma boa ou má semana: **A** edge comprovado
+(30+ casos fora da amostra, expectancy positiva nas janelas, estado normal) opera pela escada 3/4/5%; **B** promissor (10–29 casos,
+positivo) opera na base; **C** inconclusivo (menos de 10 casos) opera com risco de amostra `SAMPLE_RISK_PCT` (padrão 1%; 0 = não opera);
+**D** edge negativo (10+ casos com expectancy ≤ 0, ou suspenso/quebrado) não opera até revalidar. O `/STATUS` mostra a letra e o risco
+de cada mercado; o Telegram avisa quando a letra muda.
+
+**Custo líquido antes da entrada.** Para cada plano: edge bruto = p × R:R − (1 − p); custo = (spread real do broker + slippage + comissão)
+÷ stop, em R. Custo acima de `MAX_COST_R` (padrão 0,25R) ou edge líquido ≤ 0 → descartada, com a conta no log
+("edge bruto +1,10R − custo 0,08R = líquido +1,02R"). `COMMISSION_PER_LOT` em USD por lote, ida e volta.
+
+**Dimensionamento conjunto.** Três oportunidades correlacionadas não viram uma aposta triplicada: a segunda e a terceira entram com o que
+sobra do orçamento correlacionado (`MAX_CORRELATED_RISK`) e do total (`MAX_TOTAL_OPEN_RISK`), e a mensagem diz
+"dimensionada pelo risco conjunto: 1500 → 750 USD (mesma aposta: XAUUSD)". Se a sobra não comporta o lote mínimo, não entra.
+
 **Eficiência do dia (`dia`, `/DIA`).** Todo dia, por mercado: análises, episódios em SETUP e em OPPORTUNITY, entradas, captura
 (entradas ÷ episódios com sinal), operações fechadas, R, USD, acerto, minutos por operação, R hipotético das oportunidades não
 operadas, risco planejado × real (denuncia lote travado por `MAX_LOT`), motivos mais comuns de não entrar e saídas. Automático às

@@ -248,6 +248,17 @@ class PortfolioExposureEngine:
             reasons.append(f"risco correlacionado {corr / equity:.2%} > MAX_CORRELATED_RISK {self.limits.max_correlated_risk_pct}% (mesma aposta: {', '.join(same) or 'parcial'})")
         return reasons
 
+    def allowed_risk_usd(self, symbol: str, direction: Direction, open_: Sequence[OpenExposure], equity: float) -> tuple[float, str]:
+        """Quanto risco (USD) ainda cabe para esta aposta: min(teto total − aberto, teto correlacionado − aberto na mesma direção).
+        DIMENSIONAMENTO CONJUNTO: três oportunidades correlacionadas dividem o orçamento em vez de virar uma aposta triplicada."""
+        total_room = equity * self.limits.max_total_open_risk_pct / 100.0 - sum(o.risk_usd for o in open_)
+        corr_used = self.correlated_risk(symbol, direction, 0.0, open_)
+        corr_room = equity * self.limits.max_correlated_risk_pct / 100.0 - corr_used
+        room = max(0.0, min(total_room, corr_room))
+        same = [o.symbol for o in open_ if correlation(symbol, o.symbol, self.corr_table) * (1 if o.direction == direction else -1) >= self.limits.correlation_threshold]
+        why = ("risco correlacionado" if corr_room <= total_room else "risco total") + (f" (mesma aposta: {', '.join(same)})" if same else "")
+        return round(room, 2), why
+
     def render(self, open_: Sequence[OpenExposure], equity: float) -> str:
         if not open_:
             return "📐 EXPOSIÇÃO: nenhuma posição aberta"

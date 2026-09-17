@@ -194,9 +194,16 @@ class MarketEngineTests(unittest.TestCase):
             self.assertEqual(eng.open_exposures()[0].symbol, "EURUSD")
             # próximo ciclo: XAUUSD SELL = mesma aposta (USD forte) que EURUSD SELL → exposição correlacionada bloqueia
             pc = eng.run_cycle(build_snapset({"EURUSD": "venda", "XAUUSD": "venda", "USDJPY": "neutro"}, now=NOW + timedelta(minutes=30)))
-            self.assertIsNone(pc.chosen)
-            self.assertIn("exposição de carteira", pc.results["XAUUSD"].decision)
-            self.assertEqual(len(eng.open_exposures()), 1)
+            # 5.2: DIMENSIONAMENTO CONJUNTO — a segunda aposta correlacionada entra com o que SOBRA do orçamento, não triplica a aposta
+            open_ = eng.open_exposures()
+            cap = 10000.0 * 0.5 / 100.0
+            if pc.chosen:
+                self.assertIn("XAUUSD", pc.chosen)
+                self.assertTrue(any("risco conjunto" in m for m in pc.messages), pc.messages)
+                corr = eng.portfolio.correlated_risk("XAUUSD", open_[-1].direction, 0.0, open_)
+                self.assertLessEqual(corr, cap + 0.01)                       # nunca acima do teto correlacionado
+            else:
+                self.assertIn("lote mínimo", pc.results["XAUUSD"].decision)   # sobra não comporta o lote mínimo → bloqueada
             mem.close()
 
     def test_kill_switch_blocks_all_markets(self):

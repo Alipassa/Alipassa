@@ -71,6 +71,25 @@ class ParameterState:
     edge_ok: bool = False           # expectancy positiva em todas as janelas com n ≥ 10, sem deterioração
 
     @property
+    def grade(self) -> str:
+        """HIERARQUIA DE EDGE: A comprovado (≥ 30 OOS, positivo, NORMAL/REATIVADO) · B promissor (10–29 OOS, positivo) ·
+        C inconclusivo (< 10 OOS, ou positivo sem confirmação) · D negativo (≥ 10 OOS e expectancy total ≤ 0, ou SUSPENSO/QUEBRADO)."""
+        total = next((w for w in self.windows if w.label == "total"), None)
+        if self.action in ("SUSPENSO", "QUEBRADO", "PROTEÇÃO"):
+            return "D"
+        if self.n >= 10 and total is not None and total.expectancy <= 0:
+            return "D"
+        if self.n >= 30 and self.edge_ok and self.action in ("NORMAL", "REATIVADO", "ALERTA"):
+            return "A"
+        if self.n >= 10 and self.edge_ok:
+            return "B"
+        return "C"
+
+    @property
+    def grade_text(self) -> str:
+        return {"A": "A edge comprovado", "B": "B edge promissor", "C": "C inconclusivo", "D": "D edge negativo"}[self.grade]
+
+    @property
     def allows_entries(self) -> bool:
         return self.action in ("NORMAL", "ALERTA", "REATIVADO")
 
@@ -130,6 +149,21 @@ def evaluate_parameter(name: str, results: Sequence[float], previous_action: str
 
 # --------------------------------------------------------------------------- ESCADA DE RISCO (decidida antes, nunca depois de ganhos ou perdas)
 LADDER_TIERS = (30, 50)          # degraus: operacional (30 casos OOS) · validado (50 casos OOS)
+
+
+def risk_by_grade(state: "ParameterState", base_pct: float, ladder: Sequence[float], ceiling_pct: float = 5.0,
+                  sample_pct: float = 1.0) -> tuple[float, str]:
+    """Risco por operação pela HIERARQUIA: A → escada (base/4/5) · B → base · C → risco de amostra (`sample_pct`; 0 = não opera) ·
+    D → 0 (bloqueado). A escada só sobe dentro de A; a letra é função da amostra e do edge, nunca de uma boa ou má semana."""
+    g = state.grade
+    if g == "D":
+        return 0.0, f"grau D (edge negativo: {state.n} casos) — bloqueado"
+    if g == "C":
+        return (float(sample_pct), f"grau C (inconclusivo: {state.n} casos) — risco de amostra {sample_pct:g}%") if sample_pct > 0 else                (0.0, f"grau C (inconclusivo: {state.n} casos) — sem operar (SAMPLE_RISK_PCT=0)")
+    if g == "B":
+        return min(float(base_pct), float(ceiling_pct)), f"grau B (promissor: {state.n} casos) — base {min(float(base_pct), float(ceiling_pct)):g}%"
+    pct, why = risk_ladder_pct(state, base_pct, ladder, ceiling_pct)
+    return pct, f"grau A — {why}"
 
 
 def risk_ladder_pct(state: "ParameterState", base_pct: float, ladder: Sequence[float], ceiling_pct: float = 5.0) -> tuple[float, str]:

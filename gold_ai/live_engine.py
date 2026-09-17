@@ -66,6 +66,9 @@ class LiveExecutionEngine:
         self.horizon = horizon_min
         self.engine = engine or GoldAIEngine()
         self.risk_pct: Optional[float] = None       # ESCADA (5.2): % por operação deste mercado, definida pelo ciclo de vida; None = RISK_PER_TRADE
+        self.grade: str = "C"                       # HIERARQUIA DE EDGE: A comprovado · B promissor · C inconclusivo · D negativo (bloqueado)
+        self.grade_note: str = ""
+        self.allowed_risk: Optional[Callable] = None   # allowed_risk(symbol, direction) → (USD que ainda cabe, motivo) — dimensionamento conjunto
         self.log = log
         self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
         start_equity = mem.last_equity() or equity
@@ -225,10 +228,43 @@ class LiveExecutionEngine:
             import copy as _copy
             lim = _copy.copy(self.limits)
             lim.min_lot, lim.lot_step, lim.max_lot = ss.volume_min, ss.volume_step, min(self.limits.max_lot, ss.volume_max)
-        plan.lots, plan.risk_usd = size_lots(lim, self.risk_usd(), plan.r_value, pv)
-        if not plan.lots:
-            return f"BLOQUEADA — risco de {self.risk_usd():.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+        # HIERARQUIA DE EDGE: D nunca opera; C só com risco de amostra > 0
+        if self.grade == "D" or self.risk_usd() <= 0:
+            return f"BLOQUEADA — hierarquia de edge: {self.grade_note or 'grau ' + self.grade} (não opera até revalidar)"
         planned = self.risk_usd()
+        budget = planned
+        joint_note = ""
+        if self.allowed_risk is not None:                # DIMENSIONAMENTO CONJUNTO: divide o orçamento correlacionado, não triplica a aposta
+            room, why = self.allowed_risk(self.symbol, sig.direction)
+            if room < planned:
+                budget = max(0.0, room)
+                joint_note = f"risco {planned:.2f} → {budget:.2f} USD pelo {why}"
+        plan.lots, plan.risk_usd = size_lots(lim, budget, plan.r_value, pv)
+        if not plan.lots:
+            return (f"BLOQUEADA — {joint_note}: não comporta o lote mínimo" if joint_note else
+                    f"BLOQUEADA — risco de {planned:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}")
+        if joint_note:
+            self.log(f"📐 {self.symbol}: {joint_note}")
+            res.messages.append(f"📐 {self.symbol}: dimensionada pelo risco conjunto — {joint_note}")
+        # CUSTO LÍQUIDO ANTES DA ENTRADA: edge bruto − (spread + slippage + comissão) em R; custo acima de MAX_COST_R do stop → descarta
+        try:
+            bid, ask = self.executor.client.tick() if self.executor is not None else (None, None)
+            spread_px = (ask - bid) if (bid is not None and ask is not None) else float(self.spec.typical_spread or 0.0)
+        except Exception:  # noqa: BLE001
+            spread_px = float(self.spec.typical_spread or 0.0)
+        slip_px = min(float(self.limits.max_slippage or 0.0), 0.02 * float(snap.atr or 0.0)) if snap.atr else 0.0
+        comm_px = (self.limits.commission_per_lot * plan.lots / (plan.lots * pv)) if (pv and plan.lots and self.limits.commission_per_lot) else 0.0
+        cost_r = (spread_px + slip_px + comm_px) / plan.r_value if plan.r_value else 0.0
+        p_hit = max(float(getattr(a, "prob_up", 0.0)), float(getattr(a, "prob_down", 0.0)))
+        tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
+        rr = abs(tp - plan.entry) / plan.r_value if (tp and plan.r_value) else 3.0
+        gross_r = p_hit * rr - (1.0 - p_hit)
+        net_r = gross_r - cost_r
+        self.log(f"💸 {self.symbol}: edge bruto {gross_r:+.2f}R (p {p_hit:.0%} × {rr:.1f}R) − custo {cost_r:.2f}R (spread {spread_px:g} + slip {slip_px:g} + com {comm_px:g}) = líquido {net_r:+.2f}R")
+        if cost_r > self.limits.max_cost_r:
+            return f"DESCARTADA — custo {cost_r:.2f}R > MAX_COST_R {self.limits.max_cost_r:g}R (stop {plan.r_value:g} pequeno demais para pagar spread {spread_px:g} + slippage {slip_px:g})"
+        if net_r <= 0:
+            return f"DESCARTADA — edge líquido {net_r:+.2f}R ≤ 0 (bruto {gross_r:+.2f}R − custo {cost_r:.2f}R)"
         if planned > 0 and plan.risk_usd < 0.5 * planned:
             # o teto de lote (MAX_LOT / volume_max da corretora) cortou o risco: a escada e a meta em USD deixam de valer — dizer na hora
             note = (f"⚠️ lote limitado a {plan.lots:.2f} (MAX_LOT {self.limits.max_lot:g} / máx. da corretora {lim.max_lot:g}): risco real "

@@ -8638,6 +8638,9 @@ class GuardLimits(RiskLimits):
     daily_target_pct: float = 0.0        # META DIÁRIA (0 = desligada): ao atingir, sem novas entradas até o dia seguinte — trava, não obrigação
     risk_ladder: tuple = ()              # ESCADA (5.2): (base, operacional 30 OOS, validado 50 OOS) em %; vazio = proporcional à base (×1, ×4/3, ×5/3)
     risk_ladder_max_pct: float = 5.0     # teto absoluto da escada
+    sample_risk_pct: float = 1.0         # HIERARQUIA: risco do grau C (inconclusivo) para formar amostra; 0 = não opera em C
+    max_cost_r: float = 0.25             # CUSTO LÍQUIDO: spread + slippage + comissão acima desta fração do stop (R) → descarta
+    commission_per_lot: float = 0.0      # USD por lote, ida e volta (0 = corretora sem comissão / já no spread)
 
     def ladder(self) -> tuple[float, float, float]:
         if self.risk_ladder:
@@ -8656,6 +8659,9 @@ class GuardLimits(RiskLimits):
         g.min_rr_to_structure = float(env.get("MIN_RR_TO_STRUCTURE", g.min_rr_to_structure))
         g.daily_target_pct = float(env.get("DAILY_TARGET", g.daily_target_pct) or 0.0)
         g.risk_ladder_max_pct = float(env.get("RISK_LADDER_MAX", g.risk_ladder_max_pct))
+        g.sample_risk_pct = float(env.get("SAMPLE_RISK_PCT", g.sample_risk_pct))
+        g.max_cost_r = float(env.get("MAX_COST_R", g.max_cost_r))
+        g.commission_per_lot = float(env.get("COMMISSION_PER_LOT", g.commission_per_lot))
         raw = str(env.get("RISK_LADDER", "") or "").strip()
         if raw:
             g.risk_ladder = tuple(float(x) for x in raw.split(",") if x.strip())
@@ -10508,6 +10514,17 @@ class PortfolioExposureEngine:
             reasons.append(f"risco correlacionado {corr / equity:.2%} > MAX_CORRELATED_RISK {self.limits.max_correlated_risk_pct}% (mesma aposta: {', '.join(same) or 'parcial'})")
         return reasons
 
+    def allowed_risk_usd(self, symbol: str, direction: Direction, open_: Sequence[OpenExposure], equity: float) -> tuple[float, str]:
+        """Quanto risco (USD) ainda cabe para esta aposta: min(teto total − aberto, teto correlacionado − aberto na mesma direção).
+        DIMENSIONAMENTO CONJUNTO: três oportunidades correlacionadas dividem o orçamento em vez de virar uma aposta triplicada."""
+        total_room = equity * self.limits.max_total_open_risk_pct / 100.0 - sum(o.risk_usd for o in open_)
+        corr_used = self.correlated_risk(symbol, direction, 0.0, open_)
+        corr_room = equity * self.limits.max_correlated_risk_pct / 100.0 - corr_used
+        room = max(0.0, min(total_room, corr_room))
+        same = [o.symbol for o in open_ if correlation(symbol, o.symbol, self.corr_table) * (1 if o.direction == direction else -1) >= self.limits.correlation_threshold]
+        why = ("risco correlacionado" if corr_room <= total_room else "risco total") + (f" (mesma aposta: {', '.join(same)})" if same else "")
+        return round(room, 2), why
+
     def render(self, open_: Sequence[OpenExposure], equity: float) -> str:
         if not open_:
             return "📐 EXPOSIÇÃO: nenhuma posição aberta"
@@ -11384,6 +11401,25 @@ class ParameterState:
     edge_ok: bool = False           # expectancy positiva em todas as janelas com n ≥ 10, sem deterioração
 
     @property
+    def grade(self) -> str:
+        """HIERARQUIA DE EDGE: A comprovado (≥ 30 OOS, positivo, NORMAL/REATIVADO) · B promissor (10–29 OOS, positivo) ·
+        C inconclusivo (< 10 OOS, ou positivo sem confirmação) · D negativo (≥ 10 OOS e expectancy total ≤ 0, ou SUSPENSO/QUEBRADO)."""
+        total = next((w for w in self.windows if w.label == "total"), None)
+        if self.action in ("SUSPENSO", "QUEBRADO", "PROTEÇÃO"):
+            return "D"
+        if self.n >= 10 and total is not None and total.expectancy <= 0:
+            return "D"
+        if self.n >= 30 and self.edge_ok and self.action in ("NORMAL", "REATIVADO", "ALERTA"):
+            return "A"
+        if self.n >= 10 and self.edge_ok:
+            return "B"
+        return "C"
+
+    @property
+    def grade_text(self) -> str:
+        return {"A": "A edge comprovado", "B": "B edge promissor", "C": "C inconclusivo", "D": "D edge negativo"}[self.grade]
+
+    @property
     def allows_entries(self) -> bool:
         return self.action in ("NORMAL", "ALERTA", "REATIVADO")
 
@@ -11443,6 +11479,21 @@ def evaluate_parameter(name: str, results: Sequence[float], previous_action: str
 
 # --------------------------------------------------------------------------- ESCADA DE RISCO (decidida antes, nunca depois de ganhos ou perdas)
 LADDER_TIERS = (30, 50)          # degraus: operacional (30 casos OOS) · validado (50 casos OOS)
+
+
+def risk_by_grade(state: "ParameterState", base_pct: float, ladder: Sequence[float], ceiling_pct: float = 5.0,
+                  sample_pct: float = 1.0) -> tuple[float, str]:
+    """Risco por operação pela HIERARQUIA: A → escada (base/4/5) · B → base · C → risco de amostra (`sample_pct`; 0 = não opera) ·
+    D → 0 (bloqueado). A escada só sobe dentro de A; a letra é função da amostra e do edge, nunca de uma boa ou má semana."""
+    g = state.grade
+    if g == "D":
+        return 0.0, f"grau D (edge negativo: {state.n} casos) — bloqueado"
+    if g == "C":
+        return (float(sample_pct), f"grau C (inconclusivo: {state.n} casos) — risco de amostra {sample_pct:g}%") if sample_pct > 0 else                (0.0, f"grau C (inconclusivo: {state.n} casos) — sem operar (SAMPLE_RISK_PCT=0)")
+    if g == "B":
+        return min(float(base_pct), float(ceiling_pct)), f"grau B (promissor: {state.n} casos) — base {min(float(base_pct), float(ceiling_pct)):g}%"
+    pct, why = risk_ladder_pct(state, base_pct, ladder, ceiling_pct)
+    return pct, f"grau A — {why}"
 
 
 def risk_ladder_pct(state: "ParameterState", base_pct: float, ladder: Sequence[float], ceiling_pct: float = 5.0) -> tuple[float, str]:
@@ -12711,6 +12762,9 @@ class LiveExecutionEngine:
         self.horizon = horizon_min
         self.engine = engine or GoldAIEngine()
         self.risk_pct: Optional[float] = None       # ESCADA (5.2): % por operação deste mercado, definida pelo ciclo de vida; None = RISK_PER_TRADE
+        self.grade: str = "C"                       # HIERARQUIA DE EDGE: A comprovado · B promissor · C inconclusivo · D negativo (bloqueado)
+        self.grade_note: str = ""
+        self.allowed_risk: Optional[Callable] = None   # allowed_risk(symbol, direction) → (USD que ainda cabe, motivo) — dimensionamento conjunto
         self.log = log
         self.authorized = authorized                  # AUTHORIZE: autorização dada para a próxima entrada
         start_equity = mem.last_equity() or equity
@@ -12868,10 +12922,43 @@ class LiveExecutionEngine:
             import copy as _copy
             lim = _copy.copy(self.limits)
             lim.min_lot, lim.lot_step, lim.max_lot = ss.volume_min, ss.volume_step, min(self.limits.max_lot, ss.volume_max)
-        plan.lots, plan.risk_usd = size_lots(lim, self.risk_usd(), plan.r_value, pv)
-        if not plan.lots:
-            return f"BLOQUEADA — risco de {self.risk_usd():.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}"
+        # HIERARQUIA DE EDGE: D nunca opera; C só com risco de amostra > 0
+        if self.grade == "D" or self.risk_usd() <= 0:
+            return f"BLOQUEADA — hierarquia de edge: {self.grade_note or 'grau ' + self.grade} (não opera até revalidar)"
         planned = self.risk_usd()
+        budget = planned
+        joint_note = ""
+        if self.allowed_risk is not None:                # DIMENSIONAMENTO CONJUNTO: divide o orçamento correlacionado, não triplica a aposta
+            room, why = self.allowed_risk(self.symbol, sig.direction)
+            if room < planned:
+                budget = max(0.0, room)
+                joint_note = f"risco {planned:.2f} → {budget:.2f} USD pelo {why}"
+        plan.lots, plan.risk_usd = size_lots(lim, budget, plan.r_value, pv)
+        if not plan.lots:
+            return (f"BLOQUEADA — {joint_note}: não comporta o lote mínimo" if joint_note else
+                    f"BLOQUEADA — risco de {planned:.2f} USD não comporta o lote mínimo com stop de {plan.r_value:.2f}")
+        if joint_note:
+            self.log(f"📐 {self.symbol}: {joint_note}")
+            res.messages.append(f"📐 {self.symbol}: dimensionada pelo risco conjunto — {joint_note}")
+        # CUSTO LÍQUIDO ANTES DA ENTRADA: edge bruto − (spread + slippage + comissão) em R; custo acima de MAX_COST_R do stop → descarta
+        try:
+            bid, ask = self.executor.client.tick() if self.executor is not None else (None, None)
+            spread_px = (ask - bid) if (bid is not None and ask is not None) else float(self.spec.typical_spread or 0.0)
+        except Exception:  # noqa: BLE001
+            spread_px = float(self.spec.typical_spread or 0.0)
+        slip_px = min(float(self.limits.max_slippage or 0.0), 0.02 * float(snap.atr or 0.0)) if snap.atr else 0.0
+        comm_px = (self.limits.commission_per_lot * plan.lots / (plan.lots * pv)) if (pv and plan.lots and self.limits.commission_per_lot) else 0.0
+        cost_r = (spread_px + slip_px + comm_px) / plan.r_value if plan.r_value else 0.0
+        p_hit = max(float(getattr(a, "prob_up", 0.0)), float(getattr(a, "prob_down", 0.0)))
+        tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
+        rr = abs(tp - plan.entry) / plan.r_value if (tp and plan.r_value) else 3.0
+        gross_r = p_hit * rr - (1.0 - p_hit)
+        net_r = gross_r - cost_r
+        self.log(f"💸 {self.symbol}: edge bruto {gross_r:+.2f}R (p {p_hit:.0%} × {rr:.1f}R) − custo {cost_r:.2f}R (spread {spread_px:g} + slip {slip_px:g} + com {comm_px:g}) = líquido {net_r:+.2f}R")
+        if cost_r > self.limits.max_cost_r:
+            return f"DESCARTADA — custo {cost_r:.2f}R > MAX_COST_R {self.limits.max_cost_r:g}R (stop {plan.r_value:g} pequeno demais para pagar spread {spread_px:g} + slippage {slip_px:g})"
+        if net_r <= 0:
+            return f"DESCARTADA — edge líquido {net_r:+.2f}R ≤ 0 (bruto {gross_r:+.2f}R − custo {cost_r:.2f}R)"
         if planned > 0 and plan.risk_usd < 0.5 * planned:
             # o teto de lote (MAX_LOT / volume_max da corretora) cortou o risco: a escada e a meta em USD deixam de valer — dizer na hora
             note = (f"⚠️ lote limitado a {plan.lots:.2f} (MAX_LOT {self.limits.max_lot:g} / máx. da corretora {lim.max_lot:g}): risco real "
@@ -13302,6 +13389,7 @@ class MarketAIEngine:
             brain = GoldAIEngine(cfg, calibrator=calibrator)
             self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,
                                                     horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)
+            self.engines[sym].allowed_risk = self._allowed_risk
         self.history: dict[str, StatConfidence] = {}
         self.refresh_history()
         # REACTION ENGINE (live): estatística do que foi vivido + cronômetros dos eventos em curso
@@ -13544,11 +13632,13 @@ class MarketAIEngine:
             if changed and st.action in ("ALERTA", "PROTEÇÃO", "SUSPENSO", "REATIVADO"):
                 self.sender.send({"ALERTA": "⚠️", "PROTEÇÃO": "🟠", "SUSPENSO": "🔴", "REATIVADO": "♻️"}[st.action] + f" {sym}: {st.note}")
             # ESCADA DE RISCO: % por operação em função do tier (30 → operacional, 50 → validado) e do edge; teto RISK_LADDER_MAX
-            pct, why = risk_ladder_pct(st, self.limits.risk_per_trade_pct, self.limits.ladder(), self.limits.risk_ladder_max_pct)
+            pct, why = risk_by_grade(st, self.limits.risk_per_trade_pct, self.limits.ladder(), self.limits.risk_ladder_max_pct,
+                                     getattr(self.limits, "sample_risk_pct", 1.0))
             prev_pct = eng.risk_pct if eng.risk_pct is not None else self.limits.risk_per_trade_pct
-            eng.risk_pct = pct
-            if abs(pct - prev_pct) > 1e-9 and hasattr(self, "_ladder_ready"):
-                self.sender.send(f"🪜 {sym}: risco por operação {prev_pct:g}% → {pct:g}% — {why}")
+            prev_grade = eng.grade
+            eng.risk_pct, eng.grade, eng.grade_note = pct, st.grade, why
+            if (abs(pct - prev_pct) > 1e-9 or st.grade != prev_grade) and hasattr(self, "_ladder_ready"):
+                self.sender.send(f"🪜 {sym}: {st.grade_text} · risco por operação {prev_pct:g}% → {pct:g}% — {why}")
             self.risk_notes = getattr(self, "risk_notes", {})
             self.risk_notes[sym] = why
         self._ladder_ready = True
@@ -13559,6 +13649,9 @@ class MarketAIEngine:
             for tr in eng.managed:
                 out.append(OpenExposure(sym, tr.thesis.direction, (tr.plan.risk_usd or 0.0) * tr.remaining))
         return out
+
+    def _allowed_risk(self, symbol: str, direction: Direction) -> tuple[float, str]:
+        return self.portfolio.allowed_risk_usd(symbol, direction, self.open_exposures(), self.perf.equity)
 
     def _portfolio_gate(self, symbol: str, direction: Direction, risk_usd: float) -> list[str]:
         return self.portfolio.check(symbol, direction, risk_usd, self.open_exposures(), self.perf.equity)
@@ -13667,7 +13760,8 @@ class MarketAIEngine:
         if getattr(self, "lifecycle", None):
             lines.append(render_table(list(self.lifecycle.values())))
             lad = self.limits.ladder()
-            lines.append(f"🪜 ESCADA DE RISCO: base {lad[0]:g}% · operacional (30 OOS) {lad[1]:g}% · validado (50 OOS) {lad[2]:g}% · teto {self.limits.risk_ladder_max_pct:g}% — "
+            lines.append(f"🪜 HIERARQUIA DE EDGE E RISCO: A escada {lad[0]:g}/{lad[1]:g}/{lad[2]:g}% (teto {self.limits.risk_ladder_max_pct:g}%) · B base {lad[0]:g}% · "
+                         f"C amostra {getattr(self.limits, 'sample_risk_pct', 1.0):g}% · D bloqueado — "
                          + " · ".join(f"{sym} {getattr(self, 'risk_notes', {}).get(sym, '')}" for sym in self.specs))
         if self.edge_bank is not None and self.edge_bank.stats:
             lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))

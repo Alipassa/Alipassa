@@ -145,9 +145,11 @@ class RiskLadderTests(unittest.TestCase):
                                  sender=TelegramSender(dry_run=True, quiet=True), kill_switch=KillSwitch(enabled_env=False), log=lambda m: None, params=params)
             self.assertEqual(eng.engines["XAUUSD"].risk_pct, 5.0)         # validado com edge → topo da escada
             self.assertEqual(eng.engines["XAUUSD"].risk_usd(), 2500.0)
-            self.assertEqual(eng.engines["US500"].risk_pct, 3.0)          # sem amostra → base
-            self.assertEqual(eng.engines["US500"].risk_usd(), 1500.0)
-            self.assertIn("ESCADA DE RISCO", eng.status_text())
+            self.assertEqual(eng.engines["US500"].risk_pct, 1.0)          # sem amostra → grau C: risco de amostra (SAMPLE_RISK_PCT)
+            self.assertEqual(eng.engines["US500"].grade, "C")
+            self.assertEqual(eng.engines["US500"].risk_usd(), 500.0)
+            self.assertEqual(eng.engines["XAUUSD"].grade, "A")
+            self.assertIn("HIERARQUIA DE EDGE E RISCO", eng.status_text())
             mem.close()
 
 
@@ -168,3 +170,31 @@ class SignalLabelDecisionTests(unittest.TestCase):
         row = [l for l in txt.splitlines() if "Prob." in l][0]
         self.assertIn("n=3", row)
         self.assertIn("decl. 65%", row)
+
+
+class EdgeGradeTests(unittest.TestCase):
+    def test_grades_and_risk_by_grade(self):
+        from gold_ai.lifecycle import evaluate_parameter, risk_by_grade
+        good = [0.6, -1.0, 0.8, 0.5] * 13
+        self.assertEqual(evaluate_parameter("X", good).grade, "A")
+        self.assertEqual(evaluate_parameter("X", good[:16]).grade, "B")
+        self.assertEqual(evaluate_parameter("X", good[:6]).grade, "C")
+        self.assertEqual(evaluate_parameter("X", [0.3, -1.0] * 8).grade, "D")
+        self.assertEqual(risk_by_grade(evaluate_parameter("X", good), 3.0, (3, 4, 5))[0], 5.0)
+        self.assertEqual(risk_by_grade(evaluate_parameter("X", good[:16]), 3.0, (3, 4, 5))[0], 3.0)
+        self.assertEqual(risk_by_grade(evaluate_parameter("X", good[:6]), 3.0, (3, 4, 5), sample_pct=1.0)[0], 1.0)
+        self.assertEqual(risk_by_grade(evaluate_parameter("X", good[:6]), 3.0, (3, 4, 5), sample_pct=0.0)[0], 0.0)
+        self.assertEqual(risk_by_grade(evaluate_parameter("X", [0.3, -1.0] * 8), 3.0, (3, 4, 5))[0], 0.0)
+
+    def test_allowed_risk_splits_correlated_budget(self):
+        from gold_ai.models import Direction
+        from gold_ai.selector import OpenExposure, PortfolioExposureEngine, PortfolioLimits
+        eng = PortfolioExposureEngine(PortfolioLimits(max_total_open_risk_pct=6.0, max_correlated_risk_pct=3.0, max_positions=4))
+        room, why = eng.allowed_risk_usd("XAUUSD", Direction.ALTA, [], 50000.0)
+        self.assertEqual(room, 1500.0)
+        open_ = [OpenExposure("EURUSD", Direction.ALTA, 1500.0)]          # mesma aposta (dólar fraco)
+        room2, why2 = eng.allowed_risk_usd("XAUUSD", Direction.ALTA, open_, 50000.0)
+        self.assertLess(room2, 1500.0)
+        self.assertIn("correlacionado", why2)
+        room3, _ = eng.allowed_risk_usd("XAUUSD", Direction.BAIXA, open_, 50000.0)   # aposta oposta: não consome o correlacionado
+        self.assertGreaterEqual(room3, room2)

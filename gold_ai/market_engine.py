@@ -96,6 +96,7 @@ class MarketAIEngine:
             brain = GoldAIEngine(cfg, calibrator=calibrator)
             self.engines[sym] = LiveExecutionEngine(mem, limits, mode, equity, (executors or {}).get(sym), self.sender, self.ks, None,
                                                     horizon_min, brain, log, authorized, spec=spec, perf=self.perf, entry_gate=self._portfolio_gate)
+            self.engines[sym].allowed_risk = self._allowed_risk
         self.history: dict[str, StatConfidence] = {}
         self.refresh_history()
         # REACTION ENGINE (live): estatística do que foi vivido + cronômetros dos eventos em curso
@@ -346,12 +347,14 @@ class MarketAIEngine:
             if changed and st.action in ("ALERTA", "PROTEÇÃO", "SUSPENSO", "REATIVADO"):
                 self.sender.send({"ALERTA": "⚠️", "PROTEÇÃO": "🟠", "SUSPENSO": "🔴", "REATIVADO": "♻️"}[st.action] + f" {sym}: {st.note}")
             # ESCADA DE RISCO: % por operação em função do tier (30 → operacional, 50 → validado) e do edge; teto RISK_LADDER_MAX
-            from .lifecycle import risk_ladder_pct
-            pct, why = risk_ladder_pct(st, self.limits.risk_per_trade_pct, self.limits.ladder(), self.limits.risk_ladder_max_pct)
+            from .lifecycle import risk_by_grade
+            pct, why = risk_by_grade(st, self.limits.risk_per_trade_pct, self.limits.ladder(), self.limits.risk_ladder_max_pct,
+                                     getattr(self.limits, "sample_risk_pct", 1.0))
             prev_pct = eng.risk_pct if eng.risk_pct is not None else self.limits.risk_per_trade_pct
-            eng.risk_pct = pct
-            if abs(pct - prev_pct) > 1e-9 and hasattr(self, "_ladder_ready"):
-                self.sender.send(f"🪜 {sym}: risco por operação {prev_pct:g}% → {pct:g}% — {why}")
+            prev_grade = eng.grade
+            eng.risk_pct, eng.grade, eng.grade_note = pct, st.grade, why
+            if (abs(pct - prev_pct) > 1e-9 or st.grade != prev_grade) and hasattr(self, "_ladder_ready"):
+                self.sender.send(f"🪜 {sym}: {st.grade_text} · risco por operação {prev_pct:g}% → {pct:g}% — {why}")
             self.risk_notes = getattr(self, "risk_notes", {})
             self.risk_notes[sym] = why
         self._ladder_ready = True
@@ -362,6 +365,9 @@ class MarketAIEngine:
             for tr in eng.managed:
                 out.append(OpenExposure(sym, tr.thesis.direction, (tr.plan.risk_usd or 0.0) * tr.remaining))
         return out
+
+    def _allowed_risk(self, symbol: str, direction: Direction) -> tuple[float, str]:
+        return self.portfolio.allowed_risk_usd(symbol, direction, self.open_exposures(), self.perf.equity)
 
     def _portfolio_gate(self, symbol: str, direction: Direction, risk_usd: float) -> list[str]:
         return self.portfolio.check(symbol, direction, risk_usd, self.open_exposures(), self.perf.equity)
@@ -473,7 +479,8 @@ class MarketAIEngine:
             from .lifecycle import render_table
             lines.append(render_table(list(self.lifecycle.values())))
             lad = self.limits.ladder()
-            lines.append(f"🪜 ESCADA DE RISCO: base {lad[0]:g}% · operacional (30 OOS) {lad[1]:g}% · validado (50 OOS) {lad[2]:g}% · teto {self.limits.risk_ladder_max_pct:g}% — "
+            lines.append(f"🪜 HIERARQUIA DE EDGE E RISCO: A escada {lad[0]:g}/{lad[1]:g}/{lad[2]:g}% (teto {self.limits.risk_ladder_max_pct:g}%) · B base {lad[0]:g}% · "
+                         f"C amostra {getattr(self.limits, 'sample_risk_pct', 1.0):g}% · D bloqueado — "
                          + " · ".join(f"{sym} {getattr(self, 'risk_notes', {}).get(sym, '')}" for sym in self.specs))
         if self.edge_bank is not None and self.edge_bank.stats:
             lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))

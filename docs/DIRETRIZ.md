@@ -544,3 +544,15 @@ Mais inteligência → mais oportunidades detectadas → mais setups qualificado
 2. Não é regra fixa: é parâmetro. O autotune testa `lateral bloqueado` × `lateral livre` em cada bloco e a política só adota o filtro
    quando ele rendeu mais fora da amostra. `BLOCK_RANGE=1` força no live para quem quer o filtro desde já, sem esperar a prova.
 3. As duas perdas do US500 em 16/09 aconteceram com o regime marcado RANGE. Uma observação não é evidência; a prova vem do autotune.
+
+## Adendo 5.2f — OPPORTUNITY ENGINE SELETIVO `[lifecycle.grade, risk_by_grade, live_engine._decide_entry, selector.allowed_risk_usd]`
+
+Princípio: não aumentar a quantidade de operações para aumentar o lucro; aumentar a qualidade das oportunidades e capturar uma parcela maior
+dos movimentos que já provaram ter edge. A cada ciclo: CAPTURA → FILTRO → OPORTUNIDADE → RANKING → EXECUÇÃO; sem vantagem líquida, não opera.
+1. Hierarquia de edge por mercado: A comprovado (escada) · B promissor (base) · C inconclusivo (risco de amostra, SAMPLE_RISK_PCT) · D negativo
+   (bloqueado até revalidar). A letra vem do ciclo de vida (amostra fora da amostra + expectancy + estado), nunca do resultado da semana.
+2. Custo real antes da entrada: edge bruto − spread − slippage − comissão = edge líquido, em R. Custo > MAX_COST_R do stop ou líquido ≤ 0 → descarta.
+3. Dimensionamento conjunto: vantagem individual + custo + correlação + risco conjunto. Oportunidades correlacionadas dividem o orçamento
+   correlacionado; nenhuma soma de posições passa de MAX_TOTAL_OPEN_RISK.
+4. O que ainda depende de dados: qual evidência (relógio, fluxo, cross-market, notícia, regime, VWAP) aumenta a expectancy de fato — Edge Bank +
+   escada de ablação; MFE/MAE em segundos por tipo de operação para trailing — Exit Lab em ticks, depois da prova em segundos.

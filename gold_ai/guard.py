@@ -37,6 +37,9 @@ class GuardLimits(RiskLimits):
     daily_target_pct: float = 0.0        # META DIÁRIA (0 = desligada): ao atingir, sem novas entradas até o dia seguinte — trava, não obrigação
     risk_ladder: tuple = ()              # ESCADA (5.2): (base, operacional 30 OOS, validado 50 OOS) em %; vazio = proporcional à base (×1, ×4/3, ×5/3)
     risk_ladder_max_pct: float = 5.0     # teto absoluto da escada
+    sample_risk_pct: float = 1.0         # HIERARQUIA: risco do grau C (inconclusivo) para formar amostra; 0 = não opera em C
+    max_cost_r: float = 0.25             # CUSTO LÍQUIDO: spread + slippage + comissão acima desta fração do stop (R) → descarta
+    commission_per_lot: float = 0.0      # USD por lote, ida e volta (0 = corretora sem comissão / já no spread)
 
     def ladder(self) -> tuple[float, float, float]:
         if self.risk_ladder:
@@ -55,6 +58,9 @@ class GuardLimits(RiskLimits):
         g.min_rr_to_structure = float(env.get("MIN_RR_TO_STRUCTURE", g.min_rr_to_structure))
         g.daily_target_pct = float(env.get("DAILY_TARGET", g.daily_target_pct) or 0.0)
         g.risk_ladder_max_pct = float(env.get("RISK_LADDER_MAX", g.risk_ladder_max_pct))
+        g.sample_risk_pct = float(env.get("SAMPLE_RISK_PCT", g.sample_risk_pct))
+        g.max_cost_r = float(env.get("MAX_COST_R", g.max_cost_r))
+        g.commission_per_lot = float(env.get("COMMISSION_PER_LOT", g.commission_per_lot))
         raw = str(env.get("RISK_LADDER", "") or "").strip()
         if raw:
             g.risk_ladder = tuple(float(x) for x in raw.split(",") if x.strip())
