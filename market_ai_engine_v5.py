@@ -83,7 +83,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "5.0.0"
-__build__ = "2026-09-17 15:06 UTC · 73a12be"
+__build__ = "2026-09-17 15:13 UTC · 279e05f"
 
 
 # ============================================================================
@@ -14341,6 +14341,11 @@ class MarketAIEngine:
             lines.append(f"🪜 HIERARQUIA DE EDGE E RISCO: A escada {lad[0]:g}/{lad[1]:g}/{lad[2]:g}% (teto {self.limits.risk_ladder_max_pct:g}%) · B base {lad[0]:g}% · "
                          f"C amostra {getattr(self.limits, 'sample_risk_pct', 1.0):g}% · D bloqueado — "
                          + " · ".join(f"{sym} {getattr(self, 'risk_notes', {}).get(sym, '')}" for sym in self.specs))
+        cal = next((e.engine.calibrator for e in self.engines.values() if getattr(e.engine, "calibrator", None) is not None), None)
+        if cal is not None:
+            lines.append(f"🎯 PROBABILIDADE: calibrador carregado — 0.70 declarado → {cal(0.70):.0%} · 0.85 → {cal(0.85):.0%} (usado antes do custo líquido)")
+        else:
+            lines.append(f"🎯 PROBABILIDADE: sem calibrador — declarada encolhida para 50% com peso {getattr(self.limits, 'prob_shrink_uncalibrated', 0.5):g} antes do custo líquido")
         if self.edge_bank is not None and self.edge_bank.stats:
             lines.append(self.edge_bank.render(list(self.specs), min_n=1, top=5))
         rows = self.mem.flow_anomaly_rows()
