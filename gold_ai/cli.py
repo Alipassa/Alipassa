@@ -1229,6 +1229,65 @@ def cmd_portfolio_sim(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """DIRECTION DIAGNOSTIC: (1) por que cada operação OOS perdeu; (2) matriz fator × mercado com sinal invertido/removido por bloco;
+    (3) corretora × Yahoo. Mede; não altera nada (a bandeira INVERTIDO? é candidato para o walk-forward confirmar)."""
+    from .config import EngineConfig
+    from .diagnose import direction_report, factor_matrix, reality_check, render_reality
+    from .markets import get_market
+
+    skip = {s.strip().lower() for s in (args.skip or "").split(",") if s.strip()}
+    out_lines: list[str] = []
+
+    def emit(txt: str) -> None:
+        print(txt, flush=True)
+        out_lines.append(txt)
+
+    if "direction" not in skip:
+        emit("🧭 1/3 DIRECTION DIAGNOSTIC — cada operação OOS do walk-forward: ACERTO · SAÍDA RUIM · ENTRADA RUIM · INVERTIDO · EXPIROU")
+        results = _oos_results_for_markets(args)
+        for sym, folds in results.items():
+            rows = [r for res in folds for r in res.trade_rows]
+            emit(direction_report(rows, sym, args.strategy).render())
+        emit("")
+    frames = None
+    if "matrix" not in skip or "reality" not in skip:
+        frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
+        if not frames:
+            print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+            return 1
+    cfg_for = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
+    if "matrix" not in skip:
+        emit(f"🧮 2/3 MATRIZ FATOR × MERCADO — E com o sinal como está, INVERTIDO e REMOVIDO, em {args.blocks} blocos cronológicos (parâmetros padrão fixos)")
+        facs = [f.strip() for f in args.factors.split(",") if f.strip()] if args.factors else None
+        for sym, frame in frames.items():
+            fm = factor_matrix(frame, sym, cfg_for(sym), n_blocks=args.blocks, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
+                               log=lambda m: print(m, flush=True), factors=facs)
+            emit(fm.render())
+        emit("")
+    if "reality" not in skip:
+        if not getattr(args, "csv_dir", None):
+            emit("🧪 3/3 BROKER REALITY CHECK: precisa de --csv-dir dados (preço da corretora) para comparar com o Yahoo — pulado")
+        else:
+            emit("🧪 3/3 BROKER REALITY CHECK — o mesmo backtest sobre o preço da corretora (--csv-dir) e sobre o Yahoo")
+            ns = argparse.Namespace(**vars(args))
+            ns.csv_dir = None
+            try:
+                yahoo = {k: v for k, v in _frames_for_markets(ns, args.markets).items() if len(v.xau) > 260}
+            except Exception as e:  # noqa: BLE001
+                yahoo = {}
+                emit(f"  Yahoo indisponível ({e}) — comparação pulada")
+            if yahoo:
+                rows = reality_check(frames, yahoo, cfg_for, n_blocks=args.blocks, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
+                                     log=lambda m: print(m, flush=True))
+                emit(render_reality(rows))
+    if args.txt:
+        with open(args.txt, "w", encoding="utf-8") as f:
+            f.write("\n".join(out_lines) + "\n")
+        print(f"\ndiagnóstico salvo em {args.txt}")
+    return 0
+
+
 def cmd_false_signals(args: argparse.Namespace) -> int:
     """FALSE SIGNAL FILTER: onde o robô erra fora da amostra (mercado, sessão, regime, evento, direção) → dados/falsos_sinais.json (o live veta só com n ≥ 20)."""
     from .false_signal import build_report
@@ -1895,7 +1954,8 @@ def _main(argv: list[str]) -> int:
     for name, fn, hlp in (("false-signals", cmd_false_signals, "FALSE SIGNAL FILTER 5.2: onde o robô erra fora da amostra (mercado × sessão × regime × evento); veto no live só com n ≥ 20"),
                           ("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
                           ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)"),
-                          ("portfolio-sim", cmd_portfolio_sim, "PORTFOLIO SIM 5.2: 1 × 2 × 3 × 4 posições simultâneas com as operações OOS, líquido de custo e correlação")):
+                          ("portfolio-sim", cmd_portfolio_sim, "PORTFOLIO SIM 5.2: 1 × 2 × 3 × 4 posições simultâneas com as operações OOS, líquido de custo e correlação"),
+                          ("diagnose", cmd_diagnose, "DIRECTION DIAGNOSTIC 5.x: por que perdeu (invertido × entrada × saída), matriz fator × mercado (invertido/removido por bloco) e corretora × Yahoo")):
         xp = sub.add_parser(name, help=hlp)
         xp.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"), help="banco histórico point-in-time (contexto: evento, relógio, fluxo)")
         xp.add_argument("--start", default="2026-01-01")
@@ -1916,6 +1976,8 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--equity", type=float, default=10000.0)
         xp.add_argument("--risk", type=float, default=None, help="portfolio-sim: risco %% por operação (padrão RISK_PER_TRADE do .env)")
         xp.add_argument("--cost", type=float, default=0.05, help="portfolio-sim: custo por operação em R (spread+slippage), descontado do resultado")
+        xp.add_argument("--skip", default="", help="diagnose: etapas a pular — direction, matrix, reality")
+        xp.add_argument("--factors", default=None, help="diagnose: só estes fatores na matriz (ex.: dolar,juros_reais)")
         xp.set_defaults(func=fn)
 
     at = sub.add_parser("autotune", help="AUTOTUNE 5.2: piso × confirmações × limiar de sinal escolhidos no passado (walk-forward) → dados/parametros.json")

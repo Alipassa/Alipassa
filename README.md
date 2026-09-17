@@ -691,6 +691,20 @@ mem.accuracy("sessao"); mem.accuracy("score_bucket"); mem.factor_power()
 de novo em 30 s com o `market_ai_engine_v5.py` que estiver na pasta (é assim que se troca de build). Com o arquivo `STOP_TRADING`
 presente, o `.bat` não sobe de novo: `STOP_TRADING` + `/REINICIAR` = desligado de vez (para `repair`, manutenção, etc.).
 
+## Direction Diagnostic — por que perdeu?
+
+```
+python market_ai_engine_v5.py diagnose --csv-dir dados --txt diagnostico.txt
+```
+
+1. Cada operação OOS do walk-forward vira ACERTO · SAÍDA RUIM (chegou a 1R e devolveu) · ENTRADA RUIM (andou a favor e estopou) ·
+   INVERTIDO (foi direto contra) · EXPIROU, com o "poder OOS" de cada fator (alinhamento nos acertos − nos invertidos).
+2. Matriz fator × mercado: E com o sinal como está, invertido e removido, em 4 blocos cronológicos com parâmetros padrão fixos.
+   "INVERTIDO?" só quando a inversão ganha em ≥ 3 de 4 blocos com n ≥ 20 — é candidato para o walk-forward confirmar, nunca é aplicado sozinho.
+3. Broker reality check: o mesmo backtest sobre o preço da corretora e sobre o Yahoo; se o edge muda de sinal com a fonte, EDGE NÃO CONFIRMADO.
+
+`--skip direction,matrix,reality` pula etapas; `--factors dolar,juros_reais` restringe a matriz. Mede, não altera nada.
+
 ## Memória por mercado e `repair`
 
 Cada previsão, operação simulada e decisão hipotética é resolvida **só com o preço do seu mercado**. Até a build 4739a5c, em modo

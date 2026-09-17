@@ -470,7 +470,9 @@ class Backtester:
                 row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
                        "score": a.score, "direction": sig.direction.value, "entry": a.price,
                        "exits": {k: v.exit_time for k, v in sim["details"].items()}, "symbol": getattr(self.frame, "symbol", "XAUUSD"),
-                       "event_kind": "", "regime": str(getattr(a, "regime", "") or ""), "confidence": float(getattr(a, "confidence", 0.0) or 0.0)}
+                       "event_kind": "", "regime": str(getattr(a, "regime", "") or ""), "confidence": float(getattr(a, "confidence", 0.0) or 0.0),
+                       "probability": float(max(a.prob_up, a.prob_down)),
+                       "factors": {f.name: float(f.score) for f in a.factors if getattr(f, "available", True)}}   # DIRECTION DIAGNOSTIC
                 last_ev = getattr(self.frame, "_last_identified", None) or []
                 if last_ev:
                     ev0 = max(last_ev, key=lambda e: e.time)
