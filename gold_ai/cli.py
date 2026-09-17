@@ -332,7 +332,7 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     from .markets import get_market
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
     rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
-                          cfg_factory=factory)
+                          cfg_factory=factory, log=lambda m: print(m, flush=True))
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

@@ -25,23 +25,46 @@ import time
 from datetime import datetime, timedelta, timezone
 
 ENGINE = "market_ai_engine_v5.py"
+REPORT = ""
 
 
 def run(step: str, cmd: list[str], out: list[str], timeout_min: int = 240) -> None:
+    """Roda uma etapa mostrando a saída NA HORA (linha a linha) e guardando tudo para o relatório."""
     head = f"\n{'=' * 100}\n=== {step} ===\n{'=' * 100}\n$ {' '.join(cmd)}\n"
     print(head, flush=True)
     out.append(head)
     t0 = time.time()
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    lines: list[str] = []
+    timed_out = False
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_min * 60)
-        txt = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr.strip() else "")
-        tail = f"\n[{step}: código {p.returncode} em {time.time() - t0:.0f}s]\n"
-    except subprocess.TimeoutExpired as e:
-        txt = (e.stdout or "") if isinstance(e.stdout, str) else ""
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             encoding="utf-8", errors="replace", bufsize=1, env=env)
+        assert p.stdout is not None
+        deadline = t0 + timeout_min * 60
+        for line in p.stdout:
+            try:
+                print(line, end="", flush=True)
+            except UnicodeEncodeError:          # console sem UTF-8: mostra sem os emojis, arquivo guarda tudo
+                print(line.encode("ascii", "replace").decode(), end="", flush=True)
+            lines.append(line)
+            if time.time() > deadline:
+                timed_out = True
+                p.kill()
+                break
+        rc = p.wait()
+    except OSError as e:
+        lines.append(f"\n[erro ao iniciar: {e}]\n")
+        rc = -1
+    if timed_out:
         tail = f"\n[{step}: TEMPO ESGOTADO após {timeout_min} min]\n"
-    print(txt[-6000:], flush=True)          # na tela só o fim; o arquivo guarda tudo
+    else:
+        tail = f"\n[{step}: código {rc} em {time.time() - t0:.0f}s]\n"
     print(tail, flush=True)
-    out.append(txt + tail)
+    out.append("".join(lines) + tail)
+    if REPORT:                                  # grava o parcial: Ctrl+C depois não perde o que já rodou
+        with open(REPORT, "w", encoding="utf-8") as f:
+            f.write("".join(out))
 
 
 def main() -> int:
@@ -67,8 +90,11 @@ def main() -> int:
     common = ["--start", args.start, "--end", end, "--markets", args.markets, "--events", args.events]
     if args.csv_dir:
         common += ["--csv-dir", args.csv_dir]
+    global REPORT
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    report = f"checkup_{stamp}.txt"
+    report = REPORT = f"checkup_{stamp}.txt"
+    print(f"relatório parcial em {report} (atualizado ao fim de cada etapa); etapas longas: estimate, autotune, matrix, false-signals\n"
+          f"para uma resposta rápida: python checkup.py --skip autotune,matrix,false-signals", flush=True)
     out: list[str] = [f"CHECKUP MARKET AI ENGINE · {stamp} · {args.start} → {end} · mercados {args.markets}\n"]
 
     if "estimate" not in skip:

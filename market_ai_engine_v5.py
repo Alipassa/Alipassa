@@ -10935,7 +10935,8 @@ DEFAULT_CAVEATS = [
 
 
 def estimate_profit(frames: dict, start: datetime, end: datetime, equity: float, risk_pct: float, n_folds: int = 4, step: int = 1,
-                    warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive", cfg_factory=None) -> ProfitEstimate:
+                    warmup: int = 220, horizon_min: int = 240, strategy: str = "adaptive", cfg_factory=None,
+                    log=None) -> ProfitEstimate:
 
     period = f"{start:%Y-%m-%d} → {end:%Y-%m-%d}"
     markets: list[MarketEstimate] = []
@@ -10943,7 +10944,9 @@ def estimate_profit(frames: dict, start: datetime, end: datetime, equity: float,
         spec = get_market(symbol)
         cfg = cfg_factory(symbol) if cfg_factory else EngineConfig(factor_signs=dict(spec.factor_signs), symbol=symbol)
         bt = Backtester(frame, cfg, warmup=warmup, step=step, horizon_min=horizon_min)
-        wf = walk_forward(bt, n_folds=n_folds)
+        if log:
+            log(f"{symbol}: walk-forward {n_folds} blocos sobre {len(frame.xau):,} candles H1 …")
+        wf = walk_forward(bt, n_folds=n_folds, log=log)
         rows = [r for _, res in wf.folds for r in res.trade_rows]
         markets.append(estimate_market(symbol, rows, equity, risk_pct, period, strategy))
     all_trades = [t for m in markets for t in m.trades]
@@ -14433,7 +14436,7 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         return 1
     factory = lambda sym: _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)  # noqa: E731
     rep = estimate_profit(frames, start, end, args.equity, risk, n_folds=args.folds, step=args.step, horizon_min=args.horizon, strategy=args.strategy,
-                          cfg_factory=factory)
+                          cfg_factory=factory, log=lambda m: print(m, flush=True))
     print(rep.render())
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
