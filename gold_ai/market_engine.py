@@ -84,6 +84,12 @@ class MarketAIEngine:
         self.engines: dict[str, LiveExecutionEngine] = {}
         from .autotune import apply_params
         import os as _os
+        from .false_signal import load_negatives
+        fs_path = _os.environ.get("FALSE_SIGNALS", _os.path.join("dados", "falsos_sinais.json"))
+        self.false_signals = load_negatives(fs_path)
+        if self.false_signals:
+            log(f"🚫 FALSE SIGNAL FILTER: {len(self.false_signals)} contexto(s) vetado(s) de {fs_path} — " +
+                " · ".join(f"{n['dimension']} {n['value']} (n={n['n']}, E={n['expectancy']:+.2f}R)" for n in self.false_signals[:6]))
         force_range = str(_os.environ.get("BLOCK_RANGE", "")).strip().lower() in ("1", "true", "sim", "yes")
         for sym, spec in self.specs.items():
             cfg = EngineConfig(factor_signs=dict(spec.factor_signs), symbol=sym)
@@ -366,6 +372,25 @@ class MarketAIEngine:
                 out.append(OpenExposure(sym, tr.thesis.direction, (tr.plan.risk_usd or 0.0) * tr.remaining))
         return out
 
+    def _false_signal_veto(self, symbol: str, now: datetime, r) -> Optional[str]:
+        """FALSE SIGNAL FILTER: contexto atual (mercado × sessão / regime / evento) contra dados/falsos_sinais.json (só 🔴 com n ≥ 20)."""
+        negs = getattr(self, "false_signals", None)
+        if not negs:
+            return None
+        from .false_signal import live_veto
+        a = getattr(r, "assessment", None)
+        regime = str(getattr(a, "regime", "") or "") if a is not None else ""
+        kind = ""
+        try:
+            ident = getattr(self.engines[symbol].engine, "identified_events", None) or []
+            if ident:
+                ev0 = max(ident, key=lambda e: e.time)
+                if now - ev0.time <= timedelta(hours=4):
+                    kind = str(getattr(ev0, "kind", "") or "")
+        except Exception:  # noqa: BLE001
+            kind = ""
+        return live_veto(negs, symbol, now, regime, kind)
+
     def _allowed_risk(self, symbol: str, direction: Direction) -> tuple[float, str]:
         return self.portfolio.allowed_risk_usd(symbol, direction, self.open_exposures(), self.perf.equity)
 
@@ -429,6 +454,10 @@ class MarketAIEngine:
             lc = getattr(self, "lifecycle", {}).get(sym)
             if lc is not None and not lc.allows_entries and lc.action != "QUEBRADO":
                 self.engines[sym].enter(r, snap_c, veto=f"CICLO DE VIDA — {sym} em {lc.action}: {lc.note}")
+                continue
+            fs = self._false_signal_veto(sym, snaps.time, r)
+            if fs:
+                self.engines[sym].enter(r, snap_c, veto=fs)
                 continue
             if snap_c.anomalous_regime and snap_c.flow_direction != 0 and ((c.direction == Direction.ALTA) != (snap_c.flow_direction > 0)):
                 self.engines[sym].enter(r, snap_c, veto=f"MODO INVESTIGAÇÃO em {sym} — entrada CONTRA o fluxo anômalo adiada (FLOW {snap_c.flow_score}); a favor/atrasado segue o funil normal")

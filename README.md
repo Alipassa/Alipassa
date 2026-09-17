@@ -332,6 +332,12 @@ de cada mercado; o Telegram avisa quando a letra muda.
 sobra do orçamento correlacionado (`MAX_CORRELATED_RISK`) e do total (`MAX_TOTAL_OPEN_RISK`), e a mensagem diz
 "dimensionada pelo risco conjunto: 1500 → 750 USD (mesma aposta: XAUUSD)". Se a sobra não comporta o lote mínimo, não entra.
 
+**False Signal Filter (`false-signals`, etapa 8i).** Onde o robô erra, medido fora da amostra: por mercado, sessão UTC, regime, tipo
+de evento, direção, e mercado × sessão / regime / evento. Para cada contexto, n, acerto, expectancy e vencedoras × perdedoras (MFE, MAE,
+|score|, confiança). Um contexto vira **falso sinal recorrente** só com n ≥ 20, expectancy ≤ 0 e acerto ≤ 45%; esses vão para
+`dados/falsos_sinais.json` e o live veta a entrada quando o contexto atual bate ("FALSO SINAL — mercado×regime US500 RANGE perdeu fora
+da amostra, n=24"). O mercado sozinho não veta aqui: isso é o grau D do ciclo de vida. `FALSE_SIGNALS=` no `.env` muda o arquivo.
+
 **Eficiência do dia (`dia`, `/DIA`).** Todo dia, por mercado: análises, episódios em SETUP e em OPPORTUNITY, entradas, captura
 (entradas ÷ episódios com sinal), operações fechadas, R, USD, acerto, minutos por operação, R hipotético das oportunidades não
 operadas, risco planejado × real (denuncia lote travado por `MAX_LOT`), motivos mais comuns de não entrar e saídas. Automático às

@@ -1169,6 +1169,27 @@ def cmd_portfolio_sim(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_false_signals(args: argparse.Namespace) -> int:
+    """FALSE SIGNAL FILTER: onde o robô erra fora da amostra (mercado, sessão, regime, evento, direção) → dados/falsos_sinais.json (o live veta só com n ≥ 20)."""
+    from .false_signal import build_report
+
+    results = _oos_results_for_markets(args)
+    if not results:
+        print("sem histórico suficiente (mínimo ~260 candles H1 por mercado)")
+        return 1
+    rows_by = {sym: [r for res in folds for r in res.trade_rows] for sym, folds in results.items()}
+    rep = build_report(rows_by, args.strategy, start=args.start, end=args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    txt = rep.render()
+    print(txt)
+    if args.out:
+        rep.save(args.out)
+        print(f"\ncontextos salvos em {args.out} — o live lê este arquivo e veta só os 🔴 (n ≥ 20)")
+    if getattr(args, "txt", None):
+        with open(args.txt, "w", encoding="utf-8") as f:
+            f.write(txt)
+    return 0
+
+
 def cmd_day(args: argparse.Namespace) -> int:
     """EFICIÊNCIA DO DIA: análises, episódios SETUP/OPPORTUNITY, entradas, captura, R, USD, lote travado, motivos de não entrar, R não operado."""
     from .efficiency import day_report
@@ -1734,7 +1755,8 @@ def _main(argv: list[str]) -> int:
     es.add_argument("--news-mode", choices=["none", "macro", "full"], default="full", help="o que do banco o cérebro vê: none | macro (A) | full (B)")
     es.set_defaults(func=cmd_estimate)
 
-    for name, fn, hlp in (("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
+    for name, fn, hlp in (("false-signals", cmd_false_signals, "FALSE SIGNAL FILTER 5.2: onde o robô erra fora da amostra (mercado × sessão × regime × evento); veto no live só com n ≥ 20"),
+                          ("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
                           ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)"),
                           ("portfolio-sim", cmd_portfolio_sim, "PORTFOLIO SIM 5.2: 1 × 2 × 3 × 4 posições simultâneas com as operações OOS, líquido de custo e correlação")):
         xp = sub.add_parser(name, help=hlp)
@@ -1751,7 +1773,8 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--edge-score", type=float, default=None)
         xp.add_argument("--signal-score", type=float, default=None)
         xp.add_argument("--min-confirmations", type=int, default=None)
-        xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else None))
+        xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else os.path.join("dados", "falsos_sinais.json") if name == "false-signals" else None))
+        xp.add_argument("--txt", default=None, help="false-signals: salva o quadro em texto (ex.: falsos_sinais.txt)")
         xp.add_argument("--equity", type=float, default=10000.0)
         xp.add_argument("--risk", type=float, default=None, help="portfolio-sim: risco %% por operação (padrão RISK_PER_TRADE do .env)")
         xp.add_argument("--cost", type=float, default=0.05, help="portfolio-sim: custo por operação em R (spread+slippage), descontado do resultado")

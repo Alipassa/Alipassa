@@ -80,6 +80,9 @@ def main() -> int:
     if "matrix" not in skip:
         run("3/6 MATRIZ confirmações 1→5 × posições 1→4 (escolhe na 1ª metade, confere na 2ª)",
             base + ["matrix"] + common + ["--equity", str(args.equity), "--risk", str(args.risk), "--out", "matriz.txt"], out)
+    if "false-signals" not in skip:
+        run("3b/6 FALSE SIGNAL FILTER — onde o robô erra fora da amostra (mercado × sessão × regime × evento)",
+            base + ["false-signals"] + common + ["--out", os.path.join("dados", "falsos_sinais.json"), "--txt", "falsos_sinais.txt"], out)
     if "edge" not in skip:
         run("4/6 LIVE EDGE — o que o robô viveu no demo", base + ["edge", "--db", args.db, "--markets", args.markets], out, timeout_min=10)
     if "dia" not in skip:

@@ -61,6 +61,10 @@ set "NOME=8h/8 MATRIZ - confirmacoes 1..5 x posicoes simultaneas 1..4: n, acerto
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" matrix --start %INICIO% --end %FIM% --markets %MERCADOS% --out matriz.txt"
 call :passo
 
+set "NOME=8i/8 FALSE SIGNAL FILTER - onde o robo erra fora da amostra (mercado x sessao x regime x evento); veto no live so com 20 casos"
+set "CMD=%PY% %ENGINE% --log-file "%LOG%" false-signals --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\falsos_sinais.json --txt falsos_sinais.txt"
+call :passo
+
 set "NOME=8e/8 AUTOTUNE - a IA procura piso/confirmacoes/limiar no passado (dados\parametros.json; o live adota so com 20 casos OOS)"
 set "CMD=%PY% %ENGINE% --log-file "%LOG%" autotune --start %INICIO% --end %FIM% --markets %MERCADOS% --out dados\parametros.json"
 call :passo

@@ -556,3 +556,12 @@ dos movimentos que já provaram ter edge. A cada ciclo: CAPTURA → FILTRO → O
    correlacionado; nenhuma soma de posições passa de MAX_TOTAL_OPEN_RISK.
 4. O que ainda depende de dados: qual evidência (relógio, fluxo, cross-market, notícia, regime, VWAP) aumenta a expectancy de fato — Edge Bank +
    escada de ablação; MFE/MAE em segundos por tipo de operação para trailing — Exit Lab em ticks, depois da prova em segundos.
+
+## Adendo 5.2g — FALSE SIGNAL FILTER `[false_signal.build_report, live_veto, market_engine._false_signal_veto]`
+
+1. Padrões que antecedem perdas são medidos, não imaginados: operações fora da amostra agrupadas por mercado, sessão, regime, tipo de evento e
+   direção, com vencedoras × perdedoras em MFE, MAE, |score| e confiança.
+2. Veto só com amostra: n ≥ 20, expectancy ≤ 0 e acerto ≤ 45% num contexto mercado × sessão / regime / evento. Abaixo disso é leitura.
+3. O risco não sobe porque apareceram oportunidades: C → B → A só com evidência fora da amostra (ciclo de vida). O 1% do grau C forma amostra;
+   provar a qualidade dos sinais vem antes de escalar o risco.
+4. Perdedoras com MAE alto cedo são caso para o Exit Lab (stop/saída), não para filtro novo.
