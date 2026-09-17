@@ -685,6 +685,12 @@ outcome = mem.resolve(pid, path, threshold=atr)
 mem.accuracy("sessao"); mem.accuracy("score_bucket"); mem.factor_power()
 ```
 
+## Reiniciar ou parar o robô sem caçar janela
+
+`/REINICIAR` no Telegram, ou um arquivo `REINICIAR` na pasta do robô, faz o processo sair no fim do ciclo; o `rodar_live.bat` sobe
+de novo em 30 s com o `market_ai_engine_v5.py` que estiver na pasta (é assim que se troca de build). Com o arquivo `STOP_TRADING`
+presente, o `.bat` não sobe de novo: `STOP_TRADING` + `/REINICIAR` = desligado de vez (para `repair`, manutenção, etc.).
+
 ## Memória por mercado e `repair`
 
 Cada previsão, operação simulada e decisão hipotética é resolvida **só com o preço do seu mercado**. Até a build 4739a5c, em modo

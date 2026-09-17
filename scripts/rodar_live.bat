@@ -5,6 +5,9 @@ REM  Coloque na MESMA pasta de market_ai_engine_v5.py e do .env. MT5 aberto e lo
 REM  Modo PAPER: nunca envia ordem real. /STOP no Telegram bloqueia NOVAS ENTRADAS (o robo continua analisando);
 REM  A saida aparece NESTA JANELA e tambem em logs\live.log.
 REM  para desligar de vez: feche esta janela ou crie o arquivo STOP_TRADING nesta pasta.
+REM  para TROCAR DE BUILD sem cacar janela: mande /REINICIAR no Telegram (ou crie o arquivo REINICIAR aqui);
+REM  o robo sai no fim do ciclo e este .bat sobe de novo em 30s com o market_ai_engine_v5.py da pasta.
+REM  STOP_TRADING presente + /REINICIAR = desliga de vez (nao reinicia).
 REM ============================================================================
 cd /d "%~dp0"
 chcp 65001 > nul

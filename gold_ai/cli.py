@@ -259,6 +259,9 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
                   f"entradas são raras por desenho (o robô só entra em oportunidade estatisticamente válida)")
             if args.once:
                 break
+            if engine.restart_requested:
+                print("🔁 saindo para reiniciar (pedido por /REINICIAR ou arquivo REINICIAR)")
+                break
             time.sleep(args.interval)
     except KeyboardInterrupt:
         pass

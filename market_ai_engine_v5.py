@@ -9119,6 +9119,8 @@ class TelegramCommands:
                 actions.append("FLOW")
             elif c.startswith("/DIA"):
                 actions.append("DIA")
+            elif c.startswith("/REINICIAR"):
+                actions.append("RESTART")
             elif c.startswith("/CLOSE"):
                 if "CONFIRM" in c or self.pending_close:
                     self.pending_close = False
@@ -13839,6 +13841,8 @@ class MarketAIEngine:
         self.sender = sender or TelegramSender(dry_run=True, quiet=True)
         self.ks = kill_switch or KillSwitch()
         self.commands = commands
+        self.restart_requested = False          # /REINICIAR ou arquivo REINICIAR: o loop sai; o .bat sobe de novo com a build da pasta
+        self.restart_file = "REINICIAR"
         self.log = log
         self.selector = selector or AssetSelector()
         start_equity = mem.last_equity() or equity
@@ -13977,6 +13981,8 @@ class MarketAIEngine:
                 self.sender.send(self.status_text())
             elif action == "DIA":
                 self.sender.send(self.day_text(snaps.time))
+            elif action == "RESTART":
+                self._request_restart("/REINICIAR")
             elif action == "FLOW":
                 rows = self.mem.flow_anomaly_rows(measured_only=False)
                 pend = sum(1 for r in rows if not r.get("resultado"))
@@ -14181,10 +14187,27 @@ class MarketAIEngine:
         return self.portfolio.check(symbol, direction, risk_usd, self.open_exposures(), self.perf.equity)
 
     # ------------------------------------------------------------------ ciclo de carteira
+    def _request_restart(self, origin: str) -> None:
+        self.restart_requested = True
+        self.log(f"🔁 reinício pedido ({origin}): este processo termina no fim do ciclo; o rodar_live.bat sobe de novo em 30 s com a build da pasta "
+                 f"(com o arquivo STOP_TRADING presente ele NÃO sobe: é o jeito de desligar de vez)")
+        self.sender.send("🔁 reinício pedido: o robô termina este ciclo e o .bat sobe de novo em 30 s com a build da pasta "
+                         "(se o arquivo STOP_TRADING existir, fica desligado)")
+
+    def check_restart_file(self) -> None:
+        """Arquivo REINICIAR na pasta do robô = mesmo efeito de /REINICIAR (apagado ao ser lido)."""
+        if os.path.exists(self.restart_file):
+            try:
+                os.remove(self.restart_file)
+            except OSError:
+                pass
+            self._request_restart(f"arquivo {self.restart_file}")
+
     def run_cycle(self, snaps: MarketSnapshotSet) -> PortfolioCycle:
         pc = PortfolioCycle(snaps.time)
-        # comandos (/STOP /PAUSE /RESUME /STATUS /CLOSE /EDGE) tratados AQUI, para todos os mercados, com o kill switch compartilhado
+        # comandos (/STOP /PAUSE /RESUME /STATUS /CLOSE /EDGE /REINICIAR) tratados AQUI, para todos os mercados, com o kill switch compartilhado
         self._handle_commands(snaps, pc)
+        self.check_restart_file()
         self.maybe_daily_report(snaps.time)
         # 0) FLOW ANOMALY (informação implícita) → REACTION ENGINE (relógio por mercado + aprendizado dos eventos concluídos)
         self._flow_anomaly(snaps)
@@ -14533,6 +14556,9 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
             stage(f"ciclo {cycle} · coleta {t1 - t0:.0f}s · análise {time.monotonic() - t1:.0f}s · próximo em {args.interval}s · "
                   f"entradas são raras por desenho (o robô só entra em oportunidade estatisticamente válida)")
             if args.once:
+                break
+            if engine.restart_requested:
+                print("🔁 saindo para reiniciar (pedido por /REINICIAR ou arquivo REINICIAR)")
                 break
             time.sleep(args.interval)
     except KeyboardInterrupt:

@@ -300,6 +300,8 @@ class TelegramCommands:
                 actions.append("FLOW")
             elif c.startswith("/DIA"):
                 actions.append("DIA")
+            elif c.startswith("/REINICIAR"):
+                actions.append("RESTART")
             elif c.startswith("/CLOSE"):
                 if "CONFIRM" in c or self.pending_close:
                     self.pending_close = False

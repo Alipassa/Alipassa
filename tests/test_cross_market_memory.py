@@ -145,3 +145,28 @@ class RepairTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestartRequestTests(unittest.TestCase):
+    def test_restart_file_and_command_set_flag(self):
+        from gold_ai.guard import GuardLimits, KillSwitch, TelegramCommands, TradingMode
+        from gold_ai.market_engine import MarketAIEngine
+        from gold_ai.selector import PortfolioLimits
+        from gold_ai.telegram import TelegramSender
+
+        with tempfile.TemporaryDirectory() as d:
+            mem = PredictionMemory(os.path.join(d, "m.db"))
+            logs: list[str] = []
+            eng = MarketAIEngine(mem, GuardLimits(), ("XAUUSD",), TradingMode.PAPER, 10000.0, PortfolioLimits(),
+                                 sender=TelegramSender(dry_run=True, quiet=True), log=logs.append)
+            eng.restart_file = os.path.join(d, "REINICIAR")
+            self.assertFalse(eng.restart_requested)
+            eng.check_restart_file()
+            self.assertFalse(eng.restart_requested)
+            open(eng.restart_file, "w").close()
+            eng.check_restart_file()
+            self.assertTrue(eng.restart_requested)
+            self.assertFalse(os.path.exists(eng.restart_file))       # lido uma vez só
+            self.assertTrue(any("reinício pedido" in l for l in logs))
+            self.assertEqual(TelegramCommands(None, None).apply(["/REINICIAR"], KillSwitch()), ["RESTART"])
+            mem.close()

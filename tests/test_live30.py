@@ -192,6 +192,7 @@ class GuardTests(unittest.TestCase):
         self.assertTrue(ks.new_entries_allowed()[0])
         self.assertEqual(cmds.apply(["/CLOSE"], ks), ["CLOSE_REQUESTED"])
         self.assertEqual(cmds.apply(["/CLOSE CONFIRM"], ks), ["CLOSE_CONFIRMED"])
+        self.assertEqual(cmds.apply(["/REINICIAR"], ks), ["RESTART"])
         self.assertEqual(cmds.poll(), [])  # sem token → inativo
 
     def test_adaptive_trailing(self):
