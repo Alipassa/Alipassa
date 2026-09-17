@@ -1,0 +1,29 @@
+GOLD AI ENGINE 3.0 — robô do ouro (XAU/USD) com Telegram e MetaTrader 5
+=======================================================================
+
+O QUE VOCÊ PRECISA
+  - Windows com Python 3.10+ instalado (https://www.python.org/downloads/ — marque "Add python.exe to PATH")
+  - MetaTrader 5 instalado e logado (comece numa conta DEMO)
+  - Um bot do Telegram: fale com @BotFather, /newbot, copie o token; depois mande /start para o seu bot
+    e descubra o seu chat_id (por exemplo com @userinfobot)
+
+PASSO A PASSO
+  1. Deixe estes arquivos na mesma pasta: gold_ai_engine_v3.py, .env, e os .bat
+  2. Clique 2x em instalar.bat  → instala o pacote MetaTrader5, abre o .env para você preencher
+                                   TOKEN_TELEGRAM, CHAT_ID e MT5_PATH, e roda a verificação
+  3. Tudo ✅ na verificação?  Clique 2x em rodar_live.bat → o robô roda 24/7 em PAPER (dados reais do MT5,
+                                   alertas no Telegram, NENHUMA ordem real). Deixe alguns dias.
+  4. rodar_resultados.bat        → capital, performance, acertos, lead time (quantos minutos antes o robô viu o movimento)
+  5. Só depois de o PAPER mostrar estatística positiva: rodar_live_demo.bat → ordens reais na conta DEMO
+
+COMANDOS NO TELEGRAM (enquanto o robô roda)
+  /STATUS  capital, posições, entradas liberadas ou não
+  /STOP    bloqueia novas entradas (continua analisando e gerindo o que está aberto)
+  /PAUSE   /RESUME
+  /CLOSE   fecha tudo (pede /CLOSE CONFIRM)
+
+PARA PARAR
+  Feche a janela, ou crie um arquivo chamado STOP_TRADING na pasta (o robô não abre entradas novas).
+
+SE ALGO FALHAR
+  verificar_conexao.bat diz exatamente o que falta (❌) e o que fazer.

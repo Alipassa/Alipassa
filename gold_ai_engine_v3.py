@@ -59,7 +59,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "3.0.0"
-__build__ = "2026-09-17 19:31 UTC · bdd2767+"
+__build__ = "2026-09-17 19:42 UTC · 8cbb40b+"
 
 
 # ============================================================================
@@ -6185,7 +6185,7 @@ class LiveExecutionEngine:
 # CLI
 # ============================================================================
 
-"""CLI: `gold-ai demo`, `gold-ai run`, `gold-ai stats`, `gold-ai event`."""
+"""CLI: `gold-ai setup`, `gold-ai demo`, `gold-ai run`, `gold-ai stats`, `gold-ai event`."""
 
 
 
@@ -6359,6 +6359,85 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     print(mem.metrics(path, args.threshold, args.horizon).render())
     mem.close()
     return 0
+
+
+
+def run_setup(env: dict[str, str], send_test: bool = True, mt5_module: Any = None, sender: Optional[TelegramSender] = None,
+              env_path: str = ".env") -> tuple[bool, list[str]]:
+    """Checklist de prontidão: Python, .env, Telegram (mensagem de teste), MetaTrader 5 (conexão, símbolo, candles, conta), limites.
+
+    Devolve (tudo_ok, linhas). Injetável para testes (módulo MT5 falso, sender em dry-run)."""
+    lines: list[str] = []
+    ok = True
+
+    def item(good: bool, text: str) -> None:
+        nonlocal ok
+        ok = ok and good
+        lines.append(("✅ " if good else "❌ ") + text)
+
+    item(sys.version_info >= (3, 10), f"Python {sys.version.split()[0]} (precisa de 3.10 ou superior)")
+    has_env = os.path.exists(env_path)
+    item(has_env, f"arquivo {env_path} encontrado na pasta atual" if has_env else f"arquivo {env_path} não encontrado — copie .env.example para .env e preencha")
+
+    s = sender if sender is not None else TelegramSender(env_file=env_path, quiet=True)
+    if s.dry_run:
+        item(False, "Telegram: TOKEN_TELEGRAM e CHAT_ID ausentes no .env — sem eles o robô roda, mas não envia alertas nem aceita /STOP")
+    else:
+        try:
+            good = s.send("✅ GOLD AI ENGINE conectado. Este chat vai receber os alertas do ouro (XAU/USD).") if send_test else True
+            item(good, "Telegram: mensagem de teste enviada — confira o chat" if good else "Telegram: a API respondeu erro — confira token e chat_id")
+        except Exception as e:  # noqa: BLE001
+            item(False, f"Telegram: falha ao enviar ({e}) — confira o token, o chat_id e se você já mandou /start para o bot")
+
+    mod = mt5_module if mt5_module is not None else _mt5
+    cfg = MT5Config.from_env(env)
+    if not mod:
+        item(False, "MetaTrader 5: pacote Python não instalado — no Windows, rode: pip install MetaTrader5")
+    else:
+        client = None
+        try:
+            client = MT5Client(cfg, mt5=mod)
+            client.connect()
+            bid, ask = client.tick()
+            info = getattr(mod, "account_info", lambda: None)()
+            acct = ""
+            if info is not None:
+                kind = {0: "DEMO", 1: "CONCURSO", 2: "REAL"}.get(getattr(info, "trade_mode", None), "?")
+                acct = (f" · conta {getattr(info, 'login', '?')} ({kind}) · saldo {float(getattr(info, 'balance', 0) or 0):,.2f} "
+                        f"{getattr(info, 'currency', '')}").rstrip()
+            item(True, f"MetaTrader 5: conectado · {cfg.symbol} bid {bid:.2f} ask {ask:.2f}{acct}")
+            n = len(client.candles("H1", 50))
+            item(n > 0, f"MetaTrader 5: {n} candles H1 de {cfg.symbol} lidos" if n else f"MetaTrader 5: nenhum candle de {cfg.symbol} — confira MT5_SYMBOL")
+        except Exception as e:  # noqa: BLE001
+            item(False, f"MetaTrader 5: {e} — abra o terminal, faça login e confira MT5_PATH e MT5_SYMBOL no .env")
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    limits = GuardLimits.from_env(env)
+    ks = KillSwitch.from_env(env, file_path="STOP_TRADING")
+    allowed, why = ks.new_entries_allowed()
+    lines.append(f"ℹ️ limites do .env: risco/trade {limits.risk_per_trade_pct}% · perda diária {limits.max_daily_loss_pct}% · "
+                 f"drawdown {limits.max_drawdown_pct}% · posições {limits.max_positions} · lote máx {limits.max_lot} · spread máx {limits.max_spread}")
+    lines.append("ℹ️ novas entradas: " + ("liberadas" if allowed else f"bloqueadas ({why})"))
+    return ok, lines
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Diz se o robô está pronto: Telegram, MetaTrader 5, .env e limites. Sai com 0 quando tudo está ✅."""
+    env = load_env_file(args.env)
+    ok, lines = run_setup(env, send_test=not args.no_message, env_path=args.env)
+    print("GOLD AI ENGINE " + __version__ + " — verificação de prontidão")
+    for ln in lines:
+        print(ln)
+    if ok:
+        print("\nTUDO PRONTO. Próximo passo (PAPER, sem ordens reais):\n  python gold_ai_engine_v3.py live --source mt5 --mode paper --send")
+    else:
+        print("\nAinda falta algo (itens ❌). Corrija e rode `setup` de novo.")
+    return 0 if ok else 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -6580,6 +6659,11 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("--horizon", type=int, default=240)
     si.add_argument("--walk-forward", action="store_true")
     si.set_defaults(func=cmd_simulate)
+
+    su = sub.add_parser("setup", help="verifica se está tudo pronto: .env, Telegram (mensagem de teste), MetaTrader 5, limites")
+    su.add_argument("--env", default=".env")
+    su.add_argument("--no-message", action="store_true", help="não envia a mensagem de teste ao Telegram")
+    su.set_defaults(func=cmd_setup)
 
     ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
     ca.add_argument("--db", default="gold_ai.db")

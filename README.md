@@ -40,9 +40,22 @@ No estágio **MOVIMENTO** (preço já andou mais de 2 ATR) o motor **não perseg
 ≥ 3 famílias independentes alinhadas (macro, juros, dólar, fluxo, técnico, sentimento, geopolítica) e com vantagem
 estatística declarada; caso contrário a resposta é "NÃO SEI" e nada é enviado.
 
+## Robô pronto para rodar (Windows, Telegram + MetaTrader 5)
+
+1. Crie uma pasta (ex.: `C:\GoldAI`) e coloque nela `gold_ai_engine_v3.py`, `.env.example` e os arquivos de `scripts/`.
+2. Clique 2× em **`instalar.bat`**: instala o pacote `MetaTrader5`, cria o `.env` e abre para você preencher
+   `TOKEN_TELEGRAM`, `CHAT_ID` e `MT5_PATH`; depois roda a verificação.
+3. A verificação (`python gold_ai_engine_v3.py setup`) manda uma mensagem de teste ao Telegram, conecta ao MT5, lê o preço
+   e os candles do ouro e mostra a conta (DEMO/REAL) e os limites de risco. Cada item sai com ✅ ou ❌ e o que fazer.
+4. Tudo ✅: clique 2× em **`rodar_live.bat`**. O robô roda 24/7 em PAPER com dados reais e alertas no Telegram, sem ordens.
+5. **`rodar_resultados.bat`** mostra o que ele viveu. Só depois de estatística positiva: **`rodar_live_demo.bat`** (ordens na conta DEMO).
+
+Guia em linguagem simples: [scripts/LEIA-ME.txt](scripts/LEIA-ME.txt).
+
 ## Uso rápido
 
 ```bash
+python gold_ai_engine_v3.py setup                     # está tudo pronto? .env · Telegram (mensagem de teste) · MT5 · limites
 python gold_ai_engine_v3.py demo                      # 7 cenários sintéticos → relatórios e sinais (Telegram em dry-run)
 python gold_ai_engine_v3.py live --once               # Yahoo + FRED + CFTC + RSS → snapshot real → relatório
 python gold_ai_engine_v3.py live --source mt5 --mode paper --send      # 🟢 24/7 com preço do MT5, operações simuladas, alertas no Telegram
@@ -53,7 +66,7 @@ python gold_ai_engine_v3.py simulate --csv xau_h1.csv --walk-forward   # 1R/2R/3
 python gold_ai_engine_v3.py backtest --symbol GC=F    # backtest H1 com histórico do Yahoo (~3 meses)
 python gold_ai_engine_v3.py calibrate --min-n 30      # gera calibrator.json; o live passa a usá-lo (--calibrator)
 python gold_ai_engine_v3.py event --actual 0.1 --dxy -0.3 --us10y -5 --real -4 --gold 0.4 --flow 0.3   # árvore pré-evento + cadeia pós-evento
-python -m unittest -q                                 # testes (119)
+python -m unittest -q                                 # testes (123)
 ```
 
 `python -m gold_ai …` (pacote) e `python gold_ai_engine_v3.py …` (arquivo único) são equivalentes. O arquivo único é
@@ -120,7 +133,7 @@ Copie `.env.example` para `.env` na pasta onde o robô roda.
 | `gold_ai/evaluation.py` | F, G | `HistoryFrame`, `Backtester`, `walk_forward`, precisão/recall/lead time/MFE/MAE, `validate` |
 | `gold_ai/opportunity.py` | 3.0 | OPPORTUNITY ENGINE: capture rate, entry rate, atribuição por filtro, curva limiar × expectancy |
 | `gold_ai/live_engine.py` | 3.0 | `LiveExecutionEngine`: monitor primeiro, depois nova decisão; retoma operações do SQLite; toda a vida da operação no Telegram |
-| `gold_ai/cli.py` | — | `demo` · `run` · `live` · `status` · `stats` · `backtest` · `validate` · `simulate` · `calibrate` · `metrics` · `event` |
+| `gold_ai/cli.py` | — | `setup` · `demo` · `run` · `live` · `status` · `stats` · `backtest` · `validate` · `simulate` · `calibrate` · `metrics` · `event` |
 
 ## Data Engine
 
@@ -158,8 +171,8 @@ interpretar notícias com um LLM, implemente `NewsInterpreter.interpret(item)` p
 gold_ai/                 pacote (fonte da verdade)
 gold_ai_engine_v3.py     arquivo único gerado por tools/build_single_file.py — leve este para a máquina do MT5
 tools/build_single_file.py
-tests/                   119 testes (stdlib unittest; rodam também com pytest)
-scripts/                 rodar_live.bat · rodar_live_demo.bat · rodar_resultados.bat · verificar.bat
+tests/                   123 testes (stdlib unittest; rodam também com pytest)
+scripts/                 instalar.bat · verificar_conexao.bat · rodar_live.bat · rodar_live_demo.bat · rodar_resultados.bat · LEIA-ME.txt
 docs/DIRETRIZ.md         a diretriz de inteligência preditiva do ouro, seção a seção → módulo
 .env.example             credenciais e limites
 ```
