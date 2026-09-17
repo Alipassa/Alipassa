@@ -83,7 +83,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "5.0.0"
-__build__ = "2026-09-17 14:57 UTC · 0d46c1c"
+__build__ = "2026-09-17 15:06 UTC · 73a12be"
 
 
 # ============================================================================
@@ -9237,10 +9237,14 @@ class IsotonicCalibrator:
         self.xs: list[float] = []
         self.ys: list[float] = []
 
-    def fit(self, pairs: Iterable[tuple[float, bool]]) -> "IsotonicCalibrator":
+    def fit(self, pairs: Iterable[tuple[float, bool]], shrink_k: float = 10.0) -> "IsotonicCalibrator":
+        """`shrink_k`: cada bloco é puxado para a taxa-base global com peso de `shrink_k` casos fictícios
+        (y' = (y·n + base·k)/(n + k)). Sem isso, um bloco com 1 acerto em 1 caso vira "100 %" e o robô
+        entraria com p = 1 nos sinais mais raros — justamente os de menos amostra."""
         data = sorted((p, 1.0 if h else 0.0) for p, h in pairs)
         if not data:
             return self
+        base = sum(y for _, y in data) / len(data)
         # agrupa empates de x (mesma probabilidade) antes do PAV
         grouped: list[list[float]] = []  # [x, y médio, peso]
         for x, y in data:
@@ -9250,6 +9254,7 @@ class IsotonicCalibrator:
                 g[2] += 1
             else:
                 grouped.append([x, y, 1])
+        # PAV agrupa primeiro (blocos monotônicos com o peso real) …
         blocks = grouped  # [x médio, y médio, peso]
         i = 0
         while i < len(blocks) - 1:
@@ -9261,6 +9266,18 @@ class IsotonicCalibrator:
                 i = max(0, i - 1)
             else:
                 i += 1
+        # … e só depois cada bloco é encolhido para a taxa-base pelo seu peso: bloco de 1 caso quase não conta
+        if shrink_k > 0:
+            blocks = [[b[0], (b[1] * b[2] + base * shrink_k) / (b[2] + shrink_k), b[2]] for b in blocks]
+            i = 0                                       # o encolhimento pode criar uma violação nova: PAV de novo
+            while i < len(blocks) - 1:
+                if blocks[i][1] > blocks[i + 1][1]:
+                    a, b = blocks[i], blocks[i + 1]
+                    w = a[2] + b[2]
+                    blocks[i:i + 2] = [[(a[0] * a[2] + b[0] * b[2]) / w, (a[1] * a[2] + b[1] * b[2]) / w, w]]
+                    i = max(0, i - 1)
+                else:
+                    i += 1
         self.xs = [b[0] for b in blocks]
         self.ys = [b[1] for b in blocks]
         return self
@@ -15807,7 +15824,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     cal = mem.fit_calibrator(dedupe_episodes=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(cal.to_dict(), f)
-    print(f"\ncalibrador salvo em {args.out}: " + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))
+    print(f"\ncalibrador salvo em {args.out} ({rep.n} episódios; blocos encolhidos para a taxa-base com peso 10): "
+          + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))
+    print("o live usa esta curva antes do custo líquido: 0.70 declarado → " + f"{cal(0.70):.0%}" + " · 0.85 → " + f"{cal(0.85):.0%}")
     mem.close()
     return 0
 
@@ -16376,7 +16395,8 @@ def _main(argv: list[str]) -> int:
     ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
     ca.add_argument("--db", default="gold_ai.db")
     ca.add_argument("--out", default="calibrator.json")
-    ca.add_argument("--min-n", type=int, default=30)
+    ca.add_argument("--min-n", type=int, default=int(os.environ.get("CALIBRATOR_MIN_EPISODES", "20") or 20),
+                    help="episódios resolvidos mínimos para salvar o calibrador (env CALIBRATOR_MIN_EPISODES; blocos pequenos são encolhidos para a taxa-base)")
     ca.set_defaults(func=cmd_calibrate)
 
     args = p.parse_args(argv)

@@ -104,10 +104,14 @@ class IsotonicCalibrator:
         self.xs: list[float] = []
         self.ys: list[float] = []
 
-    def fit(self, pairs: Iterable[tuple[float, bool]]) -> "IsotonicCalibrator":
+    def fit(self, pairs: Iterable[tuple[float, bool]], shrink_k: float = 10.0) -> "IsotonicCalibrator":
+        """`shrink_k`: cada bloco é puxado para a taxa-base global com peso de `shrink_k` casos fictícios
+        (y' = (y·n + base·k)/(n + k)). Sem isso, um bloco com 1 acerto em 1 caso vira "100 %" e o robô
+        entraria com p = 1 nos sinais mais raros — justamente os de menos amostra."""
         data = sorted((p, 1.0 if h else 0.0) for p, h in pairs)
         if not data:
             return self
+        base = sum(y for _, y in data) / len(data)
         # agrupa empates de x (mesma probabilidade) antes do PAV
         grouped: list[list[float]] = []  # [x, y médio, peso]
         for x, y in data:
@@ -117,6 +121,7 @@ class IsotonicCalibrator:
                 g[2] += 1
             else:
                 grouped.append([x, y, 1])
+        # PAV agrupa primeiro (blocos monotônicos com o peso real) …
         blocks = grouped  # [x médio, y médio, peso]
         i = 0
         while i < len(blocks) - 1:
@@ -128,6 +133,18 @@ class IsotonicCalibrator:
                 i = max(0, i - 1)
             else:
                 i += 1
+        # … e só depois cada bloco é encolhido para a taxa-base pelo seu peso: bloco de 1 caso quase não conta
+        if shrink_k > 0:
+            blocks = [[b[0], (b[1] * b[2] + base * shrink_k) / (b[2] + shrink_k), b[2]] for b in blocks]
+            i = 0                                       # o encolhimento pode criar uma violação nova: PAV de novo
+            while i < len(blocks) - 1:
+                if blocks[i][1] > blocks[i + 1][1]:
+                    a, b = blocks[i], blocks[i + 1]
+                    w = a[2] + b[2]
+                    blocks[i:i + 2] = [[(a[0] * a[2] + b[0] * b[2]) / w, (a[1] * a[2] + b[1] * b[2]) / w, w]]
+                    i = max(0, i - 1)
+                else:
+                    i += 1
         self.xs = [b[0] for b in blocks]
         self.ys = [b[1] for b in blocks]
         return self

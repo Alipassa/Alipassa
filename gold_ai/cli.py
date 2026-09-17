@@ -1624,7 +1624,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     cal = mem.fit_calibrator(dedupe_episodes=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(cal.to_dict(), f)
-    print(f"\ncalibrador salvo em {args.out}: " + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))
+    print(f"\ncalibrador salvo em {args.out} ({rep.n} episódios; blocos encolhidos para a taxa-base com peso 10): "
+          + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))
+    print("o live usa esta curva antes do custo líquido: 0.70 declarado → " + f"{cal(0.70):.0%}" + " · 0.85 → " + f"{cal(0.85):.0%}")
     mem.close()
     return 0
 
@@ -2195,7 +2197,8 @@ def _main(argv: list[str]) -> int:
     ca = sub.add_parser("calibrate", help="ajusta e salva o calibrador de probabilidade a partir do SQLite")
     ca.add_argument("--db", default="gold_ai.db")
     ca.add_argument("--out", default="calibrator.json")
-    ca.add_argument("--min-n", type=int, default=30)
+    ca.add_argument("--min-n", type=int, default=int(os.environ.get("CALIBRATOR_MIN_EPISODES", "20") or 20),
+                    help="episódios resolvidos mínimos para salvar o calibrador (env CALIBRATOR_MIN_EPISODES; blocos pequenos são encolhidos para a taxa-base)")
     ca.set_defaults(func=cmd_calibrate)
 
     args = p.parse_args(argv)
