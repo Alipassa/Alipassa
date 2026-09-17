@@ -201,7 +201,7 @@ class PerformanceEngine:
             meta = (f" · 🎯 meta {self.limits.daily_target_pct:.0f}% = {self.daily_target_usd:,.2f} USD ({self.daily_pct:+.1f}% hoje"
                     + (f", faltam ≈ {r:.2f}R" if r else ", ATINGIDA") + ")")
         return (f"💼 CAPITAL {self.equity:,.2f} USD · pico {self.peak_equity:,.2f} · drawdown {self.drawdown_pct:.1f}% · "
-                f"dia {self.daily_pnl:+.2f} · risco/operação {self.limits.risk_per_trade_pct}% = {self.risk_usd:.2f} USD" + meta
+                f"dia {self.daily_pnl:+.2f} · risco base {self.limits.risk_per_trade_pct}% = {self.risk_usd:.2f} USD (por mercado: ver hierarquia de edge)" + meta
                 + (" · 🚨 TRADING STOP" if self.trading_stop else "") + (" · 🎯 META ATINGIDA" if self.target_reached else ""))
 
 

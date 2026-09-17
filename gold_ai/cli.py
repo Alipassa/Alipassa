@@ -1597,13 +1597,18 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """Ajusta o calibrador isotônico com as previsões resolvidas no SQLite e salva em JSON (usado por `live --calibrator`)."""
     mem = PredictionMemory(args.db)
-    rep = mem.calibration()
+    print("BRUTO (todas as previsões resolvidas):")
+    print(mem.calibration().render())
+    rep = mem.calibration(dedupe_episodes=True)
+    print("\nPOR EPISÓDIO (uma previsão por ativo/direção/hora — alertas repetidos não contam várias vezes):")
     print(rep.render())
+    print("\nONDE A PROBABILIDADE MENTE:")
+    print(mem.calibration_breakdown())
     if rep.n < args.min_n:
-        print(f"\nsó {rep.n} previsões resolvidas (mínimo {args.min_n}) — calibrador NÃO salvo")
+        print(f"\nsó {rep.n} episódios resolvidos (mínimo {args.min_n}) — calibrador NÃO salvo")
         mem.close()
         return 1
-    cal = mem.fit_calibrator()
+    cal = mem.fit_calibrator(dedupe_episodes=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(cal.to_dict(), f)
     print(f"\ncalibrador salvo em {args.out}: " + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))

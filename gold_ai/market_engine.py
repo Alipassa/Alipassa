@@ -405,8 +405,15 @@ class MarketAIEngine:
         if len(closes) < 2:
             return
         stressed = [sym for sym, snap in snaps.by_symbol.items() if getattr(snap, "anomalous_regime", False)]
-        if getattr(self, "pending_reactions", None):
-            stressed += list(snaps.by_symbol)                        # evento em curso: todos em estresse (mesma aposta macro)
+        recent_event = False
+        for pr in (getattr(self, "pending_reactions", None) or {}).values():
+            ev = pr.get("ev") if isinstance(pr, dict) else None
+            t_ev = getattr(ev, "time", None)
+            if t_ev is not None and 0 <= (snaps.time - t_ev).total_seconds() <= 30 * 60:
+                recent_event = True
+                break
+        if recent_event:
+            stressed += list(snaps.by_symbol)                        # release nos últimos 30 min: todos em estresse (mesma aposta macro)
         table, notes = dynamic_correlation_table(closes, None, stressed)
         self.portfolio.corr_table = table
         self.corr_notes = notes

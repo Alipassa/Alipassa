@@ -2465,20 +2465,49 @@ class PredictionMemory:
         trade_rows += [{"score": d.score, "r": d.hypothetical_r} for d in decisions if d.hypothetical_r is not None]
         return opportunity_report(decisions, prices, entries, threshold, horizon_min, trade_rows)
 
-    def resolved_records(self) -> list[dict]:
-        rows = self.conn.execute("SELECT * FROM predictions WHERE resultado IN ('ACERTO','ERRO') AND previsao IN ('ALTA','BAIXA')").fetchall()
-        return [{"direction": r["previsao"], "hit": r["resultado"] == "ACERTO", "probability": r["probabilidade"],
-                 "factors": json.loads(r["fatores_ratio"] or "{}"), "technical": json.loads(r["tecnico_detalhe"] or "{}"),
-                 "lead": r["tempo_ate_reacao_min"], "type": r["sinal_tipo"]} for r in rows]
+    def resolved_records(self, dedupe_episodes: bool = False) -> list[dict]:
+        """Previsões resolvidas (ACERTO/ERRO). `dedupe_episodes`: uma por (ativo, direção, hora cheia) — alertas repetidos a cada ciclo
+        no mesmo episódio não contam várias vezes (senão 5 episódios viram 55 'casos' e a calibração mente)."""
+        rows = self.conn.execute("SELECT * FROM predictions WHERE resultado IN ('ACERTO','ERRO') AND previsao IN ('ALTA','BAIXA') ORDER BY id").fetchall()
+        out, seen = [], set()
+        for r in rows:
+            keys = r.keys()
+            sym = r["ativo"] if "ativo" in keys else "XAUUSD"
+            if dedupe_episodes:
+                k = (sym, r["previsao"], str(r["data"]), str(r["hora"])[:2])
+                if k in seen:
+                    continue
+                seen.add(k)
+            out.append({"direction": r["previsao"], "hit": r["resultado"] == "ACERTO", "probability": r["probabilidade"],
+                        "factors": json.loads(r["fatores_ratio"] or "{}"), "technical": json.loads(r["tecnico_detalhe"] or "{}"),
+                        "lead": r["tempo_ate_reacao_min"], "type": r["sinal_tipo"], "symbol": sym})
+        return out
 
-    def calibration(self):
-        return calibration_table((r["probability"], r["hit"]) for r in self.resolved_records())
+    def calibration_breakdown(self) -> str:
+        """Acerto por tipo de sinal e por ativo (bruto e por episódio): onde a probabilidade declarada mente."""
+        raw = self.resolved_records()
+        dd = self.resolved_records(dedupe_episodes=True)
+        lines = [f"  registros resolvidos: {len(raw)} brutos · {len(dd)} episódios (uma previsão por ativo/direção/hora)"]
+        for label, recs in (("tipo de sinal", None), ("ativo", None)):
+            key = "type" if label == "tipo de sinal" else "symbol"
+            groups: dict[str, list] = {}
+            for r in dd:
+                groups.setdefault(str(r.get(key) or "?"), []).append(r)
+            for g, rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+                n = len(rs)
+                hit = sum(1 for r in rs if r["hit"]) / n
+                p = sum(float(r["probability"] or 0.0) for r in rs) / n
+                lines.append(f"  {label:<14}{g:<20} n={n:<4} declarada {p:.0%} · observada {hit:.0%}  {'⚠️ inversão' if hit < 0.35 and n >= 10 else ''}")
+        return "\n".join(lines)
+
+    def calibration(self, dedupe_episodes: bool = False):
+        return calibration_table((r["probability"], r["hit"]) for r in self.resolved_records(dedupe_episodes))
 
     def scoreboard(self):
         return factor_scoreboard(self.resolved_records())
 
-    def fit_calibrator(self):
-        return IsotonicCalibrator().fit((r["probability"], r["hit"]) for r in self.resolved_records())
+    def fit_calibrator(self, dedupe_episodes: bool = True):
+        return IsotonicCalibrator().fit((r["probability"], r["hit"]) for r in self.resolved_records(dedupe_episodes))
 
     def lead_time_stats(self) -> dict:
         """⏱️ lead time das previsões que acertaram, por tipo de sinal."""
@@ -8833,7 +8862,7 @@ class PerformanceEngine:
             meta = (f" · 🎯 meta {self.limits.daily_target_pct:.0f}% = {self.daily_target_usd:,.2f} USD ({self.daily_pct:+.1f}% hoje"
                     + (f", faltam ≈ {r:.2f}R" if r else ", ATINGIDA") + ")")
         return (f"💼 CAPITAL {self.equity:,.2f} USD · pico {self.peak_equity:,.2f} · drawdown {self.drawdown_pct:.1f}% · "
-                f"dia {self.daily_pnl:+.2f} · risco/operação {self.limits.risk_per_trade_pct}% = {self.risk_usd:.2f} USD" + meta
+                f"dia {self.daily_pnl:+.2f} · risco base {self.limits.risk_per_trade_pct}% = {self.risk_usd:.2f} USD (por mercado: ver hierarquia de edge)" + meta
                 + (" · 🚨 TRADING STOP" if self.trading_stop else "") + (" · 🎯 META ATINGIDA" if self.target_reached else ""))
 
 
@@ -13971,8 +14000,15 @@ class MarketAIEngine:
         if len(closes) < 2:
             return
         stressed = [sym for sym, snap in snaps.by_symbol.items() if getattr(snap, "anomalous_regime", False)]
-        if getattr(self, "pending_reactions", None):
-            stressed += list(snaps.by_symbol)                        # evento em curso: todos em estresse (mesma aposta macro)
+        recent_event = False
+        for pr in (getattr(self, "pending_reactions", None) or {}).values():
+            ev = pr.get("ev") if isinstance(pr, dict) else None
+            t_ev = getattr(ev, "time", None)
+            if t_ev is not None and 0 <= (snaps.time - t_ev).total_seconds() <= 30 * 60:
+                recent_event = True
+                break
+        if recent_event:
+            stressed += list(snaps.by_symbol)                        # release nos últimos 30 min: todos em estresse (mesma aposta macro)
         table, notes = dynamic_correlation_table(closes, None, stressed)
         self.portfolio.corr_table = table
         self.corr_notes = notes
@@ -15559,13 +15595,18 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """Ajusta o calibrador isotônico com as previsões resolvidas no SQLite e salva em JSON (usado por `live --calibrator`)."""
     mem = PredictionMemory(args.db)
-    rep = mem.calibration()
+    print("BRUTO (todas as previsões resolvidas):")
+    print(mem.calibration().render())
+    rep = mem.calibration(dedupe_episodes=True)
+    print("\nPOR EPISÓDIO (uma previsão por ativo/direção/hora — alertas repetidos não contam várias vezes):")
     print(rep.render())
+    print("\nONDE A PROBABILIDADE MENTE:")
+    print(mem.calibration_breakdown())
     if rep.n < args.min_n:
-        print(f"\nsó {rep.n} previsões resolvidas (mínimo {args.min_n}) — calibrador NÃO salvo")
+        print(f"\nsó {rep.n} episódios resolvidos (mínimo {args.min_n}) — calibrador NÃO salvo")
         mem.close()
         return 1
-    cal = mem.fit_calibrator()
+    cal = mem.fit_calibrator(dedupe_episodes=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(cal.to_dict(), f)
     print(f"\ncalibrador salvo em {args.out}: " + ", ".join(f"{x:.2f}→{y:.2f}" for x, y in zip(cal.xs, cal.ys)))
