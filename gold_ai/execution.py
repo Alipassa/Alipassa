@@ -138,16 +138,30 @@ class ExecutionEngine:
         tp = plan.targets.get(plan.recommended) if plan.recommended in plan.targets else plan.targets.get("3R")
         spec = self.spec
         stop = plan.stop
-        min_dist = spec.min_stop_distance()
-        if min_dist and abs(price - stop) < min_dist:          # stops level da corretora: SL não pode ficar mais perto que isso
-            stop = price - min_dist if buy else price + min_dist
+        # distância mínima real: stops level da corretora OU o spread (o broker mede o SL da venda contra o ASK e o da compra contra o BID)
+        min_dist = max(spec.min_stop_distance(), abs(ask - bid) + spec.point)
+        # lado certo: compra → SL abaixo do bid e TP acima do ask; venda → SL acima do ask e TP abaixo do bid ('Invalid stops' 10016 se não)
+        if (buy and stop >= bid) or ((not buy) and stop <= ask):
+            rep = ExecutionReport(0.0, self.rnd(stop), self.rnd(tp) if tp else None, price)
+            rep.error = (f"SL do lado errado do preço — não enviado: {'compra' if buy else 'venda'} a {price} com SL {stop} "
+                         f"(bid {bid} / ask {ask}); plano inconsistente (entrada da zona ≠ preço de mercado?)")
+            return rep
+        if buy and abs(bid - stop) < min_dist:
+            stop = bid - min_dist
+        if (not buy) and abs(stop - ask) < min_dist:
+            stop = ask + min_dist
+        if tp is not None and ((buy and tp <= ask + min_dist) or ((not buy) and tp >= bid - min_dist)):
+            tp = None                                            # alvo do lado errado/perto demais: entra sem TP (o gestor de posição cuida)
         vol = spec.normalize_volume(plan.lots or 0.0)
         rep = ExecutionReport(vol, self.rnd(stop), self.rnd(tp) if tp else None, price)
         if not vol:
             rep.error = f"lote {plan.lots} abaixo do mínimo {spec.volume_min} / passo {spec.volume_step}"
             return rep
         if abs(stop - plan.stop) > 1e-12:
-            rep.mismatches.append(f"SL ajustado ao stops level ({spec.stops_level_points} pts): {plan.stop} → {rep.requested_sl}")
+            rep.mismatches.append(f"SL ajustado ao stops level/spread ({spec.stops_level_points} pts, spread {ask - bid:.{spec.digits}f}): {plan.stop} → {rep.requested_sl}")
+        plan_tp = plan.targets.get(plan.recommended) if plan.recommended in plan.targets else plan.targets.get("3R")
+        if plan_tp and tp is None:
+            rep.mismatches.append(f"TP {plan_tp} do lado errado/perto demais do preço — enviado sem TP")
         req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": self.client.cfg.symbol, "volume": vol,
                "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": price, "sl": rep.requested_sl, "tp": rep.requested_tp or 0.0,
                "deviation": self.deviation, "magic": MAGIC, "comment": comment[:31], "type_time": mt5.ORDER_TIME_GTC, "type_filling": self.filling()}
@@ -157,7 +171,8 @@ class ExecutionEngine:
             return rep
         rep.retcode, rep.order, rep.deal = getattr(res, "retcode", None), getattr(res, "order", None), getattr(res, "deal", None)
         if rep.retcode != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
-            rep.error = f"broker recusou: {getattr(res, 'comment', '')}"
+            rep.error = (f"broker recusou: {getattr(res, 'comment', '')} (retcode {rep.retcode}) · pedido: {'BUY' if buy else 'SELL'} {vol} @ {price} "
+                         f"SL {rep.requested_sl} TP {rep.requested_tp or 0.0} · bid {bid} ask {ask} · stops level {spec.stops_level_points} pts · digits {spec.digits}")
             return rep
         return self.confirm(rep, plan)
 

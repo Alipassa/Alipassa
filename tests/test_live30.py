@@ -399,3 +399,36 @@ class RestoreBaselineTests(unittest.TestCase):
         self.assertEqual(perf.daily_pnl, 120.0)
         self.assertFalse(perf.target_reached)
         mem.close()
+
+
+class StopSideValidationTests(unittest.TestCase):
+    """'Invalid stops' (10016) nunca deve chegar ao broker: lado errado é barrado antes; TP do lado errado sai sem TP."""
+
+    def test_sell_with_stop_below_price_is_refused_before_sending(self):
+        from gold_ai.models import Direction
+        from gold_ai.trading import TradePlan
+        b = BrokerSim(bid=1.14784, ask=1.14790)
+        ex = ExecutionEngine(MT5Client(MT5Config(symbol="EURUSD"), mt5=b))
+        p = TradePlan(Direction.BAIXA, 1.14784, 1.14608, 0.00176, NOW, targets={"3R": 1.14256}, recommended="3R", lots=0.1, risk_usd=17.6)
+        rep = ex.open(p)
+        self.assertFalse(rep.ok)
+        self.assertIn("SL do lado errado", rep.error)
+        self.assertEqual(b.sent, [])                                    # nada enviado
+
+    def test_sell_with_target_above_price_is_sent_without_tp(self):
+        from gold_ai.models import Direction
+        from gold_ai.trading import TradePlan
+        b = BrokerSim(bid=1.14784, ask=1.14790)
+        ex = ExecutionEngine(MT5Client(MT5Config(symbol="EURUSD"), mt5=b))
+        p = TradePlan(Direction.BAIXA, 1.14784, 1.15000, 0.00216, NOW, targets={"3R": 1.15000}, recommended="3R", lots=0.1, risk_usd=21.6)
+        rep = ex.open(p)
+        self.assertEqual(b.sent[-1]["tp"], 0.0)
+        self.assertGreater(b.sent[-1]["sl"], 1.14790)
+        self.assertTrue(any("sem TP" in m for m in rep.mismatches))
+
+    def test_rejection_message_carries_the_request(self):
+        b = BrokerSim(reject=True)
+        ex = ExecutionEngine(MT5Client(MT5Config(), mt5=b))
+        rep = ex.open(plan_long())
+        self.assertIn("pedido: BUY", rep.error)
+        self.assertIn("stops level", rep.error)
