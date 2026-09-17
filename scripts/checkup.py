@@ -4,7 +4,7 @@ Uso (na pasta do robô, com o MT5 aberto e o .env configurado):
     python scripts\\checkup.py
     python scripts\\checkup.py --start 2026-01-01 --markets XAUUSD,US500,EURUSD,USDJPY,WTI
 
-Roda, em sequência, as provas que já existem no market_ai_engine_v5.py e junta tudo em um único arquivo
+Roda, em sequência, as provas que já existem no market_ai_engine_v6.py e junta tudo em um único arquivo
 checkup_<data>.txt. Cada etapa é independente: se uma falhar, as outras continuam e a falha fica registrada.
 
 Etapas:
@@ -24,7 +24,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-ENGINE = "market_ai_engine_v5.py"
+ENGINE = "market_ai_engine_v6.py"
 REPORT = ""
 
 

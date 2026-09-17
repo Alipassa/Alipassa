@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================================
 REM  MARKET AI ENGINE - pipeline completa sem acompanhamento (Windows)
-REM  Coloque este arquivo na MESMA pasta de market_ai_engine_v5.py e do .env.
+REM  Coloque este arquivo na MESMA pasta de market_ai_engine_v6.py e do .env.
 REM  Requisitos: MT5 aberto e logado (para as exportacoes MT5); internet.
 REM  A saida aparece NESTA JANELA e tambem em logs\pipeline_*.log ; resultados: prova.txt, teste_ab.txt, estimativa_news.txt
 REM ============================================================================
@@ -14,7 +14,7 @@ set "PYTHONUNBUFFERED=1"
 if not exist logs mkdir logs
 set "PY=python"
 REM  saida NA TELA e no log ao mesmo tempo (--log-file)
-set "ENGINE=market_ai_engine_v5.py"
+set "ENGINE=market_ai_engine_v6.py"
 set "MERCADOS=XAUUSD,US500,EURUSD,USDJPY,WTI"
 set "INICIO=2026-01-01"
 set "FIM=2026-09-13"

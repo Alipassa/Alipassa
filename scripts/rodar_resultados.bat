@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================================
 REM  MARKET AI ENGINE - SO OS RELATORIOS, com o que ja esta baixado (pula ALFRED/GDELT/MT5/Dukascopy)
-REM  Coloque este arquivo na MESMA pasta de market_ai_engine_v5.py e do .env.
+REM  Coloque este arquivo na MESMA pasta de market_ai_engine_v6.py e do .env.
 REM  Use quando a pipeline completa nao chegou ao fim: gera escada, prova, exit lab, edge bank, flow learn, portfolio sim, autotune e doctor.
 REM  A saida aparece NESTA JANELA e tambem em logs\pipeline_*.log ; resultados: prova.txt, teste_ab.txt, estimativa_news.txt
 REM ============================================================================
@@ -14,7 +14,7 @@ set "PYTHONUNBUFFERED=1"
 if not exist logs mkdir logs
 set "PY=python"
 REM  saida NA TELA e no log ao mesmo tempo (--log-file)
-set "ENGINE=market_ai_engine_v5.py"
+set "ENGINE=market_ai_engine_v6.py"
 set "MERCADOS=XAUUSD,US500,EURUSD,USDJPY,WTI"
 set "INICIO=2026-01-01"
 set "FIM=2026-09-13"

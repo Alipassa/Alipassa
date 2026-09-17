@@ -7,7 +7,7 @@ import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUNDLE = os.path.join(ROOT, "market_ai_engine_v5.py")
+BUNDLE = os.path.join(ROOT, "market_ai_engine_v6.py")
 
 
 def _targets(node, acc):

@@ -1288,6 +1288,61 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_propagation(args: argparse.Namespace) -> int:
+    """LEADER PROPAGATION: impulso no líder (≥ z σ em 5 min) → o que os outros fizeram depois; aprende na 1ª metade, testa na 2ª;
+    líder → 1…4 atrasados (testes B…E). Lê dados/<SYM>_m1.csv. Mede; não altera o live."""
+    from .markets import get_market
+    from .propagation import FALLBACK_SPREAD, MinuteSeries, run_propagation
+
+    csv_dir = args.csv_dir or "dados"
+    markets = [s.strip().upper() for s in args.markets.split(",") if s.strip()]
+    extra = [s.strip().upper() for s in (args.extra or "").split(",") if s.strip()]
+    leaders = [s.strip().upper() for s in (args.leaders or "").split(",") if s.strip()] or markets + extra
+    series: dict = {}
+    for sym in dict.fromkeys(markets + extra + leaders):
+        path = os.path.join(csv_dir, f"{sym}_m1.csv")
+        if not os.path.exists(path):
+            print(f"{sym}: sem {path} — rode a etapa 4 (history prices --tf M1) ou o Dukascopy M1")
+            continue
+        cs = _read_candles_csv(path)
+        series[sym] = MinuteSeries(sym, cs)
+        print(f"{sym}: {len(cs):,} candles M1 ({cs[0].time:%d/%m/%Y} → {cs[-1].time:%d/%m/%Y})", flush=True)
+    leaders = [s for s in leaders if s in series]
+    targets = [s for s in markets if s in series]
+    if not leaders or len(targets) < 1:
+        print("sem séries M1 suficientes")
+        return 1
+    spreads = {}
+    for sym in series:
+        try:
+            spreads[sym] = float(get_market(sym).typical_spread or 0.0)
+        except Exception:  # noqa: BLE001
+            spreads[sym] = FALLBACK_SPREAD.get(sym, 0.0)
+    news_minutes: list[int] = []
+    if args.events and os.path.exists(args.events):
+        from .history import load_history
+        hist = load_history(args.events)
+        news_minutes = [int(e.published_at.timestamp() // 60) for e in hist.events if e.revised is None and e.category in ("MACRO", "CENTRAL_BANK")]
+        print(f"banco de eventos: {len(news_minutes)} releases macro/BC com hora exata (contexto com/sem notícia)")
+    split = datetime.fromisoformat(args.split).replace(tzinfo=timezone.utc) if args.split else None
+    print(f"detectando impulsos ≥ {args.z:g}σ (5 min, um por {args.cooldown} min) em {', '.join(leaders)} → alvos {', '.join(targets)} …", flush=True)
+    rep = run_propagation(series, leaders, targets, spreads, news_minutes, z_min=args.z, cooldown_min=args.cooldown, horizon=args.horizon,
+                          risk_pct=args.risk, split_at=split, log=lambda m: print(m, flush=True))
+    txt = rep.render()
+    print()
+    print(txt)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(txt + "\n")
+        print(f"\nrelatório salvo em {args.out}")
+    if args.json:
+        os.makedirs(os.path.dirname(args.json) or ".", exist_ok=True)
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(rep.to_json(), f, ensure_ascii=False, indent=1)
+        print(f"mapa líder→alvo salvo em {args.json}")
+    return 0
+
+
 def cmd_false_signals(args: argparse.Namespace) -> int:
     """FALSE SIGNAL FILTER: onde o robô erra fora da amostra (mercado, sessão, regime, evento, direção) → dados/falsos_sinais.json (o live veta só com n ≥ 20)."""
     from .false_signal import build_report
@@ -1700,7 +1755,7 @@ def _contamination_warning(mem: PredictionMemory) -> str:
         by[r["ativo"]] = by.get(r["ativo"], 0) + 1
     det = ", ".join(f"{k} {v}" for k, v in sorted(by.items()))
     return (f"⚠️ MEMÓRIA CONTAMINADA: {len(p)} previsão(ões) resolvida(s) com preço de outro mercado ({det}) e {len(t)} operação(ões) "
-            f"'estopadas' no 1º candle — as taxas de acerto abaixo NÃO valem. Rode: python market_ai_engine_v5.py repair --csv-dir dados")
+            f"'estopadas' no 1º candle — as taxas de acerto abaixo NÃO valem. Rode: python market_ai_engine_v6.py repair --csv-dir dados")
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
@@ -1737,7 +1792,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
     if candles_by:
         print(f"re-resolvidas com o M1 certo: {rep['re_resolvidas']} · operações re-simuladas: {rep['re_simuladas']}")
     print(f"pendentes agora: {len(mem.pending())}")
-    print("depois: python market_ai_engine_v5.py calibrate  (refaz o calibrador com os resultados certos)")
+    print("depois: python market_ai_engine_v6.py calibrate  (refaz o calibrador com os resultados certos)")
     mem.close()
     return 0
 
@@ -1979,6 +2034,21 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--skip", default="", help="diagnose: etapas a pular — direction, matrix, reality")
         xp.add_argument("--factors", default=None, help="diagnose: só estes fatores na matriz (ex.: dolar,juros_reais)")
         xp.set_defaults(func=fn)
+
+    pg = sub.add_parser("propagation", help="LEADER PROPAGATION 5.x: impulso no líder → atrasados; aprende na 1ª metade, testa na 2ª; líder → 1…4 atrasados (B…E)")
+    pg.add_argument("--csv-dir", default="dados", help="pasta com <SYM>_m1.csv")
+    pg.add_argument("--markets", default="XAUUSD,US500,EURUSD,USDJPY,WTI", help="alvos (e líderes, se --leaders não for dado)")
+    pg.add_argument("--extra", default="USDX", help="séries só como líder (ex.: USDX)")
+    pg.add_argument("--leaders", default=None, help="líderes (padrão: mercados + extra)")
+    pg.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
+    pg.add_argument("--z", type=float, default=4.0, help="impulso = retorno de 5 min ≥ z × σ(1 min) × √5")
+    pg.add_argument("--cooldown", type=int, default=60, help="minutos entre impulsos do mesmo líder")
+    pg.add_argument("--horizon", type=int, default=60, help="minutos de acompanhamento/saída do FOLLOW")
+    pg.add_argument("--risk", type=float, default=1.0, help="%% de risco por operação na curva de capital do teste")
+    pg.add_argument("--split", default=None, help="data que separa treino/teste (padrão: meio do período)")
+    pg.add_argument("--out", default="propagacao.txt")
+    pg.add_argument("--json", default=os.path.join("dados", "propagacao.json"))
+    pg.set_defaults(func=cmd_propagation)
 
     at = sub.add_parser("autotune", help="AUTOTUNE 5.2: piso × confirmações × limiar de sinal escolhidos no passado (walk-forward) → dados/parametros.json")
     at.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"))
