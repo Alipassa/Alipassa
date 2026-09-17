@@ -16,7 +16,7 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 from .config import EngineConfig
 from .engine import GoldAIEngine
@@ -535,7 +535,7 @@ def _objective(m: Metrics) -> float:
 
 
 def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = None, mode: str = "rolling",
-                 train_folds: int = 2) -> WalkForwardResult:
+                 train_folds: int = 2, log: Optional[Callable[[str], None]] = None) -> WalkForwardResult:
     """Treina → testa → avança a janela → treina de novo → testa.
 
     mode="rolling": janela de treino de tamanho fixo (`train_folds` folds) que avança;
@@ -546,19 +546,26 @@ def walk_forward(bt: Backtester, n_folds: int = 4, grid: Optional[list[dict]] = 
     usable = n - bt.warmup
     fold_len = usable // (n_folds + train_folds)
     folds: list[tuple[EngineConfig, BacktestResult]] = []
+    import time as _time
+    t_start = _time.time()
+    sym = getattr(bt.frame, "symbol", "")
     for k in range(n_folds):
         train_end = bt.warmup + (train_folds + k) * fold_len
         train_start = bt.warmup if mode == "anchored" else train_end - train_folds * fold_len
         test_end = min(n, train_end + fold_len)
         best_cfg, best_obj = None, -1.0
-        for params in grid:
+        for j, params in enumerate(grid):
             cfg = EngineConfig(**{**bt.cfg.__dict__, **params, "weights": dict(bt.cfg.weights)})
             r = bt.run(train_start, train_end, cfg)
             obj = _objective(r.metrics)
             if obj > best_obj:
                 best_cfg, best_obj = cfg, obj
+            if log:
+                log(f"  [{_time.time() - t_start:5.0f}s] {sym} bloco {k + 1}/{n_folds} · treino {j + 1}/{len(grid)} ({r.metrics.n_signals} sinais)")
         assert best_cfg is not None
         folds.append((best_cfg, bt.run(train_end, test_end, best_cfg)))
+        if log:
+            log(f"  [{_time.time() - t_start:5.0f}s] {sym} bloco {k + 1}/{n_folds} · teste: {len(folds[-1][1].trade_rows)} operações OOS")
     # agrega OOS
     all_sigs = [s for _, r in folds for s in r.signals]
     path = [(c.time, c.close) for c in bt.frame.xau[bt.warmup + train_folds * fold_len:]]

@@ -6,3 +6,4 @@ __pycache__/
 *.db
 *.sqlite
 .env
+dados/cache_oos/

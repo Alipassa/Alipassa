@@ -1087,11 +1087,39 @@ def _oos_results_for_markets(args: argparse.Namespace) -> dict:
         args.events = None
     frames = {k: v for k, v in _frames_for_markets(args, args.markets).items() if len(v.xau) > 260}
     out = {}
+    import hashlib
+    import pickle
+    import time as _time
+    cache_dir = os.path.join("dados", "cache_oos")
+    ev_path = getattr(args, "events", None)
+    ev_stamp = f"{os.path.getsize(ev_path)}:{int(os.path.getmtime(ev_path))}" if ev_path and os.path.exists(ev_path) else "sem-eventos"
     for sym, frame in frames.items():
         cfg = _apply_experiment(EngineConfig(factor_signs=dict(get_market(sym).factor_signs), symbol=sym), args)
+        # CACHE: o mesmo walk-forward serve exit-lab, edge-bank, portfolio-sim, false-signals e matrix — calcula uma vez por (dados, config)
+        key_src = f"{sym}|{len(frame.xau)}|{frame.xau[0].time.isoformat()}|{frame.xau[-1].time.isoformat()}|{args.folds}|{args.step}|{args.horizon}|" \
+                  f"{getattr(args, 'news_mode', 'full')}|{ev_stamp}|{sorted((k, v) for k, v in cfg.__dict__.items() if not isinstance(v, dict))}"
+        key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+        cpath = os.path.join(cache_dir, f"{sym}_{key}.pkl")
+        if os.path.exists(cpath) and not getattr(args, "no_cache", False):
+            try:
+                with open(cpath, "rb") as f:
+                    out[sym] = pickle.load(f)
+                print(f"{sym}: walk-forward reaproveitado do cache ({cpath}) — {sum(len(r.trade_rows) for r in out[sym])} operações OOS")
+                continue
+            except Exception:  # noqa: BLE001 — cache corrompido: recalcula
+                pass
+        t0 = _time.time()
+        print(f"{sym}: walk-forward {args.folds} blocos × 6 combinações no treino — imprime o progresso; a próxima vez vem do cache", flush=True)
         bt = Backtester(frame, cfg, step=args.step, horizon_min=args.horizon)
-        wf = walk_forward(bt, n_folds=args.folds)
+        wf = walk_forward(bt, n_folds=args.folds, log=lambda m: print(m, flush=True))
         out[sym] = [res for _, res in wf.folds]
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cpath, "wb") as f:
+                pickle.dump(out[sym], f)
+        except Exception as e:  # noqa: BLE001
+            print(f"  (cache não gravado: {e})")
+        print(f"{sym}: walk-forward concluído em {_time.time() - t0:.0f}s · {sum(len(r.trade_rows) for r in out[sym])} operações OOS", flush=True)
     return out
 
 
@@ -1775,6 +1803,7 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--min-confirmations", type=int, default=None)
         xp.add_argument("--out", default=(os.path.join("dados", "edge_bank.json") if name == "edge-bank" else os.path.join("dados", "falsos_sinais.json") if name == "false-signals" else None))
         xp.add_argument("--txt", default=None, help="false-signals: salva o quadro em texto (ex.: falsos_sinais.txt)")
+        xp.add_argument("--no-cache", action="store_true", help="recalcula o walk-forward mesmo com cache em dados/cache_oos")
         xp.add_argument("--equity", type=float, default=10000.0)
         xp.add_argument("--risk", type=float, default=None, help="portfolio-sim: risco %% por operação (padrão RISK_PER_TRADE do .env)")
         xp.add_argument("--cost", type=float, default=0.05, help="portfolio-sim: custo por operação em R (spread+slippage), descontado do resultado")
