@@ -66,7 +66,7 @@ class MatrixTests(unittest.TestCase):
         self.assertIn("winner", d)
 
     def test_winner_chosen_on_first_half_only_and_small_sample_is_inconclusive(self):
-        from gold_ai.matrix import MIN_N, build_matrix
+        from gold_ai.matrix import MATRIX_MIN_N as MIN_N, build_matrix
         from gold_ai.selector import PortfolioLimits
         lim = PortfolioLimits(max_total_open_risk_pct=12.0, max_correlated_risk_pct=6.0, max_positions=4)
         big = build_matrix({"XAUUSD": _FakeBT("XAUUSD", n_bars=1200)}, lim, 10000.0, 3.0, 0.05, (1, 2), (1,), "adaptive")

@@ -105,10 +105,19 @@ def duplicated_definitions(path: str) -> list:
     tree = ast.parse(open(path, encoding="utf-8").read())
     seen, dup = {}, []
     for n in tree.body:
+        names = []
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if n.name in seen:
-                dup.append((n.name, seen[n.name], n.lineno))
-            seen[n.name] = n.lineno
+            names = [n.name]
+        elif isinstance(n, ast.Assign) and not isinstance(n.value, ast.Name):   # CONSTANTES também (HORIZONS de um módulo sobrescreveu o do motor:
+            names = [t.id for t in n.targets if isinstance(t, ast.Name)]        # live caiu); `_atr = atr` é alias que o bundler injeta, igual em todos
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            names = [n.target.id]
+        for name in names:
+            if name.startswith("_") and name.endswith("_"):     # __version__, __build__, __all__
+                continue
+            if name in seen:
+                dup.append((name, seen[name], n.lineno))
+            seen[name] = n.lineno
     return dup
 
 

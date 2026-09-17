@@ -18,7 +18,7 @@ def _row(t, r, sym="US500", regime="RANGE", kind="", score=55.0, conf=60.0):
 
 class FalseSignalTests(unittest.TestCase):
     def test_recurrent_losing_context_is_flagged_and_vetoed_only_with_sample(self):
-        from gold_ai.false_signal import MIN_N, build_report, live_veto
+        from gold_ai.false_signal import FS_MIN_N as MIN_N, build_report, live_veto
         rows = {"US500": [_row(T0 + timedelta(days=i), -1.0 if i % 4 else 0.5) for i in range(24)],      # 24 casos em RANGE/NY: 25% acerto
                 "XAUUSD": [_row(T0 + timedelta(days=i), 0.9, sym="XAUUSD", regime="BULLISH") for i in range(8)]}   # 8 casos: amostra
         rep = build_report(rows, "adaptive", start="2026-01-01", end="2026-09-01")

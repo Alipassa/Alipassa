@@ -1292,7 +1292,7 @@ def cmd_propagation(args: argparse.Namespace) -> int:
     """LEADER PROPAGATION: impulso no líder (≥ z σ em 5 min) → o que os outros fizeram depois; aprende na 1ª metade, testa na 2ª;
     líder → 1…4 atrasados (testes B…E). Lê dados/<SYM>_m1.csv. Mede; não altera o live."""
     from .markets import get_market
-    from .propagation import FALLBACK_SPREAD, MinuteSeries, run_propagation
+    from .propagation import PROP_FALLBACK_SPREAD, MinuteSeries, run_propagation
 
     csv_dir = args.csv_dir or "dados"
     markets = [s.strip().upper() for s in args.markets.split(",") if s.strip()]
@@ -1317,7 +1317,7 @@ def cmd_propagation(args: argparse.Namespace) -> int:
         try:
             spreads[sym] = float(get_market(sym).typical_spread or 0.0)
         except Exception:  # noqa: BLE001
-            spreads[sym] = FALLBACK_SPREAD.get(sym, 0.0)
+            spreads[sym] = PROP_FALLBACK_SPREAD.get(sym, 0.0)
     news_minutes: list[int] = []
     if args.events and os.path.exists(args.events):
         from .history import load_history

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
 
-LEVEL_RANK = {"NONE": 0, "WATCH": 1, "SETUP": 2, "OPPORTUNITY": 3, "EXECUTION": 4}
+DAY_LEVEL_RANK = {"NONE": 0, "WATCH": 1, "SETUP": 2, "OPPORTUNITY": 3, "EXECUTION": 4}
 
 
 @dataclass
@@ -109,7 +109,7 @@ def day_report(mem, day: datetime, symbols: Sequence[str]) -> DayReport:
             m.analyses += 1
             level = str(getattr(d, "level", "") or "").upper()
             stage = str(getattr(d, "stage", "") or "").upper()
-            rank = LEVEL_RANK.get(level, 0)
+            rank = DAY_LEVEL_RANK.get(level, 0)
             # sem 'level' persistido, inferir pelo que foi gravado: entrada = EXECUTION; etapa NONE/None com |score| alto = pelo menos SETUP
             if d.action == "ENTRADA":
                 rank = 4

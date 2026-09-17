@@ -122,7 +122,7 @@ def _volume_ratio(s: MarketSnapshot) -> Optional[float]:
 # --------------------------------------------------------------------------- 5.2: cada anomalia é registrada e MEDIDA (o histórico decide o parâmetro)
 HORIZONS_MIN = (5, 15, 30, 60)
 CONTINUE_ATR = 0.3          # aos 60 min: ≥ +0,3 ATR além do preço de detecção = CONTINUOU · ≤ −0,3 = REVERTEU · senão INDEFINIDO
-CONFIRM_ATR = 0.5           # tempo até confirmação: 1º fechamento ≥ +0,5 ATR a favor
+FLOW_CONFIRM_ATR = 0.5           # tempo até confirmação: 1º fechamento ≥ +0,5 ATR a favor
 MIN_STAT = 5                # mostra a estatística histórica no relógio a partir de 5 casos (informação); edge só com tiers do ciclo de vida
 
 
@@ -143,7 +143,7 @@ def measure_flow_outcome(direction: float, price0: float, atr: float, candles: S
             mfe, mae = max(mfe, fav / atr), max(mae, adv / atr)
             if h == max(horizons):
                 last_close = (c.close - price0) * sign / atr
-                if confirm is None and last_close >= CONFIRM_ATR:
+                if confirm is None and last_close >= FLOW_CONFIRM_ATR:
                     confirm = (c.time - t0).total_seconds() / 60.0
         out[f"mfe{h}"], out[f"mae{h}"] = round(mfe, 3), round(mae, 3)
     if last_close is None:
@@ -254,7 +254,7 @@ def render_flow_stats(rows: Sequence[dict]) -> str:
     if not stats:
         lines.append("  (nenhuma anomalia medida ainda — o live registra cada FLOW ≥ 70 e mede 60 min depois)")
     lines += [g.row() for g in stats]
-    lines.append(f"  leitura: continuação ≥ 60% com n ≥ 20 e MFE60 mediano ≥ {CONFIRM_ATR} ATR = candidato a edge (tiers do ciclo de vida); abaixo disso é observação.")
+    lines.append(f"  leitura: continuação ≥ 60% com n ≥ 20 e MFE60 mediano ≥ {FLOW_CONFIRM_ATR} ATR = candidato a edge (tiers do ciclo de vida); abaixo disso é observação.")
     bd = render_flow_breakdown(rows)
     if bd:
         lines += ["", bd]

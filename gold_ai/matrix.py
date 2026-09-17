@@ -7,7 +7,7 @@ Métricas por célula: operações, acerto, R bruto e líquido, expectancy, lucr
 sequência de perdas, duração média, resultado por ativo, por tipo de evento e nas duas metades do período.
 
 Dentro × fora da amostra, sem truque: a célula "vencedora" é escolhida SÓ na 1ª metade do período (retorno − drawdown,
-n ≥ MIN_N); o que ela rendeu na 2ª metade é o número que conta. A regra permanece: o histórico decide o parâmetro; e o
+n ≥ MATRIX_MIN_N); o que ela rendeu na 2ª metade é o número que conta. A regra permanece: o histórico decide o parâmetro; e o
 live só adota o que passar pelo autotune/ciclo de vida com amostra — a matriz é o mapa, não o gatilho."""
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .selector import PortfolioLimits
 
 CONFIRMATIONS = (1, 2, 3, 4, 5)
 POSITIONS = (1, 2, 3, 4)
-MIN_N = 20
+MATRIX_MIN_N = 20
 
 
 @dataclass
@@ -44,7 +44,7 @@ class Cell:
     def score(self, equity: float, which: str = "first") -> Optional[float]:
         """Retorno − drawdown na metade indicada; None se a amostra é pequena demais para escolher."""
         r = getattr(self, which)
-        if r.admitted < MIN_N:
+        if r.admitted < MATRIX_MIN_N:
             return None
         return self.ret_pct(equity, which) - r.max_dd_pct
 
@@ -112,7 +112,7 @@ class MatrixReport:
             if x is None:
                 continue
             a, b = x.first, x.second
-            if a.admitted < MIN_N // 2 or b.admitted < MIN_N // 2:
+            if a.admitted < MATRIX_MIN_N // 2 or b.admitted < MATRIX_MIN_N // 2:
                 read = "amostra pequena"
             elif a.expectancy > 0 and b.expectancy > 0:
                 read = "🟢 estável"
@@ -161,9 +161,9 @@ class MatrixReport:
         # ---- veredito
         w = self.winner()
         dflt = self.cell(self.default_confirmations, min(self.positions))
-        L.append("VEREDITO (escolhido SÓ na 1ª metade por retorno − drawdown com n ≥ %d; conferido na 2ª metade):" % MIN_N)
+        L.append("VEREDITO (escolhido SÓ na 1ª metade por retorno − drawdown com n ≥ %d; conferido na 2ª metade):" % MATRIX_MIN_N)
         if w is None:
-            L.append(f"  ⚪ nenhuma célula chegou a {MIN_N} operações na 1ª metade — a matriz ainda não tem amostra para escolher. "
+            L.append(f"  ⚪ nenhuma célula chegou a {MATRIX_MIN_N} operações na 1ª metade — a matriz ainda não tem amostra para escolher. "
                      "Mantém-se o padrão do autotune/ciclo de vida; a frequência tem de vir da camada de reação (tick/M1), não de afrouxar o funil.")
         else:
             s2 = w.second
@@ -174,8 +174,8 @@ class MatrixReport:
             if dflt is not None:
                 L.append(f"  padrão ({self.default_confirmations} conf + 1 posição) na 2ª metade: ret {dflt.ret_pct(eq, 'second'):+.1f}% "
                          f"DD {dflt.second.max_dd_pct:.1f}% n={dflt.second.admitted} E={dflt.second.expectancy:+.2f}R")
-            if s2.admitted < MIN_N:
-                L.append(f"  ⚪ INCONCLUSIVO: {s2.admitted} operações fora da amostra (< {MIN_N}). Não muda nada no live.")
+            if s2.admitted < MATRIX_MIN_N:
+                L.append(f"  ⚪ INCONCLUSIVO: {s2.admitted} operações fora da amostra (< {MATRIX_MIN_N}). Não muda nada no live.")
             elif s2.expectancy > 0 and (dflt is None or w.ret_pct(eq, "second") - s2.max_dd_pct >= dflt.ret_pct(eq, "second") - dflt.second.max_dd_pct):
                 L.append(f"  🟢 SOBREVIVEU fora da amostra e supera o padrão. Candidato a: MIN_CONFIRMATIONS={w.confirmations} · MAX_ENTRIES_PER_CYCLE={w.positions}. "
                          "Ainda assim: entra em SOMBRA no autotune e sobe pelo ciclo de vida (20/30/50), nunca por este quadro sozinho.")
@@ -196,7 +196,7 @@ class MatrixReport:
                     "by_symbol": {k: [v[0], round(v[1], 3)] for k, v in r.by_symbol.items()}, "by_kind": {k: [v[0], round(v[1], 3)] for k, v in r.by_kind.items()}}
         w = self.winner()
         return {"generated": datetime.now(timezone.utc).isoformat(), "start": self.start, "end": self.end, "equity": self.equity, "risk_pct": self.risk_pct,
-                "cost_r": self.cost_r, "min_n": MIN_N, "split_time": self.split_time.isoformat() if self.split_time else None,
+                "cost_r": self.cost_r, "min_n": MATRIX_MIN_N, "split_time": self.split_time.isoformat() if self.split_time else None,
                 "winner": None if w is None else {"confirmations": w.confirmations, "positions": w.positions},
                 "cells": [{"confirmations": x.confirmations, "positions": x.positions, "n_candidates": x.n_candidates,
                            "full": pr(x.full), "first": pr(x.first), "second": pr(x.second)} for x in self.cells]}

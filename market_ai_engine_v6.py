@@ -87,7 +87,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "6.0.0"
-__build__ = "2026-09-17 18:31 UTC · f5c1d55"
+__build__ = "2026-09-17 18:43 UTC · 88d3eef"
 
 
 # ============================================================================
@@ -3355,13 +3355,13 @@ def render_dashboard(a: Assessment, expected_lead_min: Optional[float] = None) -
 
 
 
-TF_MINUTES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440, "W1": 10080}
+SAMPLE_TF_MINUTES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440, "W1": 10080}
 
 
 def make_candles(tf: str, n: int, start_price: float, drift: float, vol: float, end: datetime, seed: int = 7, volume_trend: float = 0.0) -> list[Candle]:
     """Série de candles com deriva (`drift` por candle, em USD) e volatilidade `vol` (USD)."""
     rnd = random.Random(seed + sum(ord(ch) * (i + 1) for i, ch in enumerate(tf)))  # determinístico entre processos
-    step = timedelta(minutes=TF_MINUTES[tf])
+    step = timedelta(minutes=SAMPLE_TF_MINUTES[tf])
     price = start_price
     out: list[Candle] = []
     for i in range(n):
@@ -3378,7 +3378,7 @@ def make_candles(tf: str, n: int, start_price: float, drift: float, vol: float, 
 
 def _candles_all(price: float, end: datetime, drift_per_hour: float, vol: float, seed: int, volume_trend: float = 0.0) -> dict[str, list[Candle]]:
     out: dict[str, list[Candle]] = {}
-    for tf, mins in TF_MINUTES.items():
+    for tf, mins in SAMPLE_TF_MINUTES.items():
         n = 260 if mins <= 240 else 120
         drift = drift_per_hour * mins / 60
         v = vol * (mins / 60) ** 0.5
@@ -7430,7 +7430,7 @@ def _volume_ratio(s: MarketSnapshot) -> Optional[float]:
 # --------------------------------------------------------------------------- 5.2: cada anomalia é registrada e MEDIDA (o histórico decide o parâmetro)
 HORIZONS_MIN = (5, 15, 30, 60)
 CONTINUE_ATR = 0.3          # aos 60 min: ≥ +0,3 ATR além do preço de detecção = CONTINUOU · ≤ −0,3 = REVERTEU · senão INDEFINIDO
-CONFIRM_ATR = 0.5           # tempo até confirmação: 1º fechamento ≥ +0,5 ATR a favor
+FLOW_CONFIRM_ATR = 0.5           # tempo até confirmação: 1º fechamento ≥ +0,5 ATR a favor
 MIN_STAT = 5                # mostra a estatística histórica no relógio a partir de 5 casos (informação); edge só com tiers do ciclo de vida
 
 
@@ -7451,7 +7451,7 @@ def measure_flow_outcome(direction: float, price0: float, atr: float, candles: S
             mfe, mae = max(mfe, fav / atr), max(mae, adv / atr)
             if h == max(horizons):
                 last_close = (c.close - price0) * sign / atr
-                if confirm is None and last_close >= CONFIRM_ATR:
+                if confirm is None and last_close >= FLOW_CONFIRM_ATR:
                     confirm = (c.time - t0).total_seconds() / 60.0
         out[f"mfe{h}"], out[f"mae{h}"] = round(mfe, 3), round(mae, 3)
     if last_close is None:
@@ -7562,7 +7562,7 @@ def render_flow_stats(rows: Sequence[dict]) -> str:
     if not stats:
         lines.append("  (nenhuma anomalia medida ainda — o live registra cada FLOW ≥ 70 e mede 60 min depois)")
     lines += [g.row() for g in stats]
-    lines.append(f"  leitura: continuação ≥ 60% com n ≥ 20 e MFE60 mediano ≥ {CONFIRM_ATR} ATR = candidato a edge (tiers do ciclo de vida); abaixo disso é observação.")
+    lines.append(f"  leitura: continuação ≥ 60% com n ≥ 20 e MFE60 mediano ≥ {FLOW_CONFIRM_ATR} ATR = candidato a edge (tiers do ciclo de vida); abaixo disso é observação.")
     bd = render_flow_breakdown(rows)
     if bd:
         lines += ["", bd]
@@ -12634,14 +12634,14 @@ Métricas por célula: operações, acerto, R bruto e líquido, expectancy, lucr
 sequência de perdas, duração média, resultado por ativo, por tipo de evento e nas duas metades do período.
 
 Dentro × fora da amostra, sem truque: a célula "vencedora" é escolhida SÓ na 1ª metade do período (retorno − drawdown,
-n ≥ MIN_N); o que ela rendeu na 2ª metade é o número que conta. A regra permanece: o histórico decide o parâmetro; e o
+n ≥ MATRIX_MIN_N); o que ela rendeu na 2ª metade é o número que conta. A regra permanece: o histórico decide o parâmetro; e o
 live só adota o que passar pelo autotune/ciclo de vida com amostra — a matriz é o mapa, não o gatilho."""
 
 
 
 CONFIRMATIONS = (1, 2, 3, 4, 5)
 POSITIONS = (1, 2, 3, 4)
-MIN_N = 20
+MATRIX_MIN_N = 20
 
 
 @dataclass
@@ -12660,7 +12660,7 @@ class Cell:
     def score(self, equity: float, which: str = "first") -> Optional[float]:
         """Retorno − drawdown na metade indicada; None se a amostra é pequena demais para escolher."""
         r = getattr(self, which)
-        if r.admitted < MIN_N:
+        if r.admitted < MATRIX_MIN_N:
             return None
         return self.ret_pct(equity, which) - r.max_dd_pct
 
@@ -12728,7 +12728,7 @@ class MatrixReport:
             if x is None:
                 continue
             a, b = x.first, x.second
-            if a.admitted < MIN_N // 2 or b.admitted < MIN_N // 2:
+            if a.admitted < MATRIX_MIN_N // 2 or b.admitted < MATRIX_MIN_N // 2:
                 read = "amostra pequena"
             elif a.expectancy > 0 and b.expectancy > 0:
                 read = "🟢 estável"
@@ -12777,9 +12777,9 @@ class MatrixReport:
         # ---- veredito
         w = self.winner()
         dflt = self.cell(self.default_confirmations, min(self.positions))
-        L.append("VEREDITO (escolhido SÓ na 1ª metade por retorno − drawdown com n ≥ %d; conferido na 2ª metade):" % MIN_N)
+        L.append("VEREDITO (escolhido SÓ na 1ª metade por retorno − drawdown com n ≥ %d; conferido na 2ª metade):" % MATRIX_MIN_N)
         if w is None:
-            L.append(f"  ⚪ nenhuma célula chegou a {MIN_N} operações na 1ª metade — a matriz ainda não tem amostra para escolher. "
+            L.append(f"  ⚪ nenhuma célula chegou a {MATRIX_MIN_N} operações na 1ª metade — a matriz ainda não tem amostra para escolher. "
                      "Mantém-se o padrão do autotune/ciclo de vida; a frequência tem de vir da camada de reação (tick/M1), não de afrouxar o funil.")
         else:
             s2 = w.second
@@ -12790,8 +12790,8 @@ class MatrixReport:
             if dflt is not None:
                 L.append(f"  padrão ({self.default_confirmations} conf + 1 posição) na 2ª metade: ret {dflt.ret_pct(eq, 'second'):+.1f}% "
                          f"DD {dflt.second.max_dd_pct:.1f}% n={dflt.second.admitted} E={dflt.second.expectancy:+.2f}R")
-            if s2.admitted < MIN_N:
-                L.append(f"  ⚪ INCONCLUSIVO: {s2.admitted} operações fora da amostra (< {MIN_N}). Não muda nada no live.")
+            if s2.admitted < MATRIX_MIN_N:
+                L.append(f"  ⚪ INCONCLUSIVO: {s2.admitted} operações fora da amostra (< {MATRIX_MIN_N}). Não muda nada no live.")
             elif s2.expectancy > 0 and (dflt is None or w.ret_pct(eq, "second") - s2.max_dd_pct >= dflt.ret_pct(eq, "second") - dflt.second.max_dd_pct):
                 L.append(f"  🟢 SOBREVIVEU fora da amostra e supera o padrão. Candidato a: MIN_CONFIRMATIONS={w.confirmations} · MAX_ENTRIES_PER_CYCLE={w.positions}. "
                          "Ainda assim: entra em SOMBRA no autotune e sobe pelo ciclo de vida (20/30/50), nunca por este quadro sozinho.")
@@ -12812,7 +12812,7 @@ class MatrixReport:
                     "by_symbol": {k: [v[0], round(v[1], 3)] for k, v in r.by_symbol.items()}, "by_kind": {k: [v[0], round(v[1], 3)] for k, v in r.by_kind.items()}}
         w = self.winner()
         return {"generated": datetime.now(timezone.utc).isoformat(), "start": self.start, "end": self.end, "equity": self.equity, "risk_pct": self.risk_pct,
-                "cost_r": self.cost_r, "min_n": MIN_N, "split_time": self.split_time.isoformat() if self.split_time else None,
+                "cost_r": self.cost_r, "min_n": MATRIX_MIN_N, "split_time": self.split_time.isoformat() if self.split_time else None,
                 "winner": None if w is None else {"confirmations": w.confirmations, "positions": w.positions},
                 "cells": [{"confirmations": x.confirmations, "positions": x.positions, "n_candidates": x.n_candidates,
                            "full": pr(x.full), "first": pr(x.first), "second": pr(x.second)} for x in self.cells]}
@@ -12874,7 +12874,7 @@ oportunidades não operadas (hipótese 3R / stop 1,2 ATR — proxy, não promess
 
 from collections import Counter
 
-LEVEL_RANK = {"NONE": 0, "WATCH": 1, "SETUP": 2, "OPPORTUNITY": 3, "EXECUTION": 4}
+DAY_LEVEL_RANK = {"NONE": 0, "WATCH": 1, "SETUP": 2, "OPPORTUNITY": 3, "EXECUTION": 4}
 
 
 @dataclass
@@ -12971,7 +12971,7 @@ def day_report(mem, day: datetime, symbols: Sequence[str]) -> DayReport:
             m.analyses += 1
             level = str(getattr(d, "level", "") or "").upper()
             stage = str(getattr(d, "stage", "") or "").upper()
-            rank = LEVEL_RANK.get(level, 0)
+            rank = DAY_LEVEL_RANK.get(level, 0)
             # sem 'level' persistido, inferir pelo que foi gravado: entrada = EXECUTION; etapa NONE/None com |score| alto = pelo menos SETUP
             if d.action == "ENTRADA":
                 rank = 4
@@ -13022,12 +13022,12 @@ def day_report(mem, day: datetime, symbols: Sequence[str]) -> DayReport:
 Entrada: as operações fora da amostra do walk-forward (mesmas linhas do Exit Lab / Edge Bank: R por saída, MFE, MAE, score,
 confiança, regime, tipo de evento, hora) e, quando existem, as operações vividas. Para cada contexto — mercado, sessão (UTC),
 regime, tipo de evento, direção, e mercado × sessão / mercado × regime — mede n, acerto, expectancy e compara vencedoras × perdedoras
-(MFE, MAE, |score|, confiança). Um contexto é FALSO SINAL RECORRENTE quando n ≥ MIN_N, expectancy ≤ 0 e acerto ≤ 45%: entra em
+(MFE, MAE, |score|, confiança). Um contexto é FALSO SINAL RECORRENTE quando n ≥ FS_MIN_N, expectancy ≤ 0 e acerto ≤ 45%: entra em
 `dados/falsos_sinais.json` e o live veta a entrada nesse contexto ("FALSO SINAL — mercado×sessão perdeu em N casos OOS").
 Regra: só o histórico com amostra veta; um dia ruim não vira regra."""
 
 
-MIN_N = 20
+FS_MIN_N = 20
 NEG_WIN = 0.45
 
 
@@ -13062,7 +13062,7 @@ class FalseSignalStat:
 
     @property
     def verdict(self) -> str:
-        if self.n < MIN_N:
+        if self.n < FS_MIN_N:
             return "⚪ amostra"
         if self.expectancy <= 0 and self.win_rate <= NEG_WIN:
             return "🔴 falso sinal recorrente"
@@ -13107,7 +13107,7 @@ class FalseSignalReport:
         if neg:
             L.append(f"  🔴 CONTEXTOS VETADOS NO LIVE ({len(neg)}): " + " · ".join(f"{s.dimension}={s.value} (n={s.n}, E={s.expectancy:+.2f}R, acerto {s.win_rate:.0%})" for s in neg))
         else:
-            L.append(f"  nenhum contexto com n ≥ {MIN_N}, expectancy ≤ 0 e acerto ≤ {NEG_WIN:.0%} — nada a vetar por enquanto (só amostra decide)")
+            L.append(f"  nenhum contexto com n ≥ {FS_MIN_N}, expectancy ≤ 0 e acerto ≤ {NEG_WIN:.0%} — nada a vetar por enquanto (só amostra decide)")
         # padrões que antecedem perdas: comparação global vencedoras × perdedoras
         allw = [x for s in self.stats if s.dimension == "mercado" for x in s.mae_w]
         alll = [x for s in self.stats if s.dimension == "mercado" for x in s.mae_l]
@@ -13124,7 +13124,7 @@ class FalseSignalReport:
         return "\n".join(L)
 
     def to_dict(self) -> dict:
-        return {"generated": datetime.now(timezone.utc).isoformat(), "start": self.start, "end": self.end, "min_n": MIN_N, "neg_win": NEG_WIN,
+        return {"generated": datetime.now(timezone.utc).isoformat(), "start": self.start, "end": self.end, "min_n": FS_MIN_N, "neg_win": NEG_WIN,
                 "negatives": [{"dimension": s.dimension, "value": s.value, "n": s.n, "expectancy": round(s.expectancy, 3), "win_rate": round(s.win_rate, 3)}
                               for s in self.negatives()],
                 "contexts": [{"dimension": s.dimension, "value": s.value, "n": s.n, "expectancy": round(s.expectancy, 3), "win_rate": round(s.win_rate, 3)}
@@ -13468,14 +13468,14 @@ Nada aqui altera o live. O mapa aprendido vai para dados/propagacao.json para um
 
 from bisect import bisect_right
 
-HORIZONS = (5, 15, 30, 60)
-SESSIONS = (("Ásia", 0, 7), ("Londres", 7, 13), ("NY", 13, 21), ("fecho", 21, 24))
-FALLBACK_SPREAD = {"USDX": 0.02, "DXY": 0.02}
+PROP_HORIZONS = (5, 15, 30, 60)
+PROP_SESSIONS = (("Ásia", 0, 7), ("Londres", 7, 13), ("NY", 13, 21), ("fecho", 21, 24))
+PROP_FALLBACK_SPREAD = {"USDX": 0.02, "DXY": 0.02}
 
 
 def session_name(t: datetime) -> str:
     h = t.astimezone(timezone.utc).hour
-    for name, a, b in SESSIONS:
+    for name, a, b in PROP_SESSIONS:
         if a <= h < b:
             return name
     return "fecho"
@@ -13587,10 +13587,10 @@ def measure_response(imp: Impulse, tgt: MinuteSeries, window: int = 5, horizon: 
     s = imp.direction
     own = s * (p0 - tgt.close[max(0, tgt.index_at(imp.minute - window))]) / sig
     fwd = {}
-    for h in HORIZONS:
+    for h in PROP_HORIZONS:
         c = tgt.close_at(imp.minute + h)
         fwd[h] = (s * (c - p0) / sig) if c is not None else None
-    if fwd[max(HORIZONS)] is None:
+    if fwd[max(PROP_HORIZONS)] is None:
         return None
     ttr, mfe, mae = None, 0.0, 0.0
     j = i0 + 1
@@ -13614,6 +13614,8 @@ class PairStat:
     context: str                      # "todas" | "com notícia" | "sem notícia"
     n: int = 0
     p_same_30: float = 0.5            # P(alvo na mesma direção do líder aos 30 min)
+    p_same_now: float = 0.5           # P(alvo JÁ na mesma direção nos mesmos 5 min do impulso) — propagação simultânea
+    own_now_med: float = 0.0          # quanto o alvo já tinha andado nesses 5 min (mediana, σ do alvo, sinal = direção do líder)
     sign: int = 1                     # +1 segue o líder · −1 vai contra (relação inversa aprendida)
     frac30: float = 0.0               # fração transmitida mediana aos 30 min (σ alvo ÷ σ líder), já com o sinal aprendido
     ttr_med: Optional[float] = None
@@ -13635,7 +13637,8 @@ class PairStat:
 
     def row(self) -> str:
         ttr = "—" if self.ttr_med is None else f"{self.ttr_med:.0f} ({self.ttr_p25:.0f}–{self.ttr_p75:.0f})"
-        return (f"{self.leader:<7}→ {self.target:<7} {self.context:<11} n={self.n:<4} mesma dir 30m {self.p_same_30:>4.0%}  "
+        return (f"{self.leader:<7}→ {self.target:<7} {self.context:<11} n={self.n:<4} no instante {self.p_same_now:>4.0%} ({self.own_now_med:+.1f}σ) · "
+                f"30m depois {self.p_same_30:>4.0%}  "
                 f"{'segue' if self.sign > 0 else 'CONTRA':<6} fração {self.frac30:+.2f}  reação {ttr:<14} MFE60 {self.mfe60:.2f}σ MAE60 {self.mae60:.2f}σ  "
                 f"FOLLOW treino E {self.e_train:+.2f}R win {self.win_train:.0%} (n={self.n_train_trades})  {'✅ edge' if self.is_edge else '·'}")
 
@@ -13655,6 +13658,8 @@ def learn_pair(resps: list[Response], leader: str, target: str, context: str) ->
         return st
     same = [1.0 if (r.fwd[30] or 0.0) > 0 else 0.0 for r in resps]
     st.p_same_30 = round(sum(same) / len(same), 3)
+    st.p_same_now = round(sum(1.0 for r in resps if r.own_move_now > 0) / len(resps), 3)
+    st.own_now_med = round(statistics.median([r.own_move_now for r in resps]), 2)
     st.sign = 1 if st.p_same_30 >= 0.5 else -1
     fracs = [st.sign * (r.fwd[30] or 0.0) / max(r.leader_move_sigma, 1e-9) for r in resps]
     st.frac30 = round(statistics.median(fracs), 3)
@@ -13679,10 +13684,14 @@ class FollowTrade:
     with_news: bool
 
 
-def follow_trade(imp: Impulse, tgt: MinuteSeries, st: PairStat, spread: float, stop_sigma: float = 1.5, horizon: int = 60,
+PROP_MAX_COST_R = 0.25   # spread ÷ stop acima disto = não opera (mesma regra do custo líquido do live)
+
+
+def follow_trade(imp: Impulse, tgt: MinuteSeries, st: PairStat, spread: float, stop_sigma: float = 1.0, horizon: int = 60,
                  delay_min: int = 1, min_target_sigma: float = 0.5) -> Optional[FollowTrade]:
-    """Entra no alvo `delay_min` depois do impulso, na direção aprendida; stop `stop_sigma` σ; alvo = fração transmitida ×
-    impulso do líder (em σ do alvo), no mínimo `min_target_sigma` σ; sai no horizonte. Custo = spread ÷ distância do stop."""
+    """Entra no alvo `delay_min` depois do impulso, na direção aprendida. Stop = `stop_sigma` × σ do HORIZONTE (σ de 1 min × √horizonte:
+    um stop de 1 minuto numa operação de 60 é só ruído); alvo = fração transmitida × impulso do líder (em σ do alvo), no mínimo
+    `min_target_sigma` σ do horizonte; sai no horizonte. Custo = spread ÷ stop; acima de PROP_MAX_COST_R não opera (None)."""
     i_entry = tgt.index_at(imp.minute + delay_min)
     if i_entry < 0 or (imp.minute + delay_min) - tgt.t[i_entry] > 2:
         return None
@@ -13691,9 +13700,14 @@ def follow_trade(imp: Impulse, tgt: MinuteSeries, st: PairStat, spread: float, s
         return None
     d = imp.direction * st.sign
     entry = tgt.close[i_entry]
-    stop_dist = stop_sigma * sig
-    target_dist = max(min_target_sigma, st.frac30 * imp.move_sigma) * sig
-    cost_r = spread / stop_dist if stop_dist > 0 else 0.0
+    sig_h = sig * math.sqrt(horizon)
+    stop_dist = stop_sigma * sig_h
+    target_dist = max(min_target_sigma * sig_h, st.frac30 * imp.move_sigma * sig)
+    if stop_dist <= 0:
+        return None
+    cost_r = spread / stop_dist
+    if cost_r > PROP_MAX_COST_R:
+        return None
     j = i_entry + 1
     while j < len(tgt) and tgt.t[j] <= imp.minute + horizon:
         hi, lo = tgt.high[j], tgt.low[j]
@@ -13761,7 +13775,8 @@ class PropagationReport:
              f"aprendido até {self.split_at:%d/%m/%Y} ({self.n_impulses_train} impulsos) · testado depois ({self.n_impulses_test} impulsos) · "
              f"líderes {', '.join(self.leaders)} · alvos {', '.join(self.targets)}",
              "",
-             "LAG MAP (treino) — P(mesma direção aos 30 min), direção aprendida, fração transmitida, minutos até 1σ (mediana e P25–P75), FOLLOW no treino:"]
+             "LAG MAP (treino) — no instante do impulso: % do alvo já na mesma direção e quanto já andou (σ) · 30 min depois: P(mesma direção), "
+             "direção aprendida, fração transmitida, minutos até 1σ (mediana e P25–P75), FOLLOW no treino:"]
         for st in sorted(self.pairs, key=lambda s: (s.leader, s.target, s.context)):
             if st.n >= 10:
                 L.append("  " + st.row())
@@ -13784,8 +13799,8 @@ class PropagationReport:
             L.append(f"  {len(edge_pairs)} par(es) com edge no treino; no teste o melhor k foi {best.k} (E {best.e:+.2f}R, n={best.n}). "
                      "Só vale se o E do teste for positivo com n ≥ 30 E com limite inferior > 0 — senão é ruído que sobreviveu ao treino.")
         L.append("  A (cada ativo sozinho) é a ESTIMATIVA por ativo já feita (walk-forward): compare o E líquido de lá com as linhas B…E daqui.")
-        L.append("  custos: spread típico de cada mercado dividido pela distância do stop (1,5 σ de 1 min) — em minutos o custo pesa; "
-                 "slippage e latência não estão modelados.")
+        L.append("  se 'no instante' já é alto (≥ 65 %) e '30m depois' fica em 50 %, a propagação é SIMULTÂNEA: não há atraso a monetizar.")
+        L.append("  custos: spread típico ÷ stop (1 σ do horizonte); operações com custo > 25 % do stop não entram; slippage e latência não estão modelados.")
         return "\n".join(L)
 
     def to_json(self) -> dict:
@@ -16222,7 +16237,7 @@ def cmd_propagation(args: argparse.Namespace) -> int:
         try:
             spreads[sym] = float(get_market(sym).typical_spread or 0.0)
         except Exception:  # noqa: BLE001
-            spreads[sym] = FALLBACK_SPREAD.get(sym, 0.0)
+            spreads[sym] = PROP_FALLBACK_SPREAD.get(sym, 0.0)
     news_minutes: list[int] = []
     if args.events and os.path.exists(args.events):
         hist = load_history(args.events)

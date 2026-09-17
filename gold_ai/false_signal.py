@@ -3,7 +3,7 @@
 Entrada: as operações fora da amostra do walk-forward (mesmas linhas do Exit Lab / Edge Bank: R por saída, MFE, MAE, score,
 confiança, regime, tipo de evento, hora) e, quando existem, as operações vividas. Para cada contexto — mercado, sessão (UTC),
 regime, tipo de evento, direção, e mercado × sessão / mercado × regime — mede n, acerto, expectancy e compara vencedoras × perdedoras
-(MFE, MAE, |score|, confiança). Um contexto é FALSO SINAL RECORRENTE quando n ≥ MIN_N, expectancy ≤ 0 e acerto ≤ 45%: entra em
+(MFE, MAE, |score|, confiança). Um contexto é FALSO SINAL RECORRENTE quando n ≥ FS_MIN_N, expectancy ≤ 0 e acerto ≤ 45%: entra em
 `dados/falsos_sinais.json` e o live veta a entrada nesse contexto ("FALSO SINAL — mercado×sessão perdeu em N casos OOS").
 Regra: só o histórico com amostra veta; um dia ruim não vira regra."""
 from __future__ import annotations
@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-MIN_N = 20
+FS_MIN_N = 20
 NEG_WIN = 0.45
 
 
@@ -50,7 +50,7 @@ class FalseSignalStat:
 
     @property
     def verdict(self) -> str:
-        if self.n < MIN_N:
+        if self.n < FS_MIN_N:
             return "⚪ amostra"
         if self.expectancy <= 0 and self.win_rate <= NEG_WIN:
             return "🔴 falso sinal recorrente"
@@ -95,7 +95,7 @@ class FalseSignalReport:
         if neg:
             L.append(f"  🔴 CONTEXTOS VETADOS NO LIVE ({len(neg)}): " + " · ".join(f"{s.dimension}={s.value} (n={s.n}, E={s.expectancy:+.2f}R, acerto {s.win_rate:.0%})" for s in neg))
         else:
-            L.append(f"  nenhum contexto com n ≥ {MIN_N}, expectancy ≤ 0 e acerto ≤ {NEG_WIN:.0%} — nada a vetar por enquanto (só amostra decide)")
+            L.append(f"  nenhum contexto com n ≥ {FS_MIN_N}, expectancy ≤ 0 e acerto ≤ {NEG_WIN:.0%} — nada a vetar por enquanto (só amostra decide)")
         # padrões que antecedem perdas: comparação global vencedoras × perdedoras
         allw = [x for s in self.stats if s.dimension == "mercado" for x in s.mae_w]
         alll = [x for s in self.stats if s.dimension == "mercado" for x in s.mae_l]
@@ -112,7 +112,7 @@ class FalseSignalReport:
         return "\n".join(L)
 
     def to_dict(self) -> dict:
-        return {"generated": datetime.now(timezone.utc).isoformat(), "start": self.start, "end": self.end, "min_n": MIN_N, "neg_win": NEG_WIN,
+        return {"generated": datetime.now(timezone.utc).isoformat(), "start": self.start, "end": self.end, "min_n": FS_MIN_N, "neg_win": NEG_WIN,
                 "negatives": [{"dimension": s.dimension, "value": s.value, "n": s.n, "expectancy": round(s.expectancy, 3), "win_rate": round(s.win_rate, 3)}
                               for s in self.negatives()],
                 "contexts": [{"dimension": s.dimension, "value": s.value, "n": s.n, "expectancy": round(s.expectancy, 3), "win_rate": round(s.win_rate, 3)}

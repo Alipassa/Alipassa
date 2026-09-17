@@ -26,14 +26,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Optional, Sequence
 
-HORIZONS = (5, 15, 30, 60)
-SESSIONS = (("Ásia", 0, 7), ("Londres", 7, 13), ("NY", 13, 21), ("fecho", 21, 24))
-FALLBACK_SPREAD = {"USDX": 0.02, "DXY": 0.02}
+PROP_HORIZONS = (5, 15, 30, 60)
+PROP_SESSIONS = (("Ásia", 0, 7), ("Londres", 7, 13), ("NY", 13, 21), ("fecho", 21, 24))
+PROP_FALLBACK_SPREAD = {"USDX": 0.02, "DXY": 0.02}
 
 
 def session_name(t: datetime) -> str:
     h = t.astimezone(timezone.utc).hour
-    for name, a, b in SESSIONS:
+    for name, a, b in PROP_SESSIONS:
         if a <= h < b:
             return name
     return "fecho"
@@ -145,10 +145,10 @@ def measure_response(imp: Impulse, tgt: MinuteSeries, window: int = 5, horizon: 
     s = imp.direction
     own = s * (p0 - tgt.close[max(0, tgt.index_at(imp.minute - window))]) / sig
     fwd = {}
-    for h in HORIZONS:
+    for h in PROP_HORIZONS:
         c = tgt.close_at(imp.minute + h)
         fwd[h] = (s * (c - p0) / sig) if c is not None else None
-    if fwd[max(HORIZONS)] is None:
+    if fwd[max(PROP_HORIZONS)] is None:
         return None
     ttr, mfe, mae = None, 0.0, 0.0
     j = i0 + 1
@@ -172,6 +172,8 @@ class PairStat:
     context: str                      # "todas" | "com notícia" | "sem notícia"
     n: int = 0
     p_same_30: float = 0.5            # P(alvo na mesma direção do líder aos 30 min)
+    p_same_now: float = 0.5           # P(alvo JÁ na mesma direção nos mesmos 5 min do impulso) — propagação simultânea
+    own_now_med: float = 0.0          # quanto o alvo já tinha andado nesses 5 min (mediana, σ do alvo, sinal = direção do líder)
     sign: int = 1                     # +1 segue o líder · −1 vai contra (relação inversa aprendida)
     frac30: float = 0.0               # fração transmitida mediana aos 30 min (σ alvo ÷ σ líder), já com o sinal aprendido
     ttr_med: Optional[float] = None
@@ -193,7 +195,8 @@ class PairStat:
 
     def row(self) -> str:
         ttr = "—" if self.ttr_med is None else f"{self.ttr_med:.0f} ({self.ttr_p25:.0f}–{self.ttr_p75:.0f})"
-        return (f"{self.leader:<7}→ {self.target:<7} {self.context:<11} n={self.n:<4} mesma dir 30m {self.p_same_30:>4.0%}  "
+        return (f"{self.leader:<7}→ {self.target:<7} {self.context:<11} n={self.n:<4} no instante {self.p_same_now:>4.0%} ({self.own_now_med:+.1f}σ) · "
+                f"30m depois {self.p_same_30:>4.0%}  "
                 f"{'segue' if self.sign > 0 else 'CONTRA':<6} fração {self.frac30:+.2f}  reação {ttr:<14} MFE60 {self.mfe60:.2f}σ MAE60 {self.mae60:.2f}σ  "
                 f"FOLLOW treino E {self.e_train:+.2f}R win {self.win_train:.0%} (n={self.n_train_trades})  {'✅ edge' if self.is_edge else '·'}")
 
@@ -213,6 +216,8 @@ def learn_pair(resps: list[Response], leader: str, target: str, context: str) ->
         return st
     same = [1.0 if (r.fwd[30] or 0.0) > 0 else 0.0 for r in resps]
     st.p_same_30 = round(sum(same) / len(same), 3)
+    st.p_same_now = round(sum(1.0 for r in resps if r.own_move_now > 0) / len(resps), 3)
+    st.own_now_med = round(statistics.median([r.own_move_now for r in resps]), 2)
     st.sign = 1 if st.p_same_30 >= 0.5 else -1
     fracs = [st.sign * (r.fwd[30] or 0.0) / max(r.leader_move_sigma, 1e-9) for r in resps]
     st.frac30 = round(statistics.median(fracs), 3)
@@ -237,10 +242,14 @@ class FollowTrade:
     with_news: bool
 
 
-def follow_trade(imp: Impulse, tgt: MinuteSeries, st: PairStat, spread: float, stop_sigma: float = 1.5, horizon: int = 60,
+PROP_MAX_COST_R = 0.25   # spread ÷ stop acima disto = não opera (mesma regra do custo líquido do live)
+
+
+def follow_trade(imp: Impulse, tgt: MinuteSeries, st: PairStat, spread: float, stop_sigma: float = 1.0, horizon: int = 60,
                  delay_min: int = 1, min_target_sigma: float = 0.5) -> Optional[FollowTrade]:
-    """Entra no alvo `delay_min` depois do impulso, na direção aprendida; stop `stop_sigma` σ; alvo = fração transmitida ×
-    impulso do líder (em σ do alvo), no mínimo `min_target_sigma` σ; sai no horizonte. Custo = spread ÷ distância do stop."""
+    """Entra no alvo `delay_min` depois do impulso, na direção aprendida. Stop = `stop_sigma` × σ do HORIZONTE (σ de 1 min × √horizonte:
+    um stop de 1 minuto numa operação de 60 é só ruído); alvo = fração transmitida × impulso do líder (em σ do alvo), no mínimo
+    `min_target_sigma` σ do horizonte; sai no horizonte. Custo = spread ÷ stop; acima de PROP_MAX_COST_R não opera (None)."""
     i_entry = tgt.index_at(imp.minute + delay_min)
     if i_entry < 0 or (imp.minute + delay_min) - tgt.t[i_entry] > 2:
         return None
@@ -249,9 +258,14 @@ def follow_trade(imp: Impulse, tgt: MinuteSeries, st: PairStat, spread: float, s
         return None
     d = imp.direction * st.sign
     entry = tgt.close[i_entry]
-    stop_dist = stop_sigma * sig
-    target_dist = max(min_target_sigma, st.frac30 * imp.move_sigma) * sig
-    cost_r = spread / stop_dist if stop_dist > 0 else 0.0
+    sig_h = sig * math.sqrt(horizon)
+    stop_dist = stop_sigma * sig_h
+    target_dist = max(min_target_sigma * sig_h, st.frac30 * imp.move_sigma * sig)
+    if stop_dist <= 0:
+        return None
+    cost_r = spread / stop_dist
+    if cost_r > PROP_MAX_COST_R:
+        return None
     j = i_entry + 1
     while j < len(tgt) and tgt.t[j] <= imp.minute + horizon:
         hi, lo = tgt.high[j], tgt.low[j]
@@ -319,7 +333,8 @@ class PropagationReport:
              f"aprendido até {self.split_at:%d/%m/%Y} ({self.n_impulses_train} impulsos) · testado depois ({self.n_impulses_test} impulsos) · "
              f"líderes {', '.join(self.leaders)} · alvos {', '.join(self.targets)}",
              "",
-             "LAG MAP (treino) — P(mesma direção aos 30 min), direção aprendida, fração transmitida, minutos até 1σ (mediana e P25–P75), FOLLOW no treino:"]
+             "LAG MAP (treino) — no instante do impulso: % do alvo já na mesma direção e quanto já andou (σ) · 30 min depois: P(mesma direção), "
+             "direção aprendida, fração transmitida, minutos até 1σ (mediana e P25–P75), FOLLOW no treino:"]
         for st in sorted(self.pairs, key=lambda s: (s.leader, s.target, s.context)):
             if st.n >= 10:
                 L.append("  " + st.row())
@@ -342,8 +357,8 @@ class PropagationReport:
             L.append(f"  {len(edge_pairs)} par(es) com edge no treino; no teste o melhor k foi {best.k} (E {best.e:+.2f}R, n={best.n}). "
                      "Só vale se o E do teste for positivo com n ≥ 30 E com limite inferior > 0 — senão é ruído que sobreviveu ao treino.")
         L.append("  A (cada ativo sozinho) é a ESTIMATIVA por ativo já feita (walk-forward): compare o E líquido de lá com as linhas B…E daqui.")
-        L.append("  custos: spread típico de cada mercado dividido pela distância do stop (1,5 σ de 1 min) — em minutos o custo pesa; "
-                 "slippage e latência não estão modelados.")
+        L.append("  se 'no instante' já é alto (≥ 65 %) e '30m depois' fica em 50 %, a propagação é SIMULTÂNEA: não há atraso a monetizar.")
+        L.append("  custos: spread típico ÷ stop (1 σ do horizonte); operações com custo > 25 % do stop não entram; slippage e latência não estão modelados.")
         return "\n".join(L)
 
     def to_json(self) -> dict:

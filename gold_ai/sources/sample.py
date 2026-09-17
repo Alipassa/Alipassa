@@ -7,13 +7,13 @@ from datetime import datetime, timedelta, timezone
 
 from ..models import Candle, EconomicEvent, MarketSnapshot, NewsItem
 
-TF_MINUTES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440, "W1": 10080}
+SAMPLE_TF_MINUTES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440, "W1": 10080}
 
 
 def make_candles(tf: str, n: int, start_price: float, drift: float, vol: float, end: datetime, seed: int = 7, volume_trend: float = 0.0) -> list[Candle]:
     """Série de candles com deriva (`drift` por candle, em USD) e volatilidade `vol` (USD)."""
     rnd = random.Random(seed + sum(ord(ch) * (i + 1) for i, ch in enumerate(tf)))  # determinístico entre processos
-    step = timedelta(minutes=TF_MINUTES[tf])
+    step = timedelta(minutes=SAMPLE_TF_MINUTES[tf])
     price = start_price
     out: list[Candle] = []
     for i in range(n):
@@ -30,7 +30,7 @@ def make_candles(tf: str, n: int, start_price: float, drift: float, vol: float, 
 
 def _candles_all(price: float, end: datetime, drift_per_hour: float, vol: float, seed: int, volume_trend: float = 0.0) -> dict[str, list[Candle]]:
     out: dict[str, list[Candle]] = {}
-    for tf, mins in TF_MINUTES.items():
+    for tf, mins in SAMPLE_TF_MINUTES.items():
         n = 260 if mins <= 240 else 120
         drift = drift_per_hour * mins / 60
         v = vol * (mins / 60) ** 0.5
