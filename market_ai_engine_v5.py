@@ -15871,7 +15871,11 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(f"Previsões pendentes (sem resultado): {len(pending)} — resolva com PredictionMemory.resolve(id, caminho_de_preço, limiar)")
     for by in (args.by or ["sessao", "previsao", "score_bucket", "estagio", "nivel_evidencia", "sinal_tipo", "ativo"]):
         print(f"\nTAXA DE ACERTO por {by}:")
-        rows = mem.accuracy(by)
+        try:
+            rows = mem.accuracy(by)
+        except ValueError:
+            print(f"  chave desconhecida '{by}' — válidas: sessao hora previsao horizonte estagio evento score_bucket sinal_tipo nivel_evidencia ativo")
+            continue
         if not rows:
             print("  (nenhuma previsão resolvida)")
         for row in rows:
