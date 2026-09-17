@@ -73,6 +73,9 @@ class EngineConfig:
 
     # Filtro contra falsos sinais (Diretriz §27).
     min_confirmations: int = 3
+    trade_mode: str = "seguir"         # TORNEIO 6.0 (só backtest): "seguir" = opera na direção do sinal · "inverter" = opera CONTRA todo sinal
+                                       # (hipótese: o modelo tem informação com o sinal trocado) · "fade_confirmacao" = contra só quando o estágio
+                                       # é CONFIRMAÇÃO/MOVIMENTO (hipótese: alerta depois do movimento = reversão). Nunca vira modo do live sem OOS.
     block_range: bool = False          # FILTRO DE REGIME: sem sinal operacional quando o regime H4/D1 é RANGE (lateral). Parâmetro que o
                                        # autotune testa (com × sem) — o histórico decide; BLOCK_RANGE=1 no .env força ligado no live
     # Contribuição mínima (fração do peso máximo) para uma família "confirmar".

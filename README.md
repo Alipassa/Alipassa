@@ -691,6 +691,18 @@ mem.accuracy("sessao"); mem.accuracy("score_bucket"); mem.factor_power()
 de novo em 30 s com o `market_ai_engine_v6.py` que estiver na pasta (é assim que se troca de build). Com o arquivo `STOP_TRADING`
 presente, o `.bat` não sobe de novo: `STOP_TRADING` + `/REINICIAR` = desligado de vez (para `repair`, manutenção, etc.).
 
+## Torneio de hipóteses — seguir × inverter × fade
+
+```
+python market_ai_engine_v6.py tournament --csv-dir dados --txt torneio.txt
+```
+
+As três hipóteses que os dados levantaram, no MESMO walk-forward fora da amostra com preço real: A segue o sinal (robô atual) ·
+B opera contra todo sinal (a informação existe com o sinal trocado?) · C opera contra só quando o estágio é CONFIRMAÇÃO/MOVIMENTO
+(alerta depois do movimento = reversão?). Por mercado: n, win, E, limite inferior, drawdown em R e E por bloco. Vence só com n ≥ 30,
+E > 0, LB > 0 e ≥ 3 de 4 blocos positivos; nada vira modo do live sem passar por isto e pela confirmação Yahoo × corretora.
+`--trade-mode inverter|fade_confirmacao` está disponível em todos os comandos OOS como experimento.
+
 ## Leader Propagation — o atraso entre ativos é monetizável?
 
 ```

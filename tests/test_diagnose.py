@@ -87,3 +87,28 @@ class FactorMatrixSmokeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TradeModeTests(unittest.TestCase):
+    def test_inverter_flips_every_trade_and_fade_only_late_stages(self):
+        from gold_ai.config import EngineConfig
+        from gold_ai.evaluation import Backtester, HistoryFrame
+        from gold_ai.markets import get_market
+        from gold_ai.sources.sample import make_candles
+
+        f = HistoryFrame(xau=make_candles("H1", 900, 2500, 0.4, 6.0, NOW, seed=3), dxy=make_candles("H1", 900, 104, -0.002, 0.08, NOW, seed=4),
+                         us10y=make_candles("H1", 900, 4.2, -0.0005, 0.02, NOW, seed=5))
+        signs = dict(get_market("XAUUSD").factor_signs)
+        base = Backtester(f, EngineConfig(factor_signs=signs, symbol="XAUUSD"), step=4).run()
+        inv = Backtester(f, EngineConfig(factor_signs=signs, symbol="XAUUSD", trade_mode="inverter"), step=4).run()
+        fade = Backtester(f, EngineConfig(factor_signs=signs, symbol="XAUUSD", trade_mode="fade_confirmacao"), step=4).run()
+        by_time = {r["time"]: r for r in base.trade_rows}
+        self.assertTrue(base.trade_rows, "o sintético precisa gerar operações")
+        for r in inv.trade_rows:
+            b = by_time[r["time"]]
+            self.assertEqual(r["signal_direction"], b["signal_direction"])
+            self.assertNotEqual(r["direction"], b["direction"])          # contra todo sinal
+        for r in fade.trade_rows:
+            b = by_time[r["time"]]
+            late = r["stage"] in ("CONFIRMAÇÃO", "MOVIMENTO")
+            self.assertEqual(r["direction"] != b["direction"], late)      # contra só nos estágios tardios

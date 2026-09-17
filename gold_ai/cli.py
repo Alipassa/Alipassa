@@ -1596,9 +1596,79 @@ def _apply_experiment(cfg: EngineConfig, args: argparse.Namespace) -> EngineConf
         cfg.min_confirmations = args.min_confirmations; changed.append(f"confirmações ≥ {args.min_confirmations}")
     if getattr(args, "edge_confidence", None) is not None:
         cfg.min_edge_confidence = args.edge_confidence; changed.append(f"confiança ≥ {args.edge_confidence:g}")
+    if getattr(args, "trade_mode", None) and args.trade_mode != "seguir":
+        cfg.trade_mode = args.trade_mode; changed.append(f"modo {args.trade_mode}")
     if changed:
         print("experimento: " + " · ".join(changed) + "  (compare a expectancy OOS com o padrão antes de adotar)")
     return cfg
+
+
+TOURNAMENT_MODES = (("seguir", "A · segue o sinal (robô atual)"), ("inverter", "B · contra TODO sinal (informação com o sinal trocado?)"),
+                    ("fade_confirmacao", "C · contra só em CONFIRMAÇÃO/MOVIMENTO (alerta tardio = reversão?)"))
+
+
+def cmd_tournament(args: argparse.Namespace) -> int:
+    """TORNEIO 6.0: as hipóteses que os dados levantaram, cada uma no MESMO walk-forward fora da amostra com preço real:
+    A seguir · B inverter · C fade da confirmação. Vence só quem for positivo com n ≥ 30, LB > 0 e ≥ 3 de 4 blocos positivos."""
+    import math
+    import statistics
+
+    modes = [m.strip() for m in (args.modes or "").split(",") if m.strip()] or [m for m, _ in TOURNAMENT_MODES]
+    labels = dict(TOURNAMENT_MODES)
+    table: dict[str, dict[str, dict]] = {}
+    for mode in modes:
+        ns = argparse.Namespace(**vars(args))
+        ns.trade_mode = mode
+        print(f"\n=== modo {mode}: {labels.get(mode, mode)} ===", flush=True)
+        results = _oos_results_for_markets(ns)
+        for sym, folds in results.items():
+            rows = [r for res in folds for r in res.trade_rows]
+            rs = [float(r["results"][args.strategy]) for r in rows if (r.get("results") or {}).get(args.strategy) is not None]
+            per_fold = []
+            for res in folds:
+                fr = [float(r["results"][args.strategy]) for r in res.trade_rows if (r.get("results") or {}).get(args.strategy) is not None]
+                per_fold.append((sum(fr) / len(fr)) if fr else None)
+            n = len(rs)
+            e = sum(rs) / n if n else 0.0
+            win = sum(1 for r in rs if r > 0) / n if n else 0.0
+            lb = e - 1.96 * statistics.pstdev(rs) / math.sqrt(n) if n > 1 else 0.0
+            eq, peak, dd = 0.0, 0.0, 0.0
+            for r in rs:
+                eq += r; peak = max(peak, eq); dd = max(dd, peak - eq)
+            pos = sum(1 for f in per_fold if f is not None and f > 0)
+            if n >= 30 and e > 0 and lb > 0 and pos >= max(3, len(per_fold) - 1):
+                vd = "✅ CANDIDATO"
+            elif n >= 20 and e > 0 and pos >= max(3, len(per_fold) - 1):
+                vd = "🟡 sinal (LB ≤ 0 ou n < 30)"
+            else:
+                vd = "·"
+            table.setdefault(sym, {})[mode] = {"n": n, "e": e, "win": win, "lb": lb, "dd": dd, "folds": per_fold, "verdict": vd}
+    lines = [f"🏆 TORNEIO DE HIPÓTESES — walk-forward fora da amostra, {args.folds} blocos, estratégia de saída '{args.strategy}', preço {'da corretora (--csv-dir)' if getattr(args, 'csv_dir', None) else 'Yahoo'}",
+             "  regra: CANDIDATO só com n ≥ 30, E > 0, limite inferior > 0 e ≥ 3 de 4 blocos positivos. Nada vira modo do live sem isso.", ""]
+    for sym, by in table.items():
+        lines.append(f"{sym}")
+        for mode in modes:
+            m = by.get(mode)
+            if not m:
+                continue
+            folds = " ".join("n/d" if f is None else f"{f:+.2f}" for f in m["folds"])
+            lines.append(f"  {labels.get(mode, mode):<62} n={m['n']:<4} win {m['win']:>4.0%}  E {m['e']:+.2f}R  LB {m['lb']:+.2f}R  DD {m['dd']:.1f}R  blocos {folds}  {m['verdict']}")
+    winners = [(sym, mode) for sym, by in table.items() for mode, m in by.items() if m["verdict"].startswith("✅")]
+    lines.append("")
+    if winners:
+        lines.append("VENCEDORES (fora da amostra, com preço real): " + " · ".join(f"{s} → {labels.get(m, m).split(' · ')[0]}" for s, m in winners))
+        lines.append("  próximo passo: confirmar com o outro conjunto de preços (Yahoo × corretora) e com 2025 antes de virar modo do live.")
+    else:
+        lines.append("NENHUM VENCEDOR: nenhuma das hipóteses passou no OOS com esta amostra. Resposta honesta: com estes sinais em H1, "
+                     "neste período, não há edge para seguir, inverter ou fazer fade. O que sobra é o que já é positivo (ver estimativa) e mais história (2025).")
+    txt = "\n".join(lines)
+    print()
+    print(txt)
+    if args.txt:
+        with open(args.txt, "w", encoding="utf-8") as f:
+            f.write(txt + "\n")
+        print(f"\ntorneio salvo em {args.txt}")
+    return 0
 
 
 def _cfg_for(args: argparse.Namespace) -> EngineConfig:
@@ -2010,7 +2080,8 @@ def _main(argv: list[str]) -> int:
                           ("exit-lab", cmd_exit_lab, "EXIT LAB 5.2: saída com maior expectancy OOS (MFE/MAE, 1R…4R, trailing, política walk-forward)"),
                           ("edge-bank", cmd_edge_bank, "EDGE BANK 5.2: o que funciona, onde funciona, quanto se transfere entre ativos (salva dados/edge_bank.json)"),
                           ("portfolio-sim", cmd_portfolio_sim, "PORTFOLIO SIM 5.2: 1 × 2 × 3 × 4 posições simultâneas com as operações OOS, líquido de custo e correlação"),
-                          ("diagnose", cmd_diagnose, "DIRECTION DIAGNOSTIC 5.x: por que perdeu (invertido × entrada × saída), matriz fator × mercado (invertido/removido por bloco) e corretora × Yahoo")):
+                          ("diagnose", cmd_diagnose, "DIRECTION DIAGNOSTIC 5.x: por que perdeu (invertido × entrada × saída), matriz fator × mercado (invertido/removido por bloco) e corretora × Yahoo"),
+                          ("tournament", cmd_tournament, "TORNEIO 6.0: seguir × inverter × fade da confirmação, no mesmo walk-forward OOS com preço real; vence só com n ≥ 30, LB > 0 e 3/4 blocos")):
         xp = sub.add_parser(name, help=hlp)
         xp.add_argument("--events", default=os.path.join("dados", "noticias_historicas.csv"), help="banco histórico point-in-time (contexto: evento, relógio, fluxo)")
         xp.add_argument("--start", default="2026-01-01")
@@ -2033,6 +2104,8 @@ def _main(argv: list[str]) -> int:
         xp.add_argument("--cost", type=float, default=0.05, help="portfolio-sim: custo por operação em R (spread+slippage), descontado do resultado")
         xp.add_argument("--skip", default="", help="diagnose: etapas a pular — direction, matrix, reality")
         xp.add_argument("--factors", default=None, help="diagnose: só estes fatores na matriz (ex.: dolar,juros_reais)")
+        xp.add_argument("--modes", default=None, help="tournament: modos a testar (seguir,inverter,fade_confirmacao)")
+        xp.add_argument("--trade-mode", default=None, help="qualquer comando OOS: seguir | inverter | fade_confirmacao (experimento)")
         xp.set_defaults(func=fn)
 
     pg = sub.add_parser("propagation", help="LEADER PROPAGATION 5.x: impulso no líder → atrasados; aprende na 1ª metade, testa na 2ª; líder → 1…4 atrasados (B…E)")

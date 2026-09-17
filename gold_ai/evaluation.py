@@ -20,7 +20,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from .config import EngineConfig
 from .engine import GoldAIEngine
-from .models import Candle, Direction, MarketSnapshot, SignalType
+from .models import Candle, Direction, MarketSnapshot, SignalType, Stage
 from .technical import atr as _atr
 
 
@@ -465,10 +465,15 @@ class Backtester:
                 continue
             signals.append(record_from(a, sig, snap.atr))
             if self.simulate_trades and sig.type != SignalType.WATCH:
-                plan = mpe.plan(a, snap, sig.direction, sig.type.value)
+                trade_dir = sig.direction
+                mode = getattr(cfg, "trade_mode", "seguir")
+                if mode == "inverter" or (mode == "fade_confirmacao" and a.premove.stage in (Stage.CONFIRMACAO, Stage.MOVIMENTO)):
+                    trade_dir = Direction.BAIXA if sig.direction == Direction.ALTA else Direction.ALTA
+                plan = mpe.plan(a, snap, trade_dir, sig.type.value)
                 sim = simulate_all(plan, xau[i + 1: min(end, i + 1 + horizon_bars + 2)], self.horizon_min)
                 row = {"type": sig.type.value, "profile": sim["profile"], "results": sim["results"], "time": a.time, "r_value": plan.r_value,
-                       "score": a.score, "direction": sig.direction.value, "entry": a.price,
+                       "score": a.score, "direction": trade_dir.value, "signal_direction": sig.direction.value, "stage": str(a.premove.stage.value),
+                       "entry": a.price,
                        "exits": {k: v.exit_time for k, v in sim["details"].items()}, "symbol": getattr(self.frame, "symbol", "XAUUSD"),
                        "event_kind": "", "regime": str(getattr(a, "regime", "") or ""), "confidence": float(getattr(a, "confidence", 0.0) or 0.0),
                        "probability": float(max(a.prob_up, a.prob_down)),
