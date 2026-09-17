@@ -12728,7 +12728,7 @@ def session_of(t: datetime) -> str:
 
 
 @dataclass
-class ContextStat:
+class FalseSignalStat:
     dimension: str
     value: str
     n: int = 0
@@ -12781,10 +12781,10 @@ class FalseSignalReport:
     start: str
     end: str
     strategy: str
-    stats: list[ContextStat] = field(default_factory=list)
+    stats: list[FalseSignalStat] = field(default_factory=list)
     n_rows: int = 0
 
-    def negatives(self) -> list[ContextStat]:
+    def negatives(self) -> list[FalseSignalStat]:
         return [s for s in self.stats if s.verdict.startswith("🔴")]
 
     def render(self) -> str:
@@ -12829,10 +12829,10 @@ class FalseSignalReport:
 
 def build_report(rows_by_symbol: dict, strategy: str = "adaptive", default: str = "3R", start: str = "", end: str = "") -> FalseSignalReport:
     rep = FalseSignalReport(start, end, strategy)
-    stats: dict[tuple[str, str], ContextStat] = {}
+    stats: dict[tuple[str, str], FalseSignalStat] = {}
 
     def add(dim: str, val: str, r: float, mfe: float, mae: float, score: float, conf: float) -> None:
-        stats.setdefault((dim, val), ContextStat(dim, val)).add(r, mfe, mae, score, conf)
+        stats.setdefault((dim, val), FalseSignalStat(dim, val)).add(r, mfe, mae, score, conf)
 
     for sym, rows in rows_by_symbol.items():
         for row in rows:
