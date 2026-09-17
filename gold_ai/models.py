@@ -184,6 +184,7 @@ class MarketSnapshot:
 
     # Técnico: candles por timeframe (§17, §18)
     candles: dict[str, list[Candle]] = field(default_factory=dict)
+    price_source: str = ""             # "mt5" (corretora) | "yahoo" — no LIVE só se decide com o preço da corretora que executa
     session_start: tuple[int, int] = (22, 0)   # início da sessão (hora, minuto UTC) para o VWAP de sessão — definido pelo motor conforme o mercado
 
     # Notícias e eventos (§13, §32)

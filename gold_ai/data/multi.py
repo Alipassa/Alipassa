@@ -99,6 +99,7 @@ class MultiMarketData:
         self.mt5 = mt5_client
         self.mt5_symbol_map = mt5_symbol_map or {}
         self.status: dict[str, str] = {}
+        self.sources: dict[str, str] = {}          # símbolo → "mt5" | "yahoo" (o LIVE veta entrada sem preço da corretora)
 
     @classmethod
     def symbol_map_from_env(cls, env: dict[str, str]) -> dict[str, str]:
@@ -113,14 +114,19 @@ class MultiMarketData:
                 if not self.mt5.connected:
                     self.mt5.connect()
                 if not self.mt5.mt5.symbol_select(self.mt5.cfg.symbol, True):
-                    self.status[f"mt5:{spec.symbol}"] = f"símbolo {self.mt5.cfg.symbol} indisponível na corretora → Yahoo (confira MT5_SYMBOL_{spec.symbol} no .env)"
+                    self.status[f"mt5:{spec.symbol}"] = f"símbolo {self.mt5.cfg.symbol} indisponível na corretora → Yahoo só para CONTEXTO (confira MT5_SYMBOL_{spec.symbol} no .env)"
+                    self.sources[spec.symbol] = "yahoo"
                     return self.yahoo.all_timeframes(spec.yahoo)
-                return {tf: cs for tf in TF_TO_MT5 if (cs := self.mt5.candles(tf))}
+                out = {tf: cs for tf in TF_TO_MT5 if (cs := self.mt5.candles(tf))}
+                self.sources[spec.symbol] = "mt5"
+                return out
             except Exception as e:  # noqa: BLE001
-                self.status[f"mt5:{spec.symbol}"] = f"MT5 falhou ({str(e)[:60]}) → Yahoo"
+                self.status[f"mt5:{spec.symbol}"] = f"MT5 falhou ({str(e)[:60]}) → Yahoo só para CONTEXTO"
+                self.sources[spec.symbol] = "yahoo"
                 return self.yahoo.all_timeframes(spec.yahoo)
             finally:
                 self.mt5.cfg.symbol = orig
+        self.sources[spec.symbol] = "yahoo"
         return self.yahoo.all_timeframes(spec.yahoo)
 
     def market_cot(self, spec: MarketSpec, now: datetime) -> Optional[dict]:
@@ -149,6 +155,7 @@ class MultiMarketData:
                 if not candles:
                     raise RuntimeError("sem candles")
                 s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec, now), identified)
+                s.price_source = self.sources.get(spec.symbol, "mt5" if (self.mt5 is not None and spec.symbol == "XAUUSD") else "yahoo")
                 out.by_symbol[spec.symbol] = s
                 out.data_quality[spec.symbol] = data_quality(s, spec)
                 self.status[spec.symbol] = "ok"

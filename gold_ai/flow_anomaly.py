@@ -261,9 +261,39 @@ def render_flow_stats(rows: Sequence[dict]) -> str:
     return "\n".join(lines)
 
 
+def learned_thresholds(ledger: Sequence[dict], min_n: int = 20, min_continuation: float = 0.60) -> dict[str, tuple[int, str]]:
+    """LIMIAR APRENDIDO por mercado: o menor degrau (70 / 80 / 90) em que a continuação ≥ 60% E MFE60 − MAE60 > 0 com n ≥ 20.
+    Se nenhum degrau prova, o 70 fica como gatilho de INVESTIGAÇÃO (informação para o relógio), não de operação."""
+    out: dict[str, tuple[int, str]] = {}
+    by: dict[str, list[dict]] = {}
+    for r in ledger:
+        if r.get("resultado"):
+            by.setdefault(str(r.get("ativo", "")), []).append(r)
+    for sym, rows in by.items():
+        chosen = None
+        for low in (70, 80, 90):
+            grp = [r for r in rows if int(r.get("flow_score") or 0) >= low]
+            n = len(grp)
+            if n < min_n:
+                continue
+            cont = sum(1 for r in grp if str(r.get("resultado")) == "CONTINUOU") / n
+            mfe = [float(r.get("mfe60") or 0.0) for r in grp]
+            mae = [float(r.get("mae60") or 0.0) for r in grp]
+            edge = (sum(mfe) / n) - (sum(mae) / n)
+            if cont >= min_continuation and edge > 0:
+                chosen = (low, f"aprendido: FLOW ≥ {low} continuou {cont:.0%} em {n} casos (MFE−MAE {edge:+.2f} ATR)")
+                break
+        out[sym] = chosen or (FLOW_THRESHOLD, f"padrão {FLOW_THRESHOLD}: nenhum degrau provou continuação ≥ {min_continuation:.0%} com n ≥ {min_n} ({len(rows)} medidas) — só investigação")
+    return out
+
+
 class FlowAnomalyEngine:
     def __init__(self, ledger: Optional[Sequence[dict]] = None) -> None:
         self.ledger: list[dict] = list(ledger or [])      # anomalias já MEDIDAS (para a estatística histórica no relógio)
+        self.thresholds = learned_thresholds(self.ledger)  # mercado → (limiar, motivo): o histórico calibra o gatilho, não um 70 fixo
+
+    def threshold_for(self, market: str) -> int:
+        return int(self.thresholds.get(market, (FLOW_THRESHOLD, ""))[0])
 
     def history_stat(self, market: str, origin: str) -> Optional[FlowGroupStat]:
         for g in flow_stats(self.ledger):

@@ -388,6 +388,7 @@ class MarketSnapshot:
 
     # Técnico: candles por timeframe (§17, §18)
     candles: dict[str, list[Candle]] = field(default_factory=dict)
+    price_source: str = ""             # "mt5" (corretora) | "yahoo" — no LIVE só se decide com o preço da corretora que executa
     session_start: tuple[int, int] = (22, 0)   # início da sessão (hora, minuto UTC) para o VWAP de sessão — definido pelo motor conforme o mercado
 
     # Notícias e eventos (§13, §32)
@@ -7376,9 +7377,39 @@ def render_flow_stats(rows: Sequence[dict]) -> str:
     return "\n".join(lines)
 
 
+def learned_thresholds(ledger: Sequence[dict], min_n: int = 20, min_continuation: float = 0.60) -> dict[str, tuple[int, str]]:
+    """LIMIAR APRENDIDO por mercado: o menor degrau (70 / 80 / 90) em que a continuação ≥ 60% E MFE60 − MAE60 > 0 com n ≥ 20.
+    Se nenhum degrau prova, o 70 fica como gatilho de INVESTIGAÇÃO (informação para o relógio), não de operação."""
+    out: dict[str, tuple[int, str]] = {}
+    by: dict[str, list[dict]] = {}
+    for r in ledger:
+        if r.get("resultado"):
+            by.setdefault(str(r.get("ativo", "")), []).append(r)
+    for sym, rows in by.items():
+        chosen = None
+        for low in (70, 80, 90):
+            grp = [r for r in rows if int(r.get("flow_score") or 0) >= low]
+            n = len(grp)
+            if n < min_n:
+                continue
+            cont = sum(1 for r in grp if str(r.get("resultado")) == "CONTINUOU") / n
+            mfe = [float(r.get("mfe60") or 0.0) for r in grp]
+            mae = [float(r.get("mae60") or 0.0) for r in grp]
+            edge = (sum(mfe) / n) - (sum(mae) / n)
+            if cont >= min_continuation and edge > 0:
+                chosen = (low, f"aprendido: FLOW ≥ {low} continuou {cont:.0%} em {n} casos (MFE−MAE {edge:+.2f} ATR)")
+                break
+        out[sym] = chosen or (FLOW_THRESHOLD, f"padrão {FLOW_THRESHOLD}: nenhum degrau provou continuação ≥ {min_continuation:.0%} com n ≥ {min_n} ({len(rows)} medidas) — só investigação")
+    return out
+
+
 class FlowAnomalyEngine:
     def __init__(self, ledger: Optional[Sequence[dict]] = None) -> None:
         self.ledger: list[dict] = list(ledger or [])      # anomalias já MEDIDAS (para a estatística histórica no relógio)
+        self.thresholds = learned_thresholds(self.ledger)  # mercado → (limiar, motivo): o histórico calibra o gatilho, não um 70 fixo
+
+    def threshold_for(self, market: str) -> int:
+        return int(self.thresholds.get(market, (FLOW_THRESHOLD, ""))[0])
 
     def history_stat(self, market: str, origin: str) -> Optional[FlowGroupStat]:
         for g in flow_stats(self.ledger):
@@ -8641,6 +8672,7 @@ class GuardLimits(RiskLimits):
     sample_risk_pct: float = 1.0         # HIERARQUIA: risco do grau C (inconclusivo) para formar amostra; 0 = não opera em C
     max_cost_r: float = 0.25             # CUSTO LÍQUIDO: spread + slippage + comissão acima desta fração do stop (R) → descarta
     commission_per_lot: float = 0.0      # USD por lote, ida e volta (0 = corretora sem comissão / já no spread)
+    prob_shrink_uncalibrated: float = 0.5   # sem calibrador: p usada = 50% + (p declarada − 50%) × este fator
 
     def ladder(self) -> tuple[float, float, float]:
         if self.risk_ladder:
@@ -8662,6 +8694,7 @@ class GuardLimits(RiskLimits):
         g.sample_risk_pct = float(env.get("SAMPLE_RISK_PCT", g.sample_risk_pct))
         g.max_cost_r = float(env.get("MAX_COST_R", g.max_cost_r))
         g.commission_per_lot = float(env.get("COMMISSION_PER_LOT", g.commission_per_lot))
+        g.prob_shrink_uncalibrated = float(env.get("PROB_SHRINK_UNCALIBRATED", g.prob_shrink_uncalibrated))
         raw = str(env.get("RISK_LADDER", "") or "").strip()
         if raw:
             g.risk_ladder = tuple(float(x) for x in raw.split(",") if x.strip())
@@ -10485,6 +10518,59 @@ class PortfolioLimits:
         g = lambda k, d: type(d)(env.get(k, d))  # noqa: E731
         return cls(g("MAX_TOTAL_OPEN_RISK", 1.5), g("MAX_CORRELATED_RISK", 1.0), g("MAX_PORTFOLIO_POSITIONS", 3), g("MAX_ASSET_EXPOSURE", 1), g("CORRELATION_THRESHOLD", 0.5),
                    g("MAX_ENTRIES_PER_CYCLE", 3))
+
+
+def _pearson(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
+    n = min(len(xs), len(ys))
+    if n < 20:
+        return None
+    xs, ys = list(xs[-n:]), list(ys[-n:])
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sxx * syy) ** 0.5
+
+
+def dynamic_correlation_table(closes_by_symbol: dict[str, Sequence[tuple]], static: Optional[dict] = None, stressed: Sequence[str] = (),
+                              windows: Sequence[int] = (60, 240)) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], str]]:
+    """CORRELAÇÃO EFETIVA: estática (regime normal) × rolling (últimos 60 e 240 fechamentos M1, retornos alinhados por minuto) × estresse.
+    Efetiva = a de MAIOR módulo entre estática e rolling (com o sinal da rolling quando ela é forte); em estresse (fluxo anômalo / evento
+    em curso num dos dois) a de maior módulo é elevada a pelo menos 0,8 — o risco conjunto é medido pelo pior caso plausível, não pela média.
+    `closes_by_symbol`: símbolo → [(time, close)] em M1. Devolve (tabela, notas)."""
+    static = static or DEFAULT_CORRELATION
+    syms = list(closes_by_symbol)
+    table: dict[tuple[str, str], float] = {}
+    notes: dict[tuple[str, str], str] = {}
+    series = {}
+    for sym, cs in closes_by_symbol.items():
+        pts = {t.replace(second=0, microsecond=0): float(c) for t, c in cs}
+        series[sym] = pts
+    for i, a in enumerate(syms):
+        for b in syms[i + 1:]:
+            st = static.get((a, b), static.get((b, a), 0.0))
+            best, why = st, f"estática {st:+.2f}"
+            common = sorted(set(series[a]) & set(series[b]))
+            for w in windows:
+                ks = common[-(w + 1):]
+                if len(ks) < 21:
+                    continue
+                ra = [series[a][ks[k + 1]] / series[a][ks[k]] - 1 for k in range(len(ks) - 1)]
+                rb = [series[b][ks[k + 1]] / series[b][ks[k]] - 1 for k in range(len(ks) - 1)]
+                rho = _pearson(ra, rb)
+                if rho is None:
+                    continue
+                why += f" · {w}m {rho:+.2f}"
+                if abs(rho) > abs(best):
+                    best = rho
+            if a in stressed or b in stressed:
+                if abs(best) < 0.8 and abs(st) >= 0.3:
+                    best = 0.8 if best >= 0 else -0.8
+                why += " · ESTRESSE"
+            table[(a, b)] = round(best, 3)
+            notes[(a, b)] = why
+    return table, notes
 
 
 class PortfolioExposureEngine:
@@ -13135,12 +13221,18 @@ class LiveExecutionEngine:
         slip_px = min(float(self.limits.max_slippage or 0.0), 0.02 * float(snap.atr or 0.0)) if snap.atr else 0.0
         comm_px = (self.limits.commission_per_lot * plan.lots / (plan.lots * pv)) if (pv and plan.lots and self.limits.commission_per_lot) else 0.0
         cost_r = (spread_px + slip_px + comm_px) / plan.r_value if plan.r_value else 0.0
-        p_hit = max(float(getattr(a, "prob_up", 0.0)), float(getattr(a, "prob_down", 0.0)))
+        p_raw = max(float(getattr(a, "prob_up", 0.0)), float(getattr(a, "prob_down", 0.0)))
+        # PROBABILIDADE CALIBRADA OBRIGATÓRIA: com calibrador, a.prob já é a observada; sem calibrador, encolhe para 50% antes do edge
+        if getattr(self.engine, "calibrator", None) is not None:
+            p_hit, p_note = p_raw, "calibrada"
+        else:
+            shrink = float(getattr(self.limits, "prob_shrink_uncalibrated", 0.5))
+            p_hit, p_note = 0.5 + (p_raw - 0.5) * shrink, f"declarada {p_raw:.0%} → encolhida (sem calibrador)"
         tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
         rr = abs(tp - plan.entry) / plan.r_value if (tp and plan.r_value) else 3.0
         gross_r = p_hit * rr - (1.0 - p_hit)
         net_r = gross_r - cost_r
-        self.log(f"💸 {self.symbol}: edge bruto {gross_r:+.2f}R (p {p_hit:.0%} × {rr:.1f}R) − custo {cost_r:.2f}R (spread {spread_px:g} + slip {slip_px:g} + com {comm_px:g}) = líquido {net_r:+.2f}R")
+        self.log(f"💸 {self.symbol}: edge bruto {gross_r:+.2f}R (p {p_hit:.0%} {p_note} × {rr:.1f}R) − custo {cost_r:.2f}R (spread {spread_px:g} + slip {slip_px:g} + com {comm_px:g}) = líquido {net_r:+.2f}R")
         if cost_r > self.limits.max_cost_r:
             return f"DESCARTADA — custo {cost_r:.2f}R > MAX_COST_R {self.limits.max_cost_r:g}R (stop {plan.r_value:g} pequeno demais para pagar spread {spread_px:g} + slippage {slip_px:g})"
         if net_r <= 0:
@@ -13423,6 +13515,7 @@ class MultiMarketData:
         self.mt5 = mt5_client
         self.mt5_symbol_map = mt5_symbol_map or {}
         self.status: dict[str, str] = {}
+        self.sources: dict[str, str] = {}          # símbolo → "mt5" | "yahoo" (o LIVE veta entrada sem preço da corretora)
 
     @classmethod
     def symbol_map_from_env(cls, env: dict[str, str]) -> dict[str, str]:
@@ -13436,14 +13529,19 @@ class MultiMarketData:
                 if not self.mt5.connected:
                     self.mt5.connect()
                 if not self.mt5.mt5.symbol_select(self.mt5.cfg.symbol, True):
-                    self.status[f"mt5:{spec.symbol}"] = f"símbolo {self.mt5.cfg.symbol} indisponível na corretora → Yahoo (confira MT5_SYMBOL_{spec.symbol} no .env)"
+                    self.status[f"mt5:{spec.symbol}"] = f"símbolo {self.mt5.cfg.symbol} indisponível na corretora → Yahoo só para CONTEXTO (confira MT5_SYMBOL_{spec.symbol} no .env)"
+                    self.sources[spec.symbol] = "yahoo"
                     return self.yahoo.all_timeframes(spec.yahoo)
-                return {tf: cs for tf in TF_TO_MT5 if (cs := self.mt5.candles(tf))}
+                out = {tf: cs for tf in TF_TO_MT5 if (cs := self.mt5.candles(tf))}
+                self.sources[spec.symbol] = "mt5"
+                return out
             except Exception as e:  # noqa: BLE001
-                self.status[f"mt5:{spec.symbol}"] = f"MT5 falhou ({str(e)[:60]}) → Yahoo"
+                self.status[f"mt5:{spec.symbol}"] = f"MT5 falhou ({str(e)[:60]}) → Yahoo só para CONTEXTO"
+                self.sources[spec.symbol] = "yahoo"
                 return self.yahoo.all_timeframes(spec.yahoo)
             finally:
                 self.mt5.cfg.symbol = orig
+        self.sources[spec.symbol] = "yahoo"
         return self.yahoo.all_timeframes(spec.yahoo)
 
     def market_cot(self, spec: MarketSpec, now: datetime) -> Optional[dict]:
@@ -13471,6 +13569,7 @@ class MultiMarketData:
                 if not candles:
                     raise RuntimeError("sem candles")
                 s = derive_market_snapshot(base, spec, candles, now, self.engine.cfg.window_minutes, self.market_cot(spec, now), identified)
+                s.price_source = self.sources.get(spec.symbol, "mt5" if (self.mt5 is not None and spec.symbol == "XAUUSD") else "yahoo")
                 out.by_symbol[spec.symbol] = s
                 out.data_quality[spec.symbol] = data_quality(s, spec)
                 self.status[spec.symbol] = "ok"
@@ -13589,6 +13688,9 @@ class MarketAIEngine:
         self.reaction_horizon = min(horizon_min, 240)
         # FLOW ANOMALY ENGINE (5.0): eventos implícitos ativos (mercado → IdentifiedEvent) e assinaturas do ciclo
         self.flow_engine = FlowAnomalyEngine(ledger=mem.flow_anomaly_rows())     # 5.2: anomalias já medidas alimentam o relógio (histórico decide)
+        for sym in symbols:
+            thr, why = self.flow_engine.thresholds.get(sym, (70, "sem medidas"))
+            log(f"🟣 FLOW {sym}: limiar {thr} — {why}")
         self.active_flows: dict[str, object] = {}
         self.flow_assessments: dict = {}
         # histórico fino dos líderes (USD/YIELD) ao redor do evento: função (nome, início, fim) → [(t, valor)] (Yahoo M1 / MT5); opcional
@@ -13859,6 +13961,22 @@ class MarketAIEngine:
             kind = ""
         return live_veto(negs, symbol, now, regime, kind)
 
+    def _update_correlation(self, snaps: MarketSnapshotSet) -> None:
+        """CORRELAÇÃO DINÂMICA a cada ciclo: M1 dos snapshots (60 e 240 min) × estática × estresse (fluxo anômalo ou evento em curso)."""
+        closes = {}
+        for sym, snap in snaps.by_symbol.items():
+            cs = (snap.candles or {}).get("M1") or (snap.candles or {}).get("M5") or []
+            if len(cs) >= 30:
+                closes[sym] = [(c.time, c.close) for c in cs[-300:]]
+        if len(closes) < 2:
+            return
+        stressed = [sym for sym, snap in snaps.by_symbol.items() if getattr(snap, "anomalous_regime", False)]
+        if getattr(self, "pending_reactions", None):
+            stressed += list(snaps.by_symbol)                        # evento em curso: todos em estresse (mesma aposta macro)
+        table, notes = dynamic_correlation_table(closes, None, stressed)
+        self.portfolio.corr_table = table
+        self.corr_notes = notes
+
     def _allowed_risk(self, symbol: str, direction: Direction) -> tuple[float, str]:
         return self.portfolio.allowed_risk_usd(symbol, direction, self.open_exposures(), self.perf.equity)
 
@@ -13874,6 +13992,7 @@ class MarketAIEngine:
         # 0) FLOW ANOMALY (informação implícita) → REACTION ENGINE (relógio por mercado + aprendizado dos eventos concluídos)
         self._flow_anomaly(snaps)
         self._reaction_clock(snaps)
+        self._update_correlation(snaps)
         # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
         for sym, eng in self.engines.items():
             snap = snaps.by_symbol.get(sym)
@@ -13921,6 +14040,10 @@ class MarketAIEngine:
             lc = getattr(self, "lifecycle", {}).get(sym)
             if lc is not None and not lc.allows_entries and lc.action != "QUEBRADO":
                 self.engines[sym].enter(r, snap_c, veto=f"CICLO DE VIDA — {sym} em {lc.action}: {lc.note}")
+                continue
+            # LIVE: decisão de entrada só com o preço da corretora que executa (Yahoo é contexto, nunca preço operacional)
+            if self.engines[sym].executor is not None and str(getattr(snap_c, "price_source", "") or "").lower() == "yahoo":
+                self.engines[sym].enter(r, snap_c, veto=f"SEM PREÇO DO BROKER — {sym} veio do Yahoo neste ciclo ({snaps.status.get('mt5:' + sym, 'MT5 indisponível')}); não opera")
                 continue
             fs = self._false_signal_veto(sym, snaps.time, r)
             if fs:
@@ -13973,6 +14096,10 @@ class MarketAIEngine:
         if getattr(self, "lifecycle", None):
             lines.append(render_table(list(self.lifecycle.values())))
             lad = self.limits.ladder()
+            notes = getattr(self, "corr_notes", {})
+            if notes:
+                strong = sorted(((k, v) for k, v in self.portfolio.corr_table.items()), key=lambda kv: -abs(kv[1]))[:5]
+                lines.append("🔗 CORRELAÇÃO EFETIVA (estática × 60m × 240m × estresse): " + " · ".join(f"{a}×{b} {rho:+.2f} ({notes.get((a, b), '')})" for (a, b), rho in strong))
             lines.append(f"🪜 HIERARQUIA DE EDGE E RISCO: A escada {lad[0]:g}/{lad[1]:g}/{lad[2]:g}% (teto {self.limits.risk_ladder_max_pct:g}%) · B base {lad[0]:g}% · "
                          f"C amostra {getattr(self.limits, 'sample_risk_pct', 1.0):g}% · D bloqueado — "
                          + " · ".join(f"{sym} {getattr(self, 'risk_notes', {}).get(sym, '')}" for sym in self.specs))
@@ -14161,17 +14288,38 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
     if bank is not None and bank.stats:
         print(f"EDGE BANK carregado: {len(bank.stats)} contextos ({args.edge_bank}) — só contextos com n próprio ≥ 30 ajustam a prioridade")
     learned = load_params(getattr(args, "params", None) or "")
+    calibrator = None
+    cal_path = getattr(args, "calibrator", None) or "calibrator.json"
+    if cal_path and os.path.exists(cal_path):
+        with open(cal_path, encoding="utf-8") as f:
+            calibrator = IsotonicCalibrator.from_dict(json.load(f))
+        print(f"CALIBRADOR carregado: {cal_path} — a probabilidade usada no edge é a CALIBRADA (declarada → observada)")
+    else:
+        print("sem calibrador (calibrator.json): a probabilidade declarada é ENCOLHIDA para 50% antes do edge (PROB_SHRINK_UNCALIBRATED); rode `calibrate` com previsões resolvidas")
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
-                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None), params=learned)
-    # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
+                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None), params=learned,
+                            calibrator=calibrator)
+    # REACTION ENGINE live: T0 real dos líderes. Com MT5, o líder USD vem dos TICKS da corretora (carimbo real, MT5_LEAD_USD, padrão USDX;
+    # EURUSD/GBPUSD/AUDUSD entram invertidos); yields continuam no M1 do Yahoo (^TNX) — sem MT5, tudo Yahoo M1.
     _Http = HttpClient
     _Yahoo = YahooCollector
     _y = _Yahoo(_Http(cache_dir=dcfg.cache_dir, ttl=60))
+    lead_usd_sym = (env.get("MT5_LEAD_USD") or "USDX").upper()
+    invert_usd = lead_usd_sym in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD")
 
     def lead_history(name, t_from, t_to):
+        if name == "USD" and mt5_client is not None:
+            try:
+                ticks = mt5_client.ticks_range(lead_usd_sym, t_from, t_to)
+                if ticks:
+                    return [(t, (1.0 / ((b + a) / 2.0)) if invert_usd else (b + a) / 2.0) for t, b, a in ticks]
+            except Exception as e:  # noqa: BLE001
+                print(f"[relógio] ticks do líder {lead_usd_sym} indisponíveis ({str(e)[:60]}) — usando Yahoo M1 neste evento")
         sym = {"USD": "DX-Y.NYB", "YIELD": "^TNX"}[name]
         return [(c.time + timedelta(minutes=1), c.close) for c in _y.candles(sym, "M1") if t_from <= c.time + timedelta(minutes=1) <= t_to]
     engine.lead_history = lead_history
+    if mt5_client is not None:
+        print(f"REACTION CLOCK LIVE: líder USD por TICKS da corretora ({lead_usd_sym}{' invertido' if invert_usd else ''}); yields por M1 (Yahoo)")
     print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
     print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
     stage("coletando dados (Yahoo/MT5/FRED/CFTC/RSS) — o PRIMEIRO ciclo pode levar alguns minutos; depois cada ciclo leva segundos")

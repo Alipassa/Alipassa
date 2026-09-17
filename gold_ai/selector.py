@@ -214,6 +214,60 @@ class PortfolioLimits:
                    g("MAX_ENTRIES_PER_CYCLE", 3))
 
 
+def _pearson(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
+    n = min(len(xs), len(ys))
+    if n < 20:
+        return None
+    xs, ys = list(xs[-n:]), list(ys[-n:])
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sxx * syy) ** 0.5
+
+
+def dynamic_correlation_table(closes_by_symbol: dict[str, Sequence[tuple]], static: Optional[dict] = None, stressed: Sequence[str] = (),
+                              windows: Sequence[int] = (60, 240)) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], str]]:
+    """CORRELAÇÃO EFETIVA: estática (regime normal) × rolling (últimos 60 e 240 fechamentos M1, retornos alinhados por minuto) × estresse.
+    Efetiva = a de MAIOR módulo entre estática e rolling (com o sinal da rolling quando ela é forte); em estresse (fluxo anômalo / evento
+    em curso num dos dois) a de maior módulo é elevada a pelo menos 0,8 — o risco conjunto é medido pelo pior caso plausível, não pela média.
+    `closes_by_symbol`: símbolo → [(time, close)] em M1. Devolve (tabela, notas)."""
+    from .markets import DEFAULT_CORRELATION
+    static = static or DEFAULT_CORRELATION
+    syms = list(closes_by_symbol)
+    table: dict[tuple[str, str], float] = {}
+    notes: dict[tuple[str, str], str] = {}
+    series = {}
+    for sym, cs in closes_by_symbol.items():
+        pts = {t.replace(second=0, microsecond=0): float(c) for t, c in cs}
+        series[sym] = pts
+    for i, a in enumerate(syms):
+        for b in syms[i + 1:]:
+            st = static.get((a, b), static.get((b, a), 0.0))
+            best, why = st, f"estática {st:+.2f}"
+            common = sorted(set(series[a]) & set(series[b]))
+            for w in windows:
+                ks = common[-(w + 1):]
+                if len(ks) < 21:
+                    continue
+                ra = [series[a][ks[k + 1]] / series[a][ks[k]] - 1 for k in range(len(ks) - 1)]
+                rb = [series[b][ks[k + 1]] / series[b][ks[k]] - 1 for k in range(len(ks) - 1)]
+                rho = _pearson(ra, rb)
+                if rho is None:
+                    continue
+                why += f" · {w}m {rho:+.2f}"
+                if abs(rho) > abs(best):
+                    best = rho
+            if a in stressed or b in stressed:
+                if abs(best) < 0.8 and abs(st) >= 0.3:
+                    best = 0.8 if best >= 0 else -0.8
+                why += " · ESTRESSE"
+            table[(a, b)] = round(best, 3)
+            notes[(a, b)] = why
+    return table, notes
+
+
 class PortfolioExposureEngine:
     """"Estou diversificando ou fazendo a mesma aposta três vezes?" Risco agregado e correlacionado."""
 

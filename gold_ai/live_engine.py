@@ -255,12 +255,18 @@ class LiveExecutionEngine:
         slip_px = min(float(self.limits.max_slippage or 0.0), 0.02 * float(snap.atr or 0.0)) if snap.atr else 0.0
         comm_px = (self.limits.commission_per_lot * plan.lots / (plan.lots * pv)) if (pv and plan.lots and self.limits.commission_per_lot) else 0.0
         cost_r = (spread_px + slip_px + comm_px) / plan.r_value if plan.r_value else 0.0
-        p_hit = max(float(getattr(a, "prob_up", 0.0)), float(getattr(a, "prob_down", 0.0)))
+        p_raw = max(float(getattr(a, "prob_up", 0.0)), float(getattr(a, "prob_down", 0.0)))
+        # PROBABILIDADE CALIBRADA OBRIGATÓRIA: com calibrador, a.prob já é a observada; sem calibrador, encolhe para 50% antes do edge
+        if getattr(self.engine, "calibrator", None) is not None:
+            p_hit, p_note = p_raw, "calibrada"
+        else:
+            shrink = float(getattr(self.limits, "prob_shrink_uncalibrated", 0.5))
+            p_hit, p_note = 0.5 + (p_raw - 0.5) * shrink, f"declarada {p_raw:.0%} → encolhida (sem calibrador)"
         tp = plan.targets.get(plan.recommended) or plan.targets.get("3R")
         rr = abs(tp - plan.entry) / plan.r_value if (tp and plan.r_value) else 3.0
         gross_r = p_hit * rr - (1.0 - p_hit)
         net_r = gross_r - cost_r
-        self.log(f"💸 {self.symbol}: edge bruto {gross_r:+.2f}R (p {p_hit:.0%} × {rr:.1f}R) − custo {cost_r:.2f}R (spread {spread_px:g} + slip {slip_px:g} + com {comm_px:g}) = líquido {net_r:+.2f}R")
+        self.log(f"💸 {self.symbol}: edge bruto {gross_r:+.2f}R (p {p_hit:.0%} {p_note} × {rr:.1f}R) − custo {cost_r:.2f}R (spread {spread_px:g} + slip {slip_px:g} + com {comm_px:g}) = líquido {net_r:+.2f}R")
         if cost_r > self.limits.max_cost_r:
             return f"DESCARTADA — custo {cost_r:.2f}R > MAX_COST_R {self.limits.max_cost_r:g}R (stop {plan.r_value:g} pequeno demais para pagar spread {spread_px:g} + slippage {slip_px:g})"
         if net_r <= 0:

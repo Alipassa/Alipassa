@@ -209,17 +209,39 @@ def cmd_live_markets(args: argparse.Namespace) -> int:
         print(f"EDGE BANK carregado: {len(bank.stats)} contextos ({args.edge_bank}) — só contextos com n próprio ≥ 30 ajustam a prioridade")
     from .autotune import load_params
     learned = load_params(getattr(args, "params", None) or "")
+    calibrator = None
+    cal_path = getattr(args, "calibrator", None) or "calibrator.json"
+    if cal_path and os.path.exists(cal_path):
+        from .validation import IsotonicCalibrator
+        with open(cal_path, encoding="utf-8") as f:
+            calibrator = IsotonicCalibrator.from_dict(json.load(f))
+        print(f"CALIBRADOR carregado: {cal_path} — a probabilidade usada no edge é a CALIBRADA (declarada → observada)")
+    else:
+        print("sem calibrador (calibrator.json): a probabilidade declarada é ENCOLHIDA para 50% antes do edge (PROB_SHRINK_UNCALIBRATED); rode `calibrate` com previsões resolvidas")
     engine = MarketAIEngine(mem, limits, symbols, mode, args.equity, plim, executors, sender, ks, commands, args.horizon, print, args.authorize,
-                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None), params=learned)
-    # REACTION ENGINE live: T0 real dos líderes via M1 do Yahoo (DXY, US10Y) — cache curto, falha silenciosa
+                            selector=AssetSelector(reaction_edge=edge), edge_bank=(bank if bank is not None and bank.stats else None), params=learned,
+                            calibrator=calibrator)
+    # REACTION ENGINE live: T0 real dos líderes. Com MT5, o líder USD vem dos TICKS da corretora (carimbo real, MT5_LEAD_USD, padrão USDX;
+    # EURUSD/GBPUSD/AUDUSD entram invertidos); yields continuam no M1 do Yahoo (^TNX) — sem MT5, tudo Yahoo M1.
     from .data import HttpClient as _Http
     from .data.yahoo import YahooCollector as _Yahoo
     _y = _Yahoo(_Http(cache_dir=dcfg.cache_dir, ttl=60))
+    lead_usd_sym = (env.get("MT5_LEAD_USD") or "USDX").upper()
+    invert_usd = lead_usd_sym in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD")
 
     def lead_history(name, t_from, t_to):
+        if name == "USD" and mt5_client is not None:
+            try:
+                ticks = mt5_client.ticks_range(lead_usd_sym, t_from, t_to)
+                if ticks:
+                    return [(t, (1.0 / ((b + a) / 2.0)) if invert_usd else (b + a) / 2.0) for t, b, a in ticks]
+            except Exception as e:  # noqa: BLE001
+                print(f"[relógio] ticks do líder {lead_usd_sym} indisponíveis ({str(e)[:60]}) — usando Yahoo M1 neste evento")
         sym = {"USD": "DX-Y.NYB", "YIELD": "^TNX"}[name]
         return [(c.time + timedelta(minutes=1), c.close) for c in _y.candles(sym, "M1") if t_from <= c.time + timedelta(minutes=1) <= t_to]
     engine.lead_history = lead_history
+    if mt5_client is not None:
+        print(f"REACTION CLOCK LIVE: líder USD por TICKS da corretora ({lead_usd_sym}{' invertido' if invert_usd else ''}); yields por M1 (Yahoo)")
     print(f"MARKET AI ENGINE {__version__} · modo {mode.value} · mercados {', '.join(symbols)} · {engine.perf.render()}")
     print(f"portfólio: risco total {plim.max_total_open_risk_pct}% · correlacionado {plim.max_correlated_risk_pct}% · posições {plim.max_positions} · por ativo {plim.max_asset_exposure}")
     stage("coletando dados (Yahoo/MT5/FRED/CFTC/RSS) — o PRIMEIRO ciclo pode levar alguns minutos; depois cada ciclo leva segundos")

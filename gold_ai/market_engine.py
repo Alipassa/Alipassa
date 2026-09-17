@@ -113,6 +113,9 @@ class MarketAIEngine:
         # FLOW ANOMALY ENGINE (5.0): eventos implícitos ativos (mercado → IdentifiedEvent) e assinaturas do ciclo
         from .flow_anomaly import FlowAnomalyEngine
         self.flow_engine = FlowAnomalyEngine(ledger=mem.flow_anomaly_rows())     # 5.2: anomalias já medidas alimentam o relógio (histórico decide)
+        for sym in symbols:
+            thr, why = self.flow_engine.thresholds.get(sym, (70, "sem medidas"))
+            log(f"🟣 FLOW {sym}: limiar {thr} — {why}")
         self.active_flows: dict[str, object] = {}
         self.flow_assessments: dict = {}
         # histórico fino dos líderes (USD/YIELD) ao redor do evento: função (nome, início, fim) → [(t, valor)] (Yahoo M1 / MT5); opcional
@@ -391,6 +394,23 @@ class MarketAIEngine:
             kind = ""
         return live_veto(negs, symbol, now, regime, kind)
 
+    def _update_correlation(self, snaps: MarketSnapshotSet) -> None:
+        """CORRELAÇÃO DINÂMICA a cada ciclo: M1 dos snapshots (60 e 240 min) × estática × estresse (fluxo anômalo ou evento em curso)."""
+        from .selector import dynamic_correlation_table
+        closes = {}
+        for sym, snap in snaps.by_symbol.items():
+            cs = (snap.candles or {}).get("M1") or (snap.candles or {}).get("M5") or []
+            if len(cs) >= 30:
+                closes[sym] = [(c.time, c.close) for c in cs[-300:]]
+        if len(closes) < 2:
+            return
+        stressed = [sym for sym, snap in snaps.by_symbol.items() if getattr(snap, "anomalous_regime", False)]
+        if getattr(self, "pending_reactions", None):
+            stressed += list(snaps.by_symbol)                        # evento em curso: todos em estresse (mesma aposta macro)
+        table, notes = dynamic_correlation_table(closes, None, stressed)
+        self.portfolio.corr_table = table
+        self.corr_notes = notes
+
     def _allowed_risk(self, symbol: str, direction: Direction) -> tuple[float, str]:
         return self.portfolio.allowed_risk_usd(symbol, direction, self.open_exposures(), self.perf.equity)
 
@@ -406,6 +426,7 @@ class MarketAIEngine:
         # 0) FLOW ANOMALY (informação implícita) → REACTION ENGINE (relógio por mercado + aprendizado dos eventos concluídos)
         self._flow_anomaly(snaps)
         self._reaction_clock(snaps)
+        self._update_correlation(snaps)
         # 1) cada mercado: monitor das posições abertas + predição (entrada adiada)
         for sym, eng in self.engines.items():
             snap = snaps.by_symbol.get(sym)
@@ -454,6 +475,10 @@ class MarketAIEngine:
             lc = getattr(self, "lifecycle", {}).get(sym)
             if lc is not None and not lc.allows_entries and lc.action != "QUEBRADO":
                 self.engines[sym].enter(r, snap_c, veto=f"CICLO DE VIDA — {sym} em {lc.action}: {lc.note}")
+                continue
+            # LIVE: decisão de entrada só com o preço da corretora que executa (Yahoo é contexto, nunca preço operacional)
+            if self.engines[sym].executor is not None and str(getattr(snap_c, "price_source", "") or "").lower() == "yahoo":
+                self.engines[sym].enter(r, snap_c, veto=f"SEM PREÇO DO BROKER — {sym} veio do Yahoo neste ciclo ({snaps.status.get('mt5:' + sym, 'MT5 indisponível')}); não opera")
                 continue
             fs = self._false_signal_veto(sym, snaps.time, r)
             if fs:
@@ -508,6 +533,10 @@ class MarketAIEngine:
             from .lifecycle import render_table
             lines.append(render_table(list(self.lifecycle.values())))
             lad = self.limits.ladder()
+            notes = getattr(self, "corr_notes", {})
+            if notes:
+                strong = sorted(((k, v) for k, v in self.portfolio.corr_table.items()), key=lambda kv: -abs(kv[1]))[:5]
+                lines.append("🔗 CORRELAÇÃO EFETIVA (estática × 60m × 240m × estresse): " + " · ".join(f"{a}×{b} {rho:+.2f} ({notes.get((a, b), '')})" for (a, b), rho in strong))
             lines.append(f"🪜 HIERARQUIA DE EDGE E RISCO: A escada {lad[0]:g}/{lad[1]:g}/{lad[2]:g}% (teto {self.limits.risk_ladder_max_pct:g}%) · B base {lad[0]:g}% · "
                          f"C amostra {getattr(self.limits, 'sample_risk_pct', 1.0):g}% · D bloqueado — "
                          + " · ".join(f"{sym} {getattr(self, 'risk_notes', {}).get(sym, '')}" for sym in self.specs))

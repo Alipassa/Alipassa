@@ -40,6 +40,7 @@ class GuardLimits(RiskLimits):
     sample_risk_pct: float = 1.0         # HIERARQUIA: risco do grau C (inconclusivo) para formar amostra; 0 = não opera em C
     max_cost_r: float = 0.25             # CUSTO LÍQUIDO: spread + slippage + comissão acima desta fração do stop (R) → descarta
     commission_per_lot: float = 0.0      # USD por lote, ida e volta (0 = corretora sem comissão / já no spread)
+    prob_shrink_uncalibrated: float = 0.5   # sem calibrador: p usada = 50% + (p declarada − 50%) × este fator
 
     def ladder(self) -> tuple[float, float, float]:
         if self.risk_ladder:
@@ -61,6 +62,7 @@ class GuardLimits(RiskLimits):
         g.sample_risk_pct = float(env.get("SAMPLE_RISK_PCT", g.sample_risk_pct))
         g.max_cost_r = float(env.get("MAX_COST_R", g.max_cost_r))
         g.commission_per_lot = float(env.get("COMMISSION_PER_LOT", g.commission_per_lot))
+        g.prob_shrink_uncalibrated = float(env.get("PROB_SHRINK_UNCALIBRATED", g.prob_shrink_uncalibrated))
         raw = str(env.get("RISK_LADDER", "") or "").strip()
         if raw:
             g.risk_ladder = tuple(float(x) for x in raw.split(",") if x.strip())

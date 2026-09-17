@@ -565,3 +565,16 @@ dos movimentos que já provaram ter edge. A cada ciclo: CAPTURA → FILTRO → O
 3. O risco não sobe porque apareceram oportunidades: C → B → A só com evidência fora da amostra (ciclo de vida). O 1% do grau C forma amostra;
    provar a qualidade dos sinais vem antes de escalar o risco.
 4. Perdedoras com MAE alto cedo são caso para o Exit Lab (stop/saída), não para filtro novo.
+
+## Adendo 5.2h — OS CINCO UPGRADES DA AUDITORIA `[multi.sources, market_engine, live_engine, selector.dynamic_correlation_table, flow_anomaly.learned_thresholds]`
+
+1. Preço operacional = preço da corretora. No LIVE, um mercado cujo preço veio do Yahoo neste ciclo NÃO opera ("SEM PREÇO DO BROKER");
+   Yahoo continua como contexto (macro, correlatos), nunca como preço de decisão.
+2. Reaction Clock LIVE por ticks reais: o líder USD vem dos ticks do MT5 (MT5_LEAD_USD, padrão USDX; pares cotados em dólar invertidos);
+   yields por M1. Histórico: Dukascopy/MT5 ticks → replay → aprendizado. M1 é confirmação, não relógio principal.
+3. Probabilidade calibrada obrigatória: com calibrator.json a probabilidade do edge é a observada; sem calibrador, a declarada é encolhida
+   para 50% (PROB_SHRINK_UNCALIBRATED) antes do edge líquido. "70%" só vale 70% quando o histórico disse que vale.
+4. Correlação dinâmica: estática × rolling 60 m × rolling 240 m × estresse (fluxo anômalo / evento em curso) → correlação EFETIVA, a de maior
+   módulo, elevada a ≥ 0,8 em estresse. O risco conjunto usa o pior caso plausível.
+5. Limiar de fluxo aprendido: por mercado, o menor degrau (70/80/90) com continuação ≥ 60% e MFE60 − MAE60 > 0 em n ≥ 20 casos medidos;
+   sem prova, 70 fica como gatilho de investigação, não de operação.
