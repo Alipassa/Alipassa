@@ -373,6 +373,34 @@ class MT5ServerOffsetTests(unittest.TestCase):
             os.environ.pop("MT5_UTC_OFFSET_HOURS", None)
 
 
+class MT5ServerOffsetStaleGoldTests(unittest.TestCase):
+    def test_gold_in_maintenance_break_does_not_shift_offset(self):
+        """Ouro parado há 1 h (manutenção) + EURUSD fresco: o fuso vem do tick mais recente (+3), não sai +2."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from tests.test_mt5 import FakeMT5
+        now = datetime.now(UTC)
+
+        class Fake(FakeMT5):
+            def symbol_info_tick(self, symbol):
+                age = 3600 if symbol == "XAUUSD" else 30                       # ouro velho, FX fresco
+                return SimpleNamespace(bid=1.0, ask=1.0, time=int(now.timestamp()) - age + 3 * 3600)
+        os.environ.pop("MT5_UTC_OFFSET_HOURS", None)
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["GOLD_AI_OFFSET_CACHE"] = os.path.join(d, "off.json")
+            try:
+                from gold_ai.data import mt5 as m
+                old = m.MT5Client.OFFSET_CACHE
+                m.MT5Client.OFFSET_CACHE = os.environ["GOLD_AI_OFFSET_CACHE"]
+                c = MT5Client(MT5Config(symbol="XAUUSD"), mt5=Fake())
+                c.connect()
+                self.assertEqual(c.server_offset_hours, 3.0)
+            finally:
+                m.MT5Client.OFFSET_CACHE = old
+                os.environ.pop("GOLD_AI_OFFSET_CACHE", None)
+
+
 class DukascopyM1Tests(unittest.TestCase):
     @staticmethod
     def _day(rows):

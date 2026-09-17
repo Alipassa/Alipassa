@@ -117,11 +117,15 @@ class MT5Client:
         if forced not in (None, ""):
             self.offset_note = "forçado por MT5_UTC_OFFSET_HOURS"
             return float(forced)
-        try:
-            t = self.mt5.symbol_info_tick(self.cfg.symbol)
-            ts = float(getattr(t, "time", 0) or 0)
-        except Exception:  # noqa: BLE001
-            ts = 0.0
+        # o tick MAIS RECENTE entre vários símbolos: o ouro para 1 h por dia (manutenção) e um tick de 1 h atrás faz o fuso
+        # sair 1 h menor (UTC+2 em vez de +3) sem nenhum resíduo que denuncie — FX 24/5 evita isso
+        ts = 0.0
+        for sym in dict.fromkeys([self.cfg.symbol, "EURUSD", "USDJPY", "GBPUSD", "XAUUSD", "AUDUSD"]):
+            try:
+                t = self.mt5.symbol_info_tick(sym)
+                ts = max(ts, float(getattr(t, "time", 0) or 0))
+            except Exception:  # noqa: BLE001
+                continue
         now = datetime.now(timezone.utc).timestamp()
         if not ts:                      # terminal sem tick nenhum (ou simulado): nada a inferir
             self.offset_note = "sem tick para inferir o fuso — 0 (defina MT5_UTC_OFFSET_HOURS se necessário)"
@@ -129,14 +133,21 @@ class MT5Client:
         if ts:
             raw = (ts - now) / 3600.0
             off = float(round(raw))
-            fresh = abs(raw - off) <= 0.25 and abs(off) <= 14 and abs(ts - now - off * 3600) <= 2 * 3600
+            fresh = abs(raw - off) <= 0.25 and abs(off) <= 14 and abs(ts - now - off * 3600) <= 15 * 60   # tick com ≤ 15 min
             if fresh:
+                try:
+                    with open(self.OFFSET_CACHE, encoding="utf-8") as f:
+                        prev = float(json.load(f).get("offset"))
+                    if prev != off:
+                        self.offset_note = f"detectado pelo último tick (mudou de {prev:+.0f}h para {off:+.0f}h — horário de verão do servidor?)"
+                except (OSError, ValueError, TypeError, KeyError):
+                    pass
                 try:
                     with open(self.OFFSET_CACHE, "w", encoding="utf-8") as f:
                         json.dump({"offset": off, "at": datetime.now(timezone.utc).isoformat()}, f)
                 except OSError:
                     pass
-                self.offset_note = "detectado pelo último tick"
+                self.offset_note = self.offset_note or "detectado pelo último tick"
                 return off
         try:
             with open(self.OFFSET_CACHE, encoding="utf-8") as f:

@@ -159,9 +159,15 @@ class LiveExecutionEngine:
             self._send(sig.text, res)
             res.pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon, symbol=self.symbol)
         if defer_entry:
-            res.decision = "ANALISADO — decisão de entrada delegada ao Asset Selector" if sig is not None else "SEM SINAL — " + a.edge_status
+            res.decision = "ANALISADO — decisão de entrada delegada ao Asset Selector" if sig is not None else self._no_signal_text(a)
             return res
         return self.enter(res, snap)
+
+    def _no_signal_text(self, a) -> str:
+        """'SEM SINAL' sempre com o motivo em números: com vantagem estatística, o que faltou para o limiar de sinal."""
+        if getattr(a, "has_edge", False):
+            return f"SEM SINAL — {a.edge_status} · faltou: {self.engine.gate.missing_for_signal(a)}"
+        return "SEM SINAL — " + a.edge_status
 
     def enter(self, res: CycleResult, snap: MarketSnapshot, veto: Optional[str] = None) -> CycleResult:
         """DECISION ENGINE. `veto` = motivo externo (Asset Selector/exposição) para não entrar neste ciclo."""
@@ -173,7 +179,7 @@ class LiveExecutionEngine:
         elif sig is not None:
             res.decision = self._decide_entry(sig, a, snap, res.pid or 0, res)
         else:
-            res.decision = "SEM SINAL — " + a.edge_status
+            res.decision = self._no_signal_text(a)
         # OPPORTUNITY ENGINE + FUNIL: toda análise vira um registro (entrada, ou a primeira etapa em que caiu)
         from .opportunity import DecisionRecord, classify_reason, funnel_stage
         direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction

@@ -1668,6 +1668,19 @@ class SignalGate:
     last_watch_at: Optional[datetime] = None          # anti-spam do WATCH: mesmo mercado/direção só a cada min_seconds_between_alerts
     last_watch_direction: Optional[Direction] = None
 
+    def missing_for_signal(self, a: Assessment) -> str:
+        """O que faltou para o sinal operacional, em números: |score| contra o limiar de sinal e confirmações contra o mínimo.
+        Responde à pergunta 'por que não entrou?' na própria tela (SETUP = vantagem passou; OPPORTUNITY exige isto)."""
+        need = int(self.cfg.buy)
+        have = abs(a.score)
+        parts = []
+        if have < need:
+            parts.append(f"|score| {have:.0f} < {need} (faltam {need - have:.0f})")
+        n_conf = len(a.confirmations or [])
+        if n_conf < self.cfg.min_confirmations:
+            parts.append(f"confirmações {n_conf}/{self.cfg.min_confirmations}")
+        return " · ".join(parts) if parts else "limiares atingidos"
+
     def evaluate(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
         self.last_reason = ""
         base_type = classify(a.score, self.cfg)
@@ -4199,11 +4212,15 @@ class MT5Client:
         if forced not in (None, ""):
             self.offset_note = "forçado por MT5_UTC_OFFSET_HOURS"
             return float(forced)
-        try:
-            t = self.mt5.symbol_info_tick(self.cfg.symbol)
-            ts = float(getattr(t, "time", 0) or 0)
-        except Exception:  # noqa: BLE001
-            ts = 0.0
+        # o tick MAIS RECENTE entre vários símbolos: o ouro para 1 h por dia (manutenção) e um tick de 1 h atrás faz o fuso
+        # sair 1 h menor (UTC+2 em vez de +3) sem nenhum resíduo que denuncie — FX 24/5 evita isso
+        ts = 0.0
+        for sym in dict.fromkeys([self.cfg.symbol, "EURUSD", "USDJPY", "GBPUSD", "XAUUSD", "AUDUSD"]):
+            try:
+                t = self.mt5.symbol_info_tick(sym)
+                ts = max(ts, float(getattr(t, "time", 0) or 0))
+            except Exception:  # noqa: BLE001
+                continue
         now = datetime.now(timezone.utc).timestamp()
         if not ts:                      # terminal sem tick nenhum (ou simulado): nada a inferir
             self.offset_note = "sem tick para inferir o fuso — 0 (defina MT5_UTC_OFFSET_HOURS se necessário)"
@@ -4211,14 +4228,21 @@ class MT5Client:
         if ts:
             raw = (ts - now) / 3600.0
             off = float(round(raw))
-            fresh = abs(raw - off) <= 0.25 and abs(off) <= 14 and abs(ts - now - off * 3600) <= 2 * 3600
+            fresh = abs(raw - off) <= 0.25 and abs(off) <= 14 and abs(ts - now - off * 3600) <= 15 * 60   # tick com ≤ 15 min
             if fresh:
+                try:
+                    with open(self.OFFSET_CACHE, encoding="utf-8") as f:
+                        prev = float(json.load(f).get("offset"))
+                    if prev != off:
+                        self.offset_note = f"detectado pelo último tick (mudou de {prev:+.0f}h para {off:+.0f}h — horário de verão do servidor?)"
+                except (OSError, ValueError, TypeError, KeyError):
+                    pass
                 try:
                     with open(self.OFFSET_CACHE, "w", encoding="utf-8") as f:
                         json.dump({"offset": off, "at": datetime.now(timezone.utc).isoformat()}, f)
                 except OSError:
                     pass
-                self.offset_note = "detectado pelo último tick"
+                self.offset_note = self.offset_note or "detectado pelo último tick"
                 return off
         try:
             with open(self.OFFSET_CACHE, encoding="utf-8") as f:
@@ -12580,9 +12604,15 @@ class LiveExecutionEngine:
             self._send(sig.text, res)
             res.pid = self.mem.record(a, sig.type.value, atr=snap.atr, horizon_min=self.horizon, symbol=self.symbol)
         if defer_entry:
-            res.decision = "ANALISADO — decisão de entrada delegada ao Asset Selector" if sig is not None else "SEM SINAL — " + a.edge_status
+            res.decision = "ANALISADO — decisão de entrada delegada ao Asset Selector" if sig is not None else self._no_signal_text(a)
             return res
         return self.enter(res, snap)
+
+    def _no_signal_text(self, a) -> str:
+        """'SEM SINAL' sempre com o motivo em números: com vantagem estatística, o que faltou para o limiar de sinal."""
+        if getattr(a, "has_edge", False):
+            return f"SEM SINAL — {a.edge_status} · faltou: {self.engine.gate.missing_for_signal(a)}"
+        return "SEM SINAL — " + a.edge_status
 
     def enter(self, res: CycleResult, snap: MarketSnapshot, veto: Optional[str] = None) -> CycleResult:
         """DECISION ENGINE. `veto` = motivo externo (Asset Selector/exposição) para não entrar neste ciclo."""
@@ -12594,7 +12624,7 @@ class LiveExecutionEngine:
         elif sig is not None:
             res.decision = self._decide_entry(sig, a, snap, res.pid or 0, res)
         else:
-            res.decision = "SEM SINAL — " + a.edge_status
+            res.decision = self._no_signal_text(a)
         # OPPORTUNITY ENGINE + FUNIL: toda análise vira um registro (entrada, ou a primeira etapa em que caiu)
         direction = a.direction if a.direction != Direction.LATERAL else a.premove.direction
         is_raw, stage = funnel_stage(a, sig, self.engine.gate.last_reason, res.decision, self.engine.cfg)

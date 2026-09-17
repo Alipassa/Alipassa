@@ -62,6 +62,19 @@ class SignalGate:
     last_watch_at: Optional[datetime] = None          # anti-spam do WATCH: mesmo mercado/direção só a cada min_seconds_between_alerts
     last_watch_direction: Optional[Direction] = None
 
+    def missing_for_signal(self, a: Assessment) -> str:
+        """O que faltou para o sinal operacional, em números: |score| contra o limiar de sinal e confirmações contra o mínimo.
+        Responde à pergunta 'por que não entrou?' na própria tela (SETUP = vantagem passou; OPPORTUNITY exige isto)."""
+        need = int(self.cfg.buy)
+        have = abs(a.score)
+        parts = []
+        if have < need:
+            parts.append(f"|score| {have:.0f} < {need} (faltam {need - have:.0f})")
+        n_conf = len(a.confirmations or [])
+        if n_conf < self.cfg.min_confirmations:
+            parts.append(f"confirmações {n_conf}/{self.cfg.min_confirmations}")
+        return " · ".join(parts) if parts else "limiares atingidos"
+
     def evaluate(self, a: Assessment, new_event_key: Optional[str] = None) -> Optional[Signal]:
         self.last_reason = ""
         base_type = classify(a.score, self.cfg)
