@@ -10,3 +10,5 @@ dados/cache_oos/
 dados/manual.json
 dados/gold_bias_state.json
 logs/
+dados/painel_state.json
+*.tmp

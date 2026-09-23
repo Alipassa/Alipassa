@@ -164,6 +164,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 4px 
     <h2>🎯 CONFLUÊNCIA</h2>
     <div class="conf-big" id="confl">—</div>
     <div class="bar"><i id="conflBar" style="width:0"></i></div>
+    <div class="small warn-text" id="conflNote" style="color:var(--warn-text);margin-top:4px"></div>
     <div class="small muted" style="margin-top:6px">% do peso dos blocos (macro, fluxo, técnico, notícias, estrutura) que aponta na direção do viés.</div>
     <div id="eventBox"></div>
   </section>
@@ -261,7 +262,8 @@ const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({"&": 
 const fmt = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toLocaleString("pt-BR", {minimumFractionDigits: d, maximumFractionDigits: d});
 const sgn = (v, d = 0) => v == null ? "—" : (v > 0 ? "+" : "") + fmt(v, d);
 const cls = (v) => v == null ? "flat" : v > 0 ? "up" : v < 0 ? "down" : "flat";
-let STATE = null, TF = localStorageGet("tf") || "H1", CHART = null, HOVER = null;
+const TFS = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
+let STATE = null, TF = TFS.includes(localStorageGet("tf")) ? localStorageGet("tf") : "H1", CHART = null, HOVER = null, BUSY = false, CHART_SEQ = 0;
 const OVERLAYS = {ema: "EMAs", vwap: "VWAP", bands: "Bandas VWAP", levels: "Suporte/Resistência", fib: "Fibonacci", signals: "Sinais da IA", entry: "Entrada hipotética", events: "Eventos"};
 const OV = Object.fromEntries(Object.keys(OVERLAYS).map((k) => [k, (localStorageGet("ov_" + k) ?? "1") === "1"]));
 
@@ -280,13 +282,15 @@ async function getJSON(url) { const r = await fetch(url, {cache: "no-store"}); i
 async function loadState() {
   try {
     STATE = await getJSON("/api/state");
-    renderState(STATE);
   } catch (e) {
-    $("srctxt").textContent = "sem conexão com o motor"; $("srcdot").style.background = cssVar("--crit");
+    $("srctxt").textContent = "sem conexão com o motor — mostrando a última leitura"; $("srcdot").style.background = cssVar("--crit");
+    return;
   }
+  try { renderState(STATE); } catch (e) { console.error("falha ao desenhar o painel", e); }
 }
 
 function renderState(s) {
+  if (s.confluence && $("conflNote")) $("conflNote").textContent = s.confluence.note || "";
   if (!s.price) { $("srctxt").textContent = s.service && s.service.error ? "erro: " + s.service.error : "aguardando 1ª leitura…"; return; }
   const st = s.status || {};
   const mt5 = st.mt5 === "ok";
@@ -360,7 +364,7 @@ async function loadHistory() {
 
 // ---------------------------------------------------------------- gráfico
 function buildToolbar() {
-  $("tfButtons").innerHTML = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"].map((t) => `<button class="btn tfb ${t === TF ? "on" : ""}" data-tf="${t}">${t}</button>`).join(" ");
+  $("tfButtons").innerHTML = TFS.map((t) => `<button class="btn tfb ${t === TF ? "on" : ""}" data-tf="${t}">${t}</button>`).join(" ");
   $("ovButtons").innerHTML = Object.entries(OVERLAYS).map(([k, l]) => `<button class="btn tfb ${OV[k] ? "on" : ""}" data-ov="${k}" aria-pressed="${OV[k]}">${l}</button>`).join(" ");
   document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { TF = b.dataset.tf; localStorageSet("tf", TF); buildToolbar(); loadChart(); });
   document.querySelectorAll("[data-ov]").forEach((b) => b.onclick = () => { const k = b.dataset.ov; OV[k] = !OV[k]; localStorageSet("ov_" + k, OV[k] ? "1" : "0"); buildToolbar(); drawChart(); });
@@ -370,7 +374,12 @@ function buildToolbar() {
 }
 
 async function loadChart() {
-  try { CHART = await getJSON("/api/chart?tf=" + TF); drawChart(); } catch (e) { CHART = null; drawChart(); }
+  const tf = TF, seq = ++CHART_SEQ;
+  try {
+    const data = await getJSON("/api/chart?tf=" + tf);
+    if (tf !== TF || seq !== CHART_SEQ) return;          // resposta atrasada de outro timeframe: descarta
+    CHART = data; drawChart();
+  } catch (e) { /* servidor fora: mantém o último gráfico */ }
 }
 
 function drawChart() {
@@ -390,12 +399,19 @@ function drawChart() {
   const consider = (v) => { if (v != null && isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } };
   cs.forEach((c) => { consider(c.l); consider(c.h); });
   const e = CHART.entry;
+  consider(CHART.price);
   if (OV.entry && e) { consider(e.stop); consider(e.target); }
   const span = hi - lo || 1; lo -= span * 0.06; hi += span * 0.06;
   const slot = pw / (n + extra), bw = Math.max(1, Math.min(12, slot * 0.66));
   const X = (i) => padL + slot * (i + 0.5), Y = (v) => padT + (hi - v) / (hi - lo) * ph;
-  const t0 = cs[0].t, dt = n > 1 ? (cs[n - 1].t - cs[0].t) / (n - 1) : 60;
-  const XT = (t) => X((t - t0) / dt);
+  const t0 = cs[0].t, TFSEC = {M1: 60, M5: 300, M15: 900, M30: 1800, H1: 3600, H4: 14400, D1: 86400}[TF] || 3600;
+  const idxAt = (t) => {                                     // último candle que abriu em/antes de t (busca binária nos horários reais)
+    if (t < cs[0].t) return -1;
+    let lo2 = 0, hi2 = n - 1;
+    while (lo2 < hi2) { const mid = (lo2 + hi2 + 1) >> 1; if (cs[mid].t <= t) lo2 = mid; else hi2 = mid - 1; }
+    return lo2;
+  };
+  const XT = (t) => t > cs[n - 1].t + TFSEC ? X(n - 1 + (t - cs[n - 1].t) / TFSEC) : X(idxAt(t));
   // grade + eixo de preço
   g.strokeStyle = C.grid; g.lineWidth = 1; g.fillStyle = C.muted; g.textAlign = "left";
   const step = niceStep(hi - lo, 7);
@@ -463,7 +479,7 @@ function drawChart() {
   // sinais da IA
   if (OV.signals) {
     (CHART.signals || []).forEach((sg) => {
-      const idx = Math.round((sg.t - t0) / dt); if (idx < 0 || idx >= n) return;
+      const idx = idxAt(sg.t); if (idx < 0 || sg.t > cs[n - 1].t + TFSEC) return;
       const c = cs[idx], x = X(idx), up = sg.side > 0, y = up ? Y(c.l) + 12 : Y(c.h) - 12;
       g.fillStyle = up ? C.good : C.crit; g.strokeStyle = C.surface; g.lineWidth = 2;
       g.beginPath(); if (up) { g.moveTo(x, y - 6); g.lineTo(x - 6, y + 5); g.lineTo(x + 6, y + 5); } else { g.moveTo(x, y + 6); g.lineTo(x - 6, y - 5); g.lineTo(x + 6, y - 5); }
@@ -478,7 +494,7 @@ function drawChart() {
   if (HOVER != null && HOVER >= 0 && HOVER < n) {
     g.strokeStyle = C.muted; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(X(HOVER)) + 0.5, padT); g.lineTo(Math.round(X(HOVER)) + 0.5, padT + ph); g.stroke();
   }
-  CHART._geo = {X, slot, padL, n};
+  CHART._geo = {X, slot, padL, n, idxAt};
 }
 function axisTag(g, y, text, bg, fg, x, w) { g.fillStyle = bg; g.fillRect(x, y - 9, w, 18); g.fillStyle = fg; g.textAlign = "left"; g.fillText(text, x + 4, y + 4); }
 function niceStep(range, ticks) { const raw = range / ticks, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p; }
@@ -514,7 +530,11 @@ async function openEntry() {
   if (risk > 0) $("riskIn").value = risk;
   let e;
   try { e = await getJSON("/api/entry" + (risk > 0 ? "?risk=" + risk : "")); } catch (err) { e = null; }
-  if (!e || !e.rows) { $("enStatus").textContent = "Sem leitura ainda."; $("dlg").showModal(); return; }
+  if (!e || !e.rows) {
+    ["enRows", "enPlan", "enWarn"].forEach((id) => { $(id).innerHTML = ""; }); $("enConf").textContent = "—";
+    $("enStatus").textContent = e && e.error ? "Erro: " + e.error : "Sem leitura ainda.";
+    if (!$("dlg").open) $("dlg").showModal(); return;
+  }
   $("enRows").innerHTML = e.rows.map((r) => row(r.icon, r.name, r.value == null ? (r.detail || null) : r.value, r.value == null ? "" : r.detail, r.value != null)).join("");
   $("enConf").innerHTML = `<b>${fmt(e.confluence, 0)}%</b>`;
   $("enStatus").textContent = "STATUS: " + e.icon + " " + e.status;
@@ -525,7 +545,7 @@ async function openEntry() {
       <span>Stop</span><b>${fmt(p.stop)} <span class="muted small">${esc(p.stop_rule)} · ${fmt(p.risk_points)} pts</span></b>
       <span>Alvo</span><b>${fmt(p.target)} <span class="muted small">${esc(p.target_rule)}${p.next_level ? " · próximo nível " + fmt(p.next_level) : ""}</span></b>
       <span>Risco/lote</span><b>US$ ${fmt(p.risk_per_lot_usd)}</b>
-      ${p.lots != null ? `<span>Lote p/ US$ ${fmt(p.risk_usd, 0)}</span><b>${fmt(p.lots, 2)} lote(s)</b>` : `<span>Risco</span><b class="muted">informe o risco em US$ abaixo</b>`}
+      ${p.lots != null ? `<span>Lote p/ US$ ${fmt(p.risk_usd, 0)}</span><b>${fmt(p.lots, 2)} lote(s)${p.lots_note ? ` <span class="down small">${esc(p.lots_note)}</span>` : ""}</b>` : `<span>Risco</span><b class="muted">informe o risco em US$ abaixo</b>`}
     </div>` : "";
   $("enWarn").innerHTML = e.event_warning ? `<div class="warnline">⚠️ ${esc(e.event_warning)}</div>` : "";
   $("enNote").textContent = e.note;
@@ -534,7 +554,15 @@ async function openEntry() {
 $("btnEntry").onclick = openEntry;
 $("riskGo").onclick = () => { localStorageSet("risk", $("riskIn").value); openEntry(); };
 $("dlgClose").onclick = () => $("dlg").close();
-$("btnRefresh").onclick = async () => { $("btnRefresh").disabled = true; try { await getJSON("/api/refresh"); } catch (e) { /* segue */ } $("btnRefresh").disabled = false; tick(); };
+$("btnRefresh").onclick = async () => {
+  const b = $("btnRefresh"); b.disabled = true; b.textContent = "↻ lendo…";
+  let msg = "";
+  try { const r = await fetch("/api/refresh", {method: "POST", cache: "no-store"}); const j = await r.json(); if (!j.ok) msg = "sem nova leitura" + (j.error ? ": " + j.error : ""); }
+  catch (e) { msg = "sem conexão com o motor"; }
+  b.disabled = false; b.textContent = "↻ Atualizar";
+  await tick();
+  if (msg) $("upd").textContent = "⚠ " + msg;
+};
 $("btnTheme").onclick = () => {
   const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
   const nxt = cur === "light" ? "dark" : "light"; document.documentElement.dataset.theme = nxt; localStorageSet("theme", nxt); drawChart();
@@ -542,7 +570,11 @@ $("btnTheme").onclick = () => {
 (function () { const t = localStorageGet("theme"); if (t) document.documentElement.dataset.theme = t; })();
 window.addEventListener("resize", () => drawChart());
 
-async function tick() { await loadState(); await loadChart(); loadHistory(); }
+async function tick() {
+  if (BUSY) return;                                     // intervalo + botão não se atropelam
+  BUSY = true;
+  try { await loadState(); await loadChart(); await loadHistory(); } finally { BUSY = false; }
+}
 buildToolbar(); tick(); setInterval(tick, 15000);
 </script>
 </body>

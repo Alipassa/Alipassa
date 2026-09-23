@@ -1961,29 +1961,35 @@ def cmd_bias(args: argparse.Namespace) -> int:
     source = _bias_source(args)
     try:
         while True:
-            snap = source.snapshot() if hasattr(source, "snapshot") else source.collect()
-            bias_apply_manual(snap, args.manual)
-            reading = engine.analyze(snap)
-            if mem is not None:
-                h1 = snap.candles.get("H1") or []
-                resolved = mem.resolve(h1, snap.time) if h1 else 0
-                if resolved:
-                    print(f"[memória] {resolved} previsão(ões) resolvida(s) contra o preço real")
-                mem.record(reading, args.mode)
-            if args.mode == "manha":
-                messages = [("relatorio", format_bias_morning(reading))]
-            elif args.mode == "fechamento":
-                messages = [("relatorio", format_bias_closing(reading, mem))]
-            elif args.mode == "relatorio":
-                messages = [("relatorio", format_bias_message(reading))]
-            else:
-                messages = notifier.decide(reading)
-            for kind, text in messages:
-                if not args.send:
-                    print(f"\n--- [{kind}] ---")
-                sender.send(text)
-            if not messages and args.verbose:
-                print(f"{reading.time:%H:%M} sem mudança relevante — {reading.emoji} {reading.label} {reading.score:+.0f} ({reading.confidence:.0f}%)")
+            try:
+                snap = source.snapshot() if hasattr(source, "snapshot") else source.collect()
+                bias_apply_manual(snap, args.manual)
+                reading = engine.analyze(snap)
+                if mem is not None:
+                    h1 = snap.candles.get("H1") or []
+                    resolved = mem.resolve(h1, snap.time) if h1 else 0
+                    if resolved:
+                        print(f"[memória] {resolved} previsão(ões) resolvida(s) contra o preço real")
+                if args.mode == "manha":
+                    messages = [("relatorio", format_bias_morning(reading))]
+                elif args.mode == "fechamento":
+                    messages = [("relatorio", format_bias_closing(reading, mem))]   # antes de gravar: nunca compara a leitura com ela mesma
+                elif args.mode == "relatorio":
+                    messages = [("relatorio", format_bias_message(reading))]
+                else:
+                    messages = notifier.decide(reading)
+                if mem is not None and args.source != "sample":           # dados sintéticos não entram no histórico real
+                    mem.record(reading, args.mode)
+                for kind, text in messages:
+                    if not args.send:
+                        print(f"\n--- [{kind}] ---")
+                    sender.send(text)
+                if not messages and args.verbose:
+                    print(f"{reading.time:%H:%M} sem mudança relevante — {reading.emoji} {reading.label} {reading.score:+.0f} ({reading.confidence:.0f}%)")
+            except Exception as e:  # noqa: BLE001 — o monitor não morre por um ciclo ruim
+                print(f"[bias] ciclo falhou: {type(e).__name__}: {e}")
+                if args.once or args.mode != "monitor":
+                    return 1
             if args.once or args.mode in ("manha", "fechamento", "relatorio"):
                 break
             time.sleep(args.interval)
@@ -2000,9 +2006,12 @@ def cmd_painel(args: argparse.Namespace) -> int:
     from .bias import BiasMemory, BiasNotifier, GoldBiasEngine
     from .dashboard import DashService, dash_serve
 
-    mem = BiasMemory(args.db) if args.db else None
-    service = DashService(_bias_source(args), GoldBiasEngine(), mem, BiasNotifier(args.state) if args.send or args.state else None,
-                          TelegramSender(dry_run=not args.send, quiet=not args.send), interval=args.interval, manual_path=args.manual,
+    sample = args.source == "sample"
+    mem = BiasMemory(":memory:" if sample else args.db) if args.db else None     # dados sintéticos nunca entram no histórico real
+    # estado dos alertas do painel é SEPARADO do comando `bias` (--state próprio): um não marca como "enviado" o que o outro não enviou
+    notifier = BiasNotifier(None if sample else args.state)
+    sender = TelegramSender() if args.send else None
+    service = DashService(_bias_source(args), GoldBiasEngine(), mem, notifier, sender, interval=args.interval, manual_path=args.manual,
                           contract_oz=args.contract)
     srv = dash_serve(service, args.host, args.port, open_browser=not args.no_browser)
     try:
@@ -2010,10 +2019,8 @@ def cmd_painel(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        service.stop_event.set()
         srv.server_close()
-        if mem is not None:
-            mem.close()
+        service.shutdown()
     return 0
 
 
@@ -2131,13 +2138,13 @@ def _main(argv: list[str]) -> int:
     pn.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
     pn.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")
     pn.add_argument("--mt5-path", default=None)
-    pn.add_argument("--calendar", default=None, help="CSV/JSON de calendário econômico")
+    pn.add_argument("--calendar", default=None, help="JSON de calendário econômico")
     pn.add_argument("--no-cot", action="store_true")
     pn.add_argument("--no-fred", action="store_true")
     pn.add_argument("--no-news", action="store_true")
     pn.add_argument("--manual", default="dados/manual.json", help="JSON com dados sem fonte automática (China, BCs, ETFs, eventos)")
     pn.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (histórico × resultado; vazio desliga)")
-    pn.add_argument("--state", default="dados/gold_bias_state.json", help="estado anti-repetição dos alertas")
+    pn.add_argument("--state", default="dados/painel_state.json", help="estado anti-repetição dos alertas do painel (separado do comando bias)")
     pn.add_argument("--interval", type=int, default=60, help="segundos entre leituras")
     pn.add_argument("--host", default="127.0.0.1", help="127.0.0.1 = só este computador (0.0.0.0 abre na rede local)")
     pn.add_argument("--port", type=int, default=8765)
@@ -2153,7 +2160,7 @@ def _main(argv: list[str]) -> int:
     bi.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
     bi.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")
     bi.add_argument("--mt5-path", default=None)
-    bi.add_argument("--calendar", default=None, help="CSV/JSON de calendário econômico (eventos de alto impacto)")
+    bi.add_argument("--calendar", default=None, help="JSON de calendário econômico (eventos de alto impacto)")
     bi.add_argument("--no-cot", action="store_true")
     bi.add_argument("--no-fred", action="store_true")
     bi.add_argument("--no-news", action="store_true")

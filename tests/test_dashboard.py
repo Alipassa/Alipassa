@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from datetime import timedelta
 
@@ -132,7 +133,11 @@ class DashboardHttpTests(unittest.TestCase):
             self.assertEqual(st["bias"]["label"], "BAIXA")
             self.assertTrue(json.loads(get("/api/chart?tf=M15"))["candles"])
             self.assertIn("plan", json.loads(get("/api/entry?risk=100")))
-            self.assertTrue(json.loads(get("/api/refresh"))["ok"])
+            with self.assertRaises(urllib.error.HTTPError):          # GET não dispara coleta (evita <img src=/api/refresh>)
+                get("/api/refresh")
+            req = urllib.request.Request(base + "/api/refresh", data=b"", method="POST")
+            self.assertTrue(json.loads(opener.open(req, timeout=60).read())["ok"])
+            self.assertEqual(svc.cycles, 2)
             self.assertEqual(len(json.loads(get("/api/history"))), 1)   # 2º ciclo dentro de record_every: não grava de novo
             self.assertTrue(any(a["kind"] == "alerta_entrada" for a in st["alerts"]))
         finally:

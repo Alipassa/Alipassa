@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .bias import BIAS_FACTOR_LABELS, BiasMemory, BiasNotifier, BiasReading, GoldBiasEngine, bias_apply_manual, bias_structure
 from .models import Candle, MarketSnapshot
-from .technical import adx, atr, ema, macd, rsi, swing_levels
+from .technical import adx, atr, macd, rsi, swing_levels
 
 DASH_TFS: tuple[str, ...] = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 DASH_BARS = 160                      # candles visíveis no gráfico
@@ -54,7 +54,30 @@ def dash_icon(v: Optional[float], thr: float = 20.0) -> str:
     return {1: "🟢", -1: "🔴", 0: "🟡"}[dash_state_of(v, thr)]
 
 
+def dash_finite(v: Any) -> Optional[float]:
+    """Número finito ou None (NaN/inf de um feed web nunca vira leitura +100)."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def dash_clean(obj: Any) -> Any:
+    """Troca NaN/inf por None em qualquer profundidade — o JSON do painel é sempre válido para o navegador."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: dash_clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [dash_clean(v) for v in obj]
+    return obj
+
+
 def dash_item(name: str, value: Optional[float], detail: str = "", directional: bool = True) -> dict:
+    value = dash_finite(value)
     v = None if value is None else round(max(-100.0, min(100.0, value)), 0)
     return {"name": name, "value": v, "detail": detail, "icon": dash_icon(v) if directional else ("🟢" if (v or 0) >= 25 else "🟡"),
             "state": dash_state_of(v) if directional else 0, "directional": directional}
@@ -66,18 +89,19 @@ def dash_mean(items: Sequence[dict]) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- técnico por timeframe
-def dash_tf_indicators(candles: Sequence[Candle]) -> dict:
+def dash_tf_indicators(candles: Sequence[Candle], tf: str = "H1") -> dict:
     """RSI, MACD, ADX, EMAs, VWAP da janela, ATR — valores brutos + leitura −100..+100 (sentido do ouro)."""
     closes = [c.close for c in candles]
     if len(closes) < 30:
         return {}
-    e9, e21, e50 = ema(closes, 9)[-1], ema(closes, 21)[-1], ema(closes, 50)[-1]
-    e200 = ema(closes, 200)[-1] if len(closes) >= 200 else None
+    e9, e21, e50, e200 = (dash_ema(closes, n)[-1] for n in (9, 21, 50, 200))
+    if e9 is None or e21 is None or e50 is None:
+        return {}
     r = rsi(closes)
     _, _, hist = macd(closes)
     a = adx(candles)
     at = atr(candles) or 0.0
-    vw = dash_vwap_series(candles, "H1")[-1]
+    vw = dash_vwap_series(candles, tf)[-1]
     close = closes[-1]
     out = {"close": close, "ema9": e9, "ema21": e21, "ema50": e50, "ema200": e200, "rsi": r, "macd_hist": hist[-1] if hist else None,
            "adx": a, "atr": at, "vwap": vw["vwap"]}
@@ -86,6 +110,20 @@ def dash_tf_indicators(candles: Sequence[Candle]) -> dict:
     out["macd_read"] = None if not hist or not at else 100 * dash_t(hist[-1] / (0.5 * at))
     out["vwap_read"] = None if not vw["vwap"] or not at else 100 * dash_t((close - vw["vwap"]) / at)
     out["adx_read"] = a
+    return out
+
+
+def dash_ema(values: Sequence[float], n: int) -> list[Optional[float]]:
+    """EMA padrão semeada com a média simples dos n primeiros valores; None antes disso (sem “semente decaindo”)."""
+    out: list[Optional[float]] = [None] * len(values)
+    if len(values) < n:
+        return out
+    k = 2 / (n + 1)
+    e = sum(values[:n]) / n
+    out[n - 1] = e
+    for i in range(n, len(values)):
+        e = values[i] * k + e * (1 - k)
+        out[i] = e
     return out
 
 
@@ -181,6 +219,7 @@ class DashState:
         self.prev_light: Optional[str] = None
         self.prev_score: Optional[float] = None
         self.score_before: Optional[float] = None     # score da leitura anterior (para "IA mudou de X → Y")
+        self.last_entry_alert: Optional[dict] = None  # último ALERTA DE COMPRA/VENDA {side, time} (persistido no estado do notificador)
         self.status: dict[str, str] = {}
         self.updated: Optional[datetime] = None
 
@@ -256,7 +295,7 @@ class DashState:
         per_tf = {}
         for tf in ("M15", "H1", "H4", "D1"):
             cs = s.candles.get(tf) or []
-            ind = dash_tf_indicators(cs)
+            ind = dash_tf_indicators(cs, tf)
             if ind:
                 per_tf[tf] = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in ind.items()}
                 per_tf[tf]["structure"] = bias_structure(cs)
@@ -304,6 +343,7 @@ class DashState:
         struct_vals = []
         for tf, w in (("H1", 0.3), ("H4", 0.4), ("D1", 0.3)):
             st = r.structure.get(tf, "")
+            st = "" if st == "—" else st
             v = 100 if ("ALTA" in st or "rompimento de alta" in st) else -100 if ("BAIXA" in st or "rompimento de baixa" in st) else 0 if st else None
             if v is not None:
                 struct_vals.append((v, w))
@@ -330,7 +370,8 @@ class DashState:
         return round(100 * num / den) if den else 0.0
 
     @staticmethod
-    def traffic_light(groups: dict, score: float, event_minutes: Optional[float]) -> dict:
+    def traffic_light(groups: dict, score: float, event_minutes: Optional[float], released_minutes_ago: Optional[float] = None,
+                      price_ok: bool = True) -> dict:
         """🟢 COMPRA · 🔴 VENDA · 🟡 AGUARDAR. Compra exige macro, técnico e estrutura positivos, fluxo e notícias sem contrariar e
         score ≥ +40 (a venda é o espelho). Divergência ou evento de alto impacto em ≤ 30 min → AGUARDAR."""
         st = {k: dash_state_of(v) for k, v in groups.items()}
@@ -342,6 +383,13 @@ class DashState:
 
         pos = [DASH_GROUP_LABELS[k] for k, v in st.items() if v > 0]
         neg = [DASH_GROUP_LABELS[k] for k, v in st.items() if v < 0]
+        if not price_ok:
+            return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR — SEM PREÇO", "reason": "sem cotação do XAU/USD (MT5 e web falharam)",
+                    "rows": rows, "missing": missing}
+        if released_minutes_ago is not None and 0 <= released_minutes_ago <= 15:
+            return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR — DADO RECÉM-DIVULGADO",
+                    "reason": f"evento de alto impacto há {released_minutes_ago:.0f} min: esperar a volatilidade da divulgação assentar",
+                    "rows": rows, "missing": missing}
         if event_minutes is not None and 0 <= event_minutes <= 30:
             return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR — EVENTO DE ALTO IMPACTO",
                     "reason": f"dado importante em {event_minutes:.0f} min: esperar a reação do dólar e dos juros", "rows": rows, "missing": missing}
@@ -416,7 +464,7 @@ class DashState:
         d = 1 if r.score > 0 else -1 if r.score < 0 else 0
         trend_vals = []
         for tf in ("H4", "D1"):
-            ind = dash_tf_indicators(s.candles.get(tf) or [])
+            ind = dash_tf_indicators(s.candles.get(tf) or [], tf)
             if ind:
                 trend_vals.append(ind["ema_read"])
         trend = sum(trend_vals) / len(trend_vals) if trend_vals else None
@@ -450,7 +498,9 @@ class DashState:
                 {"name": "Volatilidade", "icon": vol_icon, "value": None, "detail": vol_txt}]
         against = [x["name"] for x in rows if x["icon"] == "🔴"]
         event = r.event
-        if d == 0 or abs(r.score) < 40:
+        if s.price <= 0:
+            status, icon = "SEM PREÇO — NÃO ENTRAR", "🟡"
+        elif d == 0 or abs(r.score) < 40:
             status, icon = "SEM VIÉS SUFICIENTE — NÃO ENTRAR", "🟡"
         elif vol_icon == "🔴" or (trend is not None and dash_state_of(trend) == -d):
             status, icon = "NÃO ENTRAR — " + ("volatilidade extrema" if vol_icon == "🔴" else "tendência maior contra o viés"), "🔴"
@@ -459,7 +509,7 @@ class DashState:
         else:
             status, icon = "AGUARDAR CONFIRMAÇÃO", "🟡"
         plan = None
-        if d != 0 and atr_now:
+        if d != 0 and atr_now and s.price > 0 and abs(r.score) >= 40:
             price = s.price
             lv = dash_levels(h1[-120:], price, atr_now) if h1 else {"supports": [], "resistances": []}
             struct = (lv["supports"][0] - 0.25 * atr_now) if d > 0 and lv["supports"] else (lv["resistances"][0] + 0.25 * atr_now) if d < 0 and lv["resistances"] else None
@@ -477,7 +527,9 @@ class DashState:
             if risk_usd:
                 lots = risk_usd / (risk_pt * self.contract_oz) if risk_pt else 0.0
                 plan["risk_usd"] = risk_usd
-                plan["lots"] = math.floor(lots * 100) / 100
+                plan["lots"] = math.floor(lots * 100 + 1e-3) / 100      # tolerância: 0,2899999 lote ainda é 0,29
+                if plan["lots"] < 0.01:
+                    plan["lots_note"] = "risco menor que o de 0,01 lote — aumente o risco ou não entre"
         warn = None
         if event is not None:
             warn = f"Evento de alto impacto: {event.name} em {event.minutes:.0f} minutos"
@@ -493,20 +545,21 @@ class DashState:
         if not full:
             return {"tf": tf, "candles": [], "available": [k for k in DASH_TFS if s.candles.get(k)]}
         closes = [c.close for c in full]
-        e = {n: ema(closes, n) if len(closes) >= n else [] for n in (9, 21, 50, 200)}
+        e = {n: dash_ema(closes, n) for n in (9, 21, 50, 200)}
         vw = dash_vwap_series(full, tf, s.session_start[0] if s.session_start else 22)
         start = max(0, len(full) - DASH_BARS)
         vis = full[start:]
 
-        def at(series: list, i: int) -> Optional[float]:
-            return round(series[i], 2) if series and i < len(series) and (len(closes) - len(series)) <= i else None
+        def at(series: list, i: int, n: int) -> Optional[float]:
+            v = series[i] if i < len(series) else None
+            return None if v is None else round(v, 2)
 
         candles = []
         for i in range(start, len(full)):
             c = full[i]
             v = vw[i]
             candles.append({"t": int(c.time.timestamp()), "o": c.open, "h": c.high, "l": c.low, "c": c.close,
-                            "e9": at(e[9], i), "e21": at(e[21], i), "e50": at(e[50], i), "e200": at(e[200], i) if len(closes) >= 200 else None,
+                            "e9": at(e[9], i, 9), "e21": at(e[21], i, 21), "e50": at(e[50], i, 50), "e200": at(e[200], i, 200),
                             "vw": round(v["vwap"], 2), "sd": round(v["sd"], 2)})
         atr_tf = atr(full) or s.atr or 1.0
         levels = dash_levels(vis, s.price, atr_tf)
@@ -536,6 +589,14 @@ class DashState:
         self.prev_light = now
         if now not in ("COMPRA", "VENDA") or prev == now:
             return None
+        last = self.last_entry_alert or {}
+        try:
+            last_t = datetime.fromisoformat(str(last.get("time")))
+        except ValueError:
+            last_t = None
+        if last.get("side") == now and last_t is not None and last_t.tzinfo is not None and (s.time - last_t).total_seconds() < 3600:
+            return None                                       # semáforo piscando VENDA → AGUARDAR → VENDA: um alerta só por hora
+        self.last_entry_alert = {"side": now, "time": s.time.isoformat()}
         d = 1 if now == "COMPRA" else -1
         ok = []
         for tf, st in r.structure.items():
@@ -569,7 +630,9 @@ class DashState:
         news = self.news_block(r)
         groups = self.groups(macro, flow, tech, news, s, r)
         conf = self.confluence(groups, r.score)
-        light = self.traffic_light(groups, r.score, r.event.minutes if r.event else None)
+        released = [(s.time - e.time).total_seconds() / 60 for e in s.events
+                    if e.impact in ("ALTO", "MUITO ALTO") and 0 <= (s.time - e.time).total_seconds() <= 15 * 60]
+        light = self.traffic_light(groups, r.score, r.event.minutes if r.event else None, min(released) if released else None, s.price > 0)
         entry = self.entry(s, r, groups, conf, light, risk_usd)
         brain = self.brain(s, r, tech, groups)
         self.updated = datetime.now(timezone.utc)
@@ -580,7 +643,8 @@ class DashState:
                      "horizons": {k: {"label": h.label, "emoji": h.emoji, "score": h.score} for k, h in r.horizons.items()}},
             "macro": macro, "context": ctx, "flow": flow, "technical": tech, "news": news, "calendar": self.calendar_block(s),
             "confluence": {"groups": {k: {"label": DASH_GROUP_LABELS[k], "value": v, "icon": dash_icon(v)} for k, v in groups.items()},
-                           "value": conf, "macro": macro[:6], "flow": flow[:4], "technical": tech["items"], "themes": news["themes"]},
+                           "value": conf, "macro": macro[:6], "flow": flow[:4], "technical": tech["items"], "themes": news["themes"],
+                           "note": "" if abs(r.score) >= 40 else f"viés fraco (score {r.score:+.0f}): confluência alta sem força não é sinal"},
             "light": light, "brain": brain, "entry": entry,
             "event": None if r.event is None else {"name": r.event.name, "minutes": r.event.minutes, "if_above": r.event.if_above,
                                                   "if_below": r.event.if_below, "volatility": r.event.volatility},
@@ -634,11 +698,18 @@ class DashService:
         self.last_error = ""
         self.last_record: Optional[datetime] = None
         self.cycles = 0
+        self.cycles_started = 0
+        self.cycles_failed = 0
+        self.thread: Optional[threading.Thread] = None
+        self.allow_any_host = False                  # True só com --host 0.0.0.0 (rede local)
+        if notifier is not None and isinstance(notifier.state.get("painel_alerta"), dict):
+            self.state.last_entry_alert = notifier.state["painel_alerta"]
 
     def snapshot(self) -> MarketSnapshot:
         return self.source.snapshot() if hasattr(self.source, "snapshot") else self.source.collect()
 
     def cycle(self) -> dict:
+        self.cycles_started += 1
         s = self.snapshot()
         bias_apply_manual(s, self.manual_path)
         r = self.engine.analyze(s)
@@ -656,6 +727,9 @@ class DashService:
             alert = self.state.buy_sell_alert(payload["light"], s, r, payload["macro"], payload["technical"])
             if alert:
                 messages.append(("alerta_entrada", alert))
+            if alert and self.notifier is not None:
+                self.notifier.state["painel_alerta"] = self.state.last_entry_alert
+                self.notifier._save()
             for kind, text in messages:
                 self.state.add_alert(kind, text, s.time)
             payload["alerts"] = self.state.alerts
@@ -672,24 +746,53 @@ class DashService:
                 self.last_error = ""
             except Exception as e:  # noqa: BLE001 — o painel continua no ar com o último estado
                 self.last_error = f"{type(e).__name__}: {e}"
+                self.cycles_failed += 1
                 print(f"[painel] ciclo falhou: {self.last_error}")
             self.wake_event.wait(self.interval)
             self.wake_event.clear()
 
     def request_refresh(self, timeout: float = 120.0) -> bool:
-        """Pede uma leitura nova à thread de coleta e espera ela terminar."""
-        before = self.cycles
+        """Pede uma leitura NOVA — que comece depois do pedido — e espera ela terminar. Os ciclos são sequenciais numa thread só:
+        se houver um em andamento (com dados de antes do clique), o aviso fica armado e o próximo começa logo em seguida."""
+        target = self.cycles_started + 1
         self.wake_event.set()
         end = time.time() + timeout
-        while time.time() < end and self.cycles == before and not self.stop_event.is_set():
+        while time.time() < end and not self.stop_event.is_set():
+            if self.cycles + self.cycles_failed >= target:
+                return not self.last_error
             time.sleep(0.2)
-        return self.cycles != before
+        return False
 
     def state_json(self) -> dict:
         with self.lock:
             p = dict(self.state.payload)
+            p["alerts"] = list(self.state.alerts)
         p["service"] = {"cycles": self.cycles, "interval": self.interval, "error": self.last_error}
         return p
+
+    def start(self) -> threading.Thread:
+        self.thread = threading.Thread(target=self.run_loop, name="gold-painel-coleta", daemon=True)
+        self.thread.start()
+        return self.thread
+
+    def shutdown(self) -> None:
+        """Para a coleta, espera o ciclo em andamento e fecha banco e MT5 com o lock (nada fecha no meio de um ciclo)."""
+        self.stop_event.set()
+        self.wake_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=30)
+        with self.lock:
+            if self.memory is not None:
+                try:
+                    self.memory.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            client = getattr(self.source, "client", None)
+            if client is not None and hasattr(client, "close"):
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def dash_handler(service: DashService) -> type:
@@ -705,26 +808,53 @@ def dash_handler(service: DashService) -> type:
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, obj: Any) -> None:
-            self._send(200, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")
+        def _json(self, obj: Any, code: int = 200) -> None:
+            body = json.dumps(dash_clean(obj), ensure_ascii=False, default=str, allow_nan=False).encode("utf-8")
+            self._send(code, body, "application/json; charset=utf-8")
+
+        def _host_ok(self) -> bool:
+            """Anti DNS-rebinding: com o bind padrão (127.0.0.1) só aceita Host local."""
+            if service.allow_any_host:
+                return True
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+            return host in ("127.0.0.1", "localhost", "::1", "")
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._host_ok():
+                self._send(403, b"forbidden", "text/plain")
+                return
+            try:
+                self._get()
+            except Exception as e:  # noqa: BLE001 — erro vira 500 com mensagem, nunca conexão derrubada
+                try:
+                    self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        def do_POST(self) -> None:  # noqa: N802
+            if not self._host_ok():
+                self._send(403, b"forbidden", "text/plain")
+                return
+            if urlparse(self.path).path != "/api/refresh":
+                self._send(404, b"not found", "text/plain")
+                return
+            ok = service.request_refresh()
+            self._json({"ok": ok, "error": service.last_error})
+
+        def _get(self) -> None:
             u = urlparse(self.path)
             q = parse_qs(u.query)
 
             def num(name: str) -> Optional[float]:
-                try:
-                    v = float(q.get(name, [""])[0])
-                    return v if v > 0 else None
-                except ValueError:
-                    return None
+                v = dash_finite((q.get(name) or [""])[0] or None)
+                return v if v is not None and 0 < v < 1e9 else None
 
             if u.path in ("/", "/index.html"):
                 self._send(200, DASH_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif u.path == "/api/state":
                 self._json(service.state_json())
             elif u.path == "/api/chart":
-                tf = q.get("tf", ["H1"])[0].upper()
+                tf = (q.get("tf") or ["H1"])[0].upper()
                 with service.lock:
                     data = service.state.chart(tf if tf in DASH_TFS else "H1")
                 self._json(data)
@@ -737,8 +867,7 @@ def dash_handler(service: DashService) -> type:
                     data = service.state.history()
                 self._json(data)
             elif u.path == "/api/refresh":
-                ok = service.request_refresh()
-                self._json({"ok": ok, "error": service.last_error})
+                self._send(405, b"use POST", "text/plain")
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -748,7 +877,8 @@ def dash_handler(service: DashService) -> type:
 def dash_serve(service: DashService, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
                wait_first: float = 180.0) -> ThreadingHTTPServer:
     """Sobe a thread de coleta (1ª leitura já nela) e o HTTP. Devolve o servidor (chame .serve_forever())."""
-    threading.Thread(target=service.run_loop, name="gold-painel-coleta", daemon=True).start()
+    service.allow_any_host = host not in ("127.0.0.1", "localhost", "::1")
+    service.start()
     end = time.time() + wait_first
     while service.cycles == 0 and not service.last_error and time.time() < end:
         time.sleep(0.2)

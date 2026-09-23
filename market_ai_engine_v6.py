@@ -89,7 +89,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "6.0.0"
-__build__ = "2026-09-23 19:38 UTC · bc5f3e6"
+__build__ = "2026-09-23 21:13 UTC · 99b614b+"
 
 
 # ============================================================================
@@ -15127,12 +15127,12 @@ BIAS_NEWS_ROUTE: dict[str, str] = {"fed": "fed", "macro": "inflacao", "employmen
 BIAS_NEWS_IMPORTANCE: dict[str, float] = {"fed": 1.0, "macro": 0.9, "employment": 0.85, "geopolitical": 0.8, "systemic": 0.9,
                                           "flow": 0.7, "china": 0.6, "india": 0.5, "dollar": 0.8, "generic": 0.3}
 BIAS_SOURCE_TIERS: tuple[tuple[str, float], ...] = (
-    (r"federal ?reserve|\bfed\b|fomc|ecb|bce|boj|pboc|banco central|central bank|treasury|bls|bea|census|world gold council|wgc|cftc", 1.0),
+    (r"federal ?reserve|\bfed\b|\bfomc\b|\becb\b|\bbce\b|\bboj\b|\bpboc\b|banco central|central bank|\btreasury\b|\bbls\b|\bbea\b|census bureau|world gold council|\bwgc\b|\bcftc\b", 1.0),
     (r"reuters|bloomberg|dow ?jones|wsj|financial times|\bft\b|cnbc|marketwatch|associated press|\bap\b|nikkei|valor", 0.85),
-    (r"kitco|fxstreet|investing|forexlive|yahoo|comex|cme|spdr|lbma", 0.75),
+    (r"kitco|fxstreet|investing\.com|forexlive|yahoo|\bcomex\b|\bcme\b|\bspdr\b|\blbma\b", 0.75),
     (r"twitter|\bx\.com\b|reddit|telegram|tiktok|youtube|forum", 0.25),
 )
-BIAS_RUMOR_RE = re.compile(r"\b(rumou?r|unconfirmed|sources say|reportedly|could|may|speculat|boato|rumor|não confirmad)\w*", re.IGNORECASE)
+BIAS_RUMOR_RE = re.compile(r"\b(rumou?rs?|unconfirmed|sources (say|said)|reportedly|speculat\w*|boatos?|rumores|não confirmad\w*)\b", re.IGNORECASE)
 BIAS_EMPLOYMENT_RE = re.compile(r"\b(payrolls?|nfp|jobs|jobless|unemployment|desemprego|emprego|adp|jolts|hourly earnings)\b", re.IGNORECASE)
 BIAS_NEWS_HALF_LIFE_MIN = 180.0
 
@@ -15279,9 +15279,10 @@ def bias_score_inflacao(s: MarketSnapshot, w: float) -> FactorScore:
 def bias_score_fluxo(s: MarketSnapshot, w: float) -> FactorScore:
     """Fluxo institucional: ETFs + bancos centrais + agressão + OI (+ COT semanal quando houver)."""
     f = score_fluxo(s, w)
-    if s.cot_managed_money_net_change is None:
+    age_w = cot_age_weight(s.cot_age_days)          # COT é semanal: perde peso com a idade; ≥ 35 dias = descartado
+    if s.cot_managed_money_net_change is None or age_w == 0.0:
         return f
-    cot = math.tanh(s.cot_managed_money_net_change / 15000.0)
+    cot = math.tanh(s.cot_managed_money_net_change / 15000.0) * age_w
     if not f.available:
         return FactorScore("fluxo", round(cot * 0.6 * w, 1), w, f"fluxo: só COT ({s.cot_managed_money_net_change:+.0f} contratos/sem)")
     ratio = bias_clip(0.75 * f.ratio + 0.25 * cot)
@@ -15554,7 +15555,7 @@ class GoldBiasEngine:
             out.append("Notícias desfavoráveis, mas o preço sobe — algo mais forte sustenta o ouro.")
         if bias_risk_mode(s) == "RISK-OFF" and s.price_change_pct < -0.3:
             out.append("Risk-off sem demanda por proteção: ouro caindo junto (possível venda por liquidez).")
-        if s.cot_managed_money_percentile is not None and s.cot_managed_money_percentile >= 90 and tec > 0.25:
+        if s.cot_managed_money_percentile is not None and s.cot_managed_money_percentile >= 90 and tec > 0.25 and cot_age_weight(s.cot_age_days) > 0:
             out.append("Especuladores muito comprados (COT ≥ p90) — risco de realização técnica.")
         return out
 
@@ -15576,6 +15577,7 @@ class GoldBiasEngine:
             conf -= 12
         if abs(score) < 20:
             conf = min(conf, 55)
+        conf = min(conf, 5 + 110 * coverage)      # sem dados não há confiança: 0 % dos pesos → 5 %, 50 % → 60 %
         return round(max(5.0, min(90.0, conf)), 0)
 
     def opinion(self, label: str, factors: Sequence[FactorScore], contradictions: Sequence[str], event: Optional[BiasEventWatch]) -> str:
@@ -15602,7 +15604,16 @@ class GoldBiasEngine:
             txt += f" A leitura pode mudar com {event.name} em {event.minutes:.0f} min."
         return txt
 
+    @staticmethod
+    def sanitize(s: MarketSnapshot) -> MarketSnapshot:
+        """NaN/inf de um feed (ex.: DXY quebrado no Yahoo) vira "sem dado" — nunca uma leitura extrema. Preço inválido = 0."""
+        for name, v in vars(s).items():
+            if isinstance(v, float) and not math.isfinite(v):
+                setattr(s, name, 0.0 if name in ("price", "price_change_pct", "atr") else None)
+        return s
+
     def analyze(self, s: MarketSnapshot) -> BiasReading:
+        self.sanitize(s)
         news = sorted((bias_score_news(n, s.time) for n in s.news), key=lambda n: abs(n.effect), reverse=True)
         factors, readings = self.factors(s, news)
         score, coverage = self.total(factors)
@@ -15659,7 +15670,10 @@ def format_bias_message(r: BiasReading, title: str = "🥇 GOLD MARKET AI", loca
     raw = r.raw
     f = r.factor
     hz = " · ".join(f"{BIAS_HORIZON_LABELS[k]}: {h.emoji} {h.label.title()}" for k, h in r.horizons.items())
-    lines = [title, "", f"⏰ {local:%d/%m %H:%M} (UTC{local_tz_hours:+.0f})", f"XAU/USD: {bias_fmt_price(r.price)}", "",
+    lines = [title, "", f"⏰ {local:%d/%m %H:%M} (UTC{local_tz_hours:+.0f})", f"XAU/USD: {bias_fmt_price(r.price)}", ""]
+    if r.coverage < 0.5:
+        lines += [f"⚠️ DADOS INSUFICIENTES: só {r.coverage:.0%} dos fatores com dado — leitura fraca, não use para decidir.", ""]
+    lines += [
              f"VIÉS: {r.emoji} {r.label}", f"CONFIANÇA: {r.confidence:.0f}%", f"SCORE: {r.score:+.0f}", hz, "",
              "RESUMO",
              f"• Dólar: {bias_arrow(raw.get('dxy'), 0.02)} {bias_factor_word(f('dolar'))}",
@@ -15681,7 +15695,8 @@ def format_bias_message(r: BiasReading, title: str = "🥇 GOLD MARKET AI", loca
     lines.append(f"• VWAP: {r.vwap} · EMA 9/21: {r.ema_cross}")
     lv = r.levels
     if lv.get("suporte") or lv.get("resistencia"):
-        lines.append(f"• Suporte {lv.get('suporte') or 0:.2f} · Resistência {lv.get('resistencia') or 0:.2f}")
+        fmt_lv = lambda v: f"{v:.2f}" if v else "—"  # noqa: E731
+        lines.append(f"• Suporte {fmt_lv(lv.get('suporte'))} · Resistência {fmt_lv(lv.get('resistencia'))}")
     if r.contradictions:
         lines += ["", "⚠️ CONTRADIÇÕES"] + [f"• {c}" for c in r.contradictions[:3]]
     lines += ["", "LEITURA DA IA", f"\"{r.opinion}\""]
@@ -15746,15 +15761,30 @@ class BiasNotifier:
                     self.state = json.load(fh)
             except (OSError, ValueError):
                 self.state = {}
+        if not isinstance(self.state, dict):
+            self.state = {}
 
     def _save(self) -> None:
+        """Gravação atômica (arquivo temporário + os.replace): queda no meio da escrita não corrompe o estado."""
         if not self.state_path:
             return
         d = os.path.dirname(self.state_path)
         if d:
             os.makedirs(d, exist_ok=True)
-        with open(self.state_path, "w", encoding="utf-8") as fh:
+        tmp = self.state_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(self.state, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, self.state_path)
+
+    @staticmethod
+    def label_with_hysteresis(score: float, prev_label: Optional[str], band: float = 3.0) -> str:
+        """Nova classe só quando o score entra ≥ `band` pontos nela — evita troca a cada ciclo na fronteira (39,9 ↔ 40,0)."""
+        label = bias_classify(score)[0]
+        if prev_label is None or label == prev_label:
+            return label
+        if bias_classify(score - band)[0] == label and bias_classify(score + band)[0] == label:
+            return label
+        return prev_label
 
     @staticmethod
     def snapshot_of(r: BiasReading) -> dict:
@@ -15763,39 +15793,56 @@ class BiasNotifier:
                 "news": [n.headline for n in r.news[:10]]}
 
     def decide(self, r: BiasReading) -> list[tuple[str, str]]:
-        """Lista de (tipo, texto). Tipos: relatorio · reversao · alerta · evento · atualizacao."""
-        prev = self.state.get("last")
+        """Lista de (tipo, texto). Tipos: relatorio · reversao · alerta · evento · atualizacao.
+
+        Compara com a ÚLTIMA MENSAGEM ENVIADA (não com o ciclo anterior): deriva lenta 41 → 49 → 57 → 69 também avisa.
+        Reversão = direção atual oposta à última direção não-neutra (ALTA → NEUTRO → BAIXA é reversão)."""
+        prev = self.state.get("sent") or self.state.get("last")
         out: list[tuple[str, str]] = []
-        if prev is None:
+        if not isinstance(prev, dict):
             out.append(("relatorio", format_bias_message(r)))
         else:
-            d_prev, d_now = bias_direction(prev.get("label", "NEUTRO")), r.direction
-            jump = abs(r.score - prev.get("score", 0.0))
-            new_news = [n for n in r.news if n.headline not in prev.get("news", []) and abs(n.impact) >= 2 and n.credibility >= 0.7 and n.recency > 0.7]
+            label = self.label_with_hysteresis(r.score, prev.get("label"))
+            d_now = bias_direction(label)
+            d_last = int(self.state.get("last_dir") or bias_direction(prev.get("label", "NEUTRO")))
+            jump = abs(r.score - float(prev.get("score", 0.0) or 0.0))
+            seen = set(prev.get("news", [])) | set((self.state.get("last") or {}).get("news", []))
+            new_news = [n for n in r.news if n.headline not in seen and abs(n.impact) >= 2 and n.credibility >= 0.7 and n.recency > 0.7]
+            last = self.state.get("last") or {}
             reasons = []
             if new_news:
                 reasons.append(f"notícia relevante — {new_news[0].headline[:100]}")
-            if r.fed_stance != prev.get("fed") and prev.get("fed") not in (None, "INDISPONÍVEL") and r.fed_stance != "INDISPONÍVEL":
-                reasons.append(f"FED mudou de {prev.get('fed')} para {r.fed_stance}")
-            if r.geo_level == "EXTREMO" and prev.get("geo") != "EXTREMO":
+            if r.fed_stance != last.get("fed") and last.get("fed") not in (None, "INDISPONÍVEL") and r.fed_stance != "INDISPONÍVEL":
+                reasons.append(f"FED mudou de {last.get('fed')} para {r.fed_stance}")
+            if r.geo_level == "EXTREMO" and last.get("geo") != "EXTREMO":
                 reasons.append("risco geopolítico EXTREMO")
-            broke = [tf for tf, st in r.structure.items() if "rompimento" in st and (prev.get("structure") or {}).get(tf) != st]
+            broke = [tf for tf, st in r.structure.items() if "rompimento" in st and (last.get("structure") or {}).get(tf) != st]
             if broke:
                 reasons.append(f"rompimento no {', '.join(broke)}")
-            if d_prev and d_now and d_prev != d_now:
+            if d_now and d_last and d_now != d_last:
                 out.append(("reversao", format_bias_reversal(r, prev)))
             elif jump >= self.alert_score_jump or (reasons and jump >= self.min_score_change / 2):
-                out.append(("alerta", format_bias_alert(r, "; ".join(reasons) or f"score mudou {r.score - prev.get('score', 0):+.0f} pontos", prev)))
-            elif r.label != prev.get("label") or jump >= self.min_score_change:
-                last_t = datetime.fromisoformat(self.state.get("last_sent", prev["time"]))
-                if (r.time - last_t).total_seconds() >= self.min_seconds or r.label != prev.get("label"):
+                out.append(("alerta", format_bias_alert(r, "; ".join(reasons) or f"score mudou {r.score - float(prev.get('score', 0) or 0):+.0f} pontos", prev)))
+            elif label != prev.get("label") or jump >= self.min_score_change:
+                try:
+                    last_t = datetime.fromisoformat(str(self.state.get("last_sent") or prev.get("time")))
+                except ValueError:
+                    last_t = None
+                if last_t is None or last_t.tzinfo is None or (r.time - last_t).total_seconds() >= self.min_seconds or label != prev.get("label"):
                     out.append(("atualizacao", format_bias_message(r, title="🥇 GOLD MARKET AI — ATUALIZAÇÃO")))
-        if r.event is not None and r.event.minutes <= 60 and self.state.get("warned_event") != f"{r.event.name}@{r.event.time.isoformat()}":
+        key = None if r.event is None else f"{r.event.name}@{r.event.time.isoformat()}"
+        if r.event is not None and r.event.minutes <= 60 and self.state.get("warned_event") != key:
             out.append(("evento", format_bias_event_warning(r.event, r)))
-            self.state["warned_event"] = f"{r.event.name}@{r.event.time.isoformat()}"
-        self.state["last"] = self.snapshot_of(r)
-        if out:
+            self.state["warned_event"] = key
+        snap = self.snapshot_of(r)
+        self.state["last"] = snap
+        if any(k != "evento" for k, _ in out):
+            self.state["sent"] = snap
             self.state["last_sent"] = r.time.isoformat()
+            if r.direction:
+                self.state["last_dir"] = r.direction
+        elif "last_dir" not in self.state and r.direction:
+            self.state["last_dir"] = r.direction
         self._save()
         return out
 
@@ -15832,11 +15879,21 @@ class BiasMemory:
 
     @staticmethod
     def price_at(candles: Sequence[Candle], t: datetime) -> Optional[float]:
-        """Fechamento do primeiro candle que termina em/depois de t (sem olhar o futuro além do alvo)."""
-        for c in candles:
-            if c.time >= t:
-                return c.close
-        return None
+        """Preço no instante t = fechamento do último candle já ENCERRADO em t (candle.time = abertura; ele fecha quando o
+        próximo abre). Nunca olha além de t. Buraco entre candles = mercado fechado (fim de semana): vale o último fechamento.
+        None se o histórico não cobre t (alvo antes do 1º candle — bot desligado por dias — ou depois do último)."""
+        if len(candles) < 2 or candles[0].time > t or candles[-1].time < t:
+            return None
+        tail = list(candles[-50:])
+        steps = sorted((b.time - a.time) for a, b in zip(tail[:-1], tail[1:]))
+        bar = steps[len(steps) // 2]                       # duração típica de um candle
+        best = None
+        for a, b in zip(candles[:-1], candles[1:]):
+            if min(b.time, a.time + bar) <= t:            # encerrado: o próximo abriu ou passou a duração (antes de um buraco)
+                best = a
+            else:
+                break
+        return None if best is None else best.close
 
     def resolve(self, candles: Sequence[Candle], now: datetime) -> int:
         """Resolve previsões cujo horizonte já passou: ACERTO se a direção bateu (ou lateral ficou dentro da faixa)."""
@@ -15874,7 +15931,7 @@ class BiasMemory:
                 a[0] += hit
                 a[1] += 1
             thr = BIAS_MOVE_THRESHOLD_PCT.get(h, 0.2)
-            if abs(move) <= thr:
+            if h != "1d" or abs(move) <= thr:          # fatores: só o horizonte de 1 dia (os 3 horizontes são correlacionados)
                 continue
             for name, sc in json.loads(factors).items():
                 if abs(sc) < 0.5:
@@ -15897,9 +15954,18 @@ class BiasMemory:
         tot = sum(raw.values())
         return {k: round(v * 100 / tot, 1) for k, v in raw.items()}
 
-    def today(self, day: datetime) -> list[tuple]:
-        d = day.date().isoformat()
-        return self.db.execute("SELECT id, time, price, score, label, confidence, news FROM bias_predictions WHERE substr(time, 1, 10) = ? ORDER BY time", (d,)).fetchall()
+    def today(self, day: datetime, tz_hours: float = -3.0) -> list[tuple]:
+        """Leituras do dia LOCAL de `day` (padrão: Brasília, UTC−3): (id, time, price, score, label, confidence, news, kind)."""
+        local = (day + timedelta(hours=tz_hours)).date()
+        out = []
+        for row in self.db.execute("SELECT id, time, price, score, label, confidence, news, kind FROM bias_predictions ORDER BY time"):
+            try:
+                t = datetime.fromisoformat(row[1])
+            except (TypeError, ValueError):
+                continue
+            if t.tzinfo is not None and (t + timedelta(hours=tz_hours)).date() == local:
+                out.append(row)
+        return out
 
 
 def render_bias_stats(mem: BiasMemory) -> str:
@@ -15927,11 +15993,11 @@ def format_bias_closing(r: BiasReading, mem: Optional[BiasMemory], candles: Sequ
     rows = mem.today(r.time) if mem else []
     lines = ["🌙 GOLD MARKET AI — FECHAMENTO", "", f"XAU/USD: {bias_fmt_price(r.price)}"]
     if rows:
-        first = rows[0]
+        first = next((x for x in rows if x[7] == "manha"), rows[0])     # a previsão da manhã; sem ela, a 1ª leitura do dia
         move = (r.price / first[2] - 1) * 100 if first[2] else 0.0
         real = 1 if move > BIAS_MOVE_THRESHOLD_PCT["1d"] else -1 if move < -BIAS_MOVE_THRESHOLD_PCT["1d"] else 0
-        lines += [f"Dia: {move:+.2f}% desde a 1ª leitura ({bias_fmt_price(first[2])})",
-                  f"Previsão da manhã: {first[4]} ({first[5]:.0f}%) → resultado: {'ALTA' if real > 0 else 'BAIXA' if real < 0 else 'LATERAL'} "
+        lines += [f"Dia: {move:+.2f}% desde {'o relatório da manhã' if first[7] == 'manha' else 'a 1ª leitura'} ({bias_fmt_price(first[2])})",
+                  f"Previsão {'da manhã' if first[7] == 'manha' else 'da 1ª leitura'}: {first[4]} ({first[5]:.0f}%) → resultado: {'ALTA' if real > 0 else 'BAIXA' if real < 0 else 'LATERAL'} "
                   f"{'✅ ACERTO' if bias_direction(first[4]) == real else '❌ ERRO'}",
                   f"Leituras no dia: {len(rows)} · viés final {r.emoji} {r.label}"]
         news = {}
@@ -15968,23 +16034,40 @@ def bias_apply_manual(s: MarketSnapshot, path: Optional[str]) -> list[str]:
     except (OSError, ValueError) as e:
         print(f"[manual] {path} ignorado: {e}")
         return []
+    if not isinstance(data, dict):
+        print(f"[manual] {path} ignorado: o conteúdo precisa ser um objeto JSON {{...}}")
+        return []
+
+    def num(v: object) -> Optional[float]:
+        if v is None or isinstance(v, bool):
+            return None
+        try:
+            x = float(v)            # aceita "0.3" como texto
+        except (TypeError, ValueError):
+            return None
+        return x if math.isfinite(x) else None
+
     applied = []
     for name in BIAS_MANUAL_FIELDS:
-        v = data.get(name)
-        if isinstance(v, (int, float)) and getattr(s, name) is None:
-            setattr(s, name, float(v))
+        v = num(data.get(name))
+        if v is not None and getattr(s, name) is None:
+            setattr(s, name, v)
             applied.append(name)
     known = {(e.name, e.time) for e in s.events}
-    for ev in data.get("eventos", []) or []:
+    eventos = data.get("eventos")
+    for ev in eventos if isinstance(eventos, list) else []:
+        if not isinstance(ev, dict):
+            continue
         try:
             t = datetime.fromisoformat(str(ev["time"]).replace("Z", "+00:00"))
             t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-            e = EconomicEvent(str(ev["name"]), t, str(ev.get("impact", "ALTO")), ev.get("consensus"), ev.get("previous"), ev.get("actual"),
-                              str(ev.get("kind", "generic")), str(ev.get("unit", "")))
+            e = EconomicEvent(str(ev["name"]), t, str(ev.get("impact", "ALTO")).upper(), num(ev.get("consensus")), num(ev.get("previous")),
+                              num(ev.get("actual")), str(ev.get("kind", "generic")).lower(), str(ev.get("unit", "")))
         except (KeyError, TypeError, ValueError):
             continue
         if (e.name, e.time) not in known:
             s.events.append(e)
+            known.add((e.name, e.time))
             applied.append(f"evento {e.name}")
     return applied
 
@@ -16039,7 +16122,30 @@ def dash_icon(v: Optional[float], thr: float = 20.0) -> str:
     return {1: "🟢", -1: "🔴", 0: "🟡"}[dash_state_of(v, thr)]
 
 
+def dash_finite(v: Any) -> Optional[float]:
+    """Número finito ou None (NaN/inf de um feed web nunca vira leitura +100)."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def dash_clean(obj: Any) -> Any:
+    """Troca NaN/inf por None em qualquer profundidade — o JSON do painel é sempre válido para o navegador."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: dash_clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [dash_clean(v) for v in obj]
+    return obj
+
+
 def dash_item(name: str, value: Optional[float], detail: str = "", directional: bool = True) -> dict:
+    value = dash_finite(value)
     v = None if value is None else round(max(-100.0, min(100.0, value)), 0)
     return {"name": name, "value": v, "detail": detail, "icon": dash_icon(v) if directional else ("🟢" if (v or 0) >= 25 else "🟡"),
             "state": dash_state_of(v) if directional else 0, "directional": directional}
@@ -16051,18 +16157,19 @@ def dash_mean(items: Sequence[dict]) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- técnico por timeframe
-def dash_tf_indicators(candles: Sequence[Candle]) -> dict:
+def dash_tf_indicators(candles: Sequence[Candle], tf: str = "H1") -> dict:
     """RSI, MACD, ADX, EMAs, VWAP da janela, ATR — valores brutos + leitura −100..+100 (sentido do ouro)."""
     closes = [c.close for c in candles]
     if len(closes) < 30:
         return {}
-    e9, e21, e50 = ema(closes, 9)[-1], ema(closes, 21)[-1], ema(closes, 50)[-1]
-    e200 = ema(closes, 200)[-1] if len(closes) >= 200 else None
+    e9, e21, e50, e200 = (dash_ema(closes, n)[-1] for n in (9, 21, 50, 200))
+    if e9 is None or e21 is None or e50 is None:
+        return {}
     r = rsi(closes)
     _, _, hist = macd(closes)
     a = adx(candles)
     at = atr(candles) or 0.0
-    vw = dash_vwap_series(candles, "H1")[-1]
+    vw = dash_vwap_series(candles, tf)[-1]
     close = closes[-1]
     out = {"close": close, "ema9": e9, "ema21": e21, "ema50": e50, "ema200": e200, "rsi": r, "macd_hist": hist[-1] if hist else None,
            "adx": a, "atr": at, "vwap": vw["vwap"]}
@@ -16071,6 +16178,20 @@ def dash_tf_indicators(candles: Sequence[Candle]) -> dict:
     out["macd_read"] = None if not hist or not at else 100 * dash_t(hist[-1] / (0.5 * at))
     out["vwap_read"] = None if not vw["vwap"] or not at else 100 * dash_t((close - vw["vwap"]) / at)
     out["adx_read"] = a
+    return out
+
+
+def dash_ema(values: Sequence[float], n: int) -> list[Optional[float]]:
+    """EMA padrão semeada com a média simples dos n primeiros valores; None antes disso (sem “semente decaindo”)."""
+    out: list[Optional[float]] = [None] * len(values)
+    if len(values) < n:
+        return out
+    k = 2 / (n + 1)
+    e = sum(values[:n]) / n
+    out[n - 1] = e
+    for i in range(n, len(values)):
+        e = values[i] * k + e * (1 - k)
+        out[i] = e
     return out
 
 
@@ -16166,6 +16287,7 @@ class DashState:
         self.prev_light: Optional[str] = None
         self.prev_score: Optional[float] = None
         self.score_before: Optional[float] = None     # score da leitura anterior (para "IA mudou de X → Y")
+        self.last_entry_alert: Optional[dict] = None  # último ALERTA DE COMPRA/VENDA {side, time} (persistido no estado do notificador)
         self.status: dict[str, str] = {}
         self.updated: Optional[datetime] = None
 
@@ -16241,7 +16363,7 @@ class DashState:
         per_tf = {}
         for tf in ("M15", "H1", "H4", "D1"):
             cs = s.candles.get(tf) or []
-            ind = dash_tf_indicators(cs)
+            ind = dash_tf_indicators(cs, tf)
             if ind:
                 per_tf[tf] = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in ind.items()}
                 per_tf[tf]["structure"] = bias_structure(cs)
@@ -16289,6 +16411,7 @@ class DashState:
         struct_vals = []
         for tf, w in (("H1", 0.3), ("H4", 0.4), ("D1", 0.3)):
             st = r.structure.get(tf, "")
+            st = "" if st == "—" else st
             v = 100 if ("ALTA" in st or "rompimento de alta" in st) else -100 if ("BAIXA" in st or "rompimento de baixa" in st) else 0 if st else None
             if v is not None:
                 struct_vals.append((v, w))
@@ -16315,7 +16438,8 @@ class DashState:
         return round(100 * num / den) if den else 0.0
 
     @staticmethod
-    def traffic_light(groups: dict, score: float, event_minutes: Optional[float]) -> dict:
+    def traffic_light(groups: dict, score: float, event_minutes: Optional[float], released_minutes_ago: Optional[float] = None,
+                      price_ok: bool = True) -> dict:
         """🟢 COMPRA · 🔴 VENDA · 🟡 AGUARDAR. Compra exige macro, técnico e estrutura positivos, fluxo e notícias sem contrariar e
         score ≥ +40 (a venda é o espelho). Divergência ou evento de alto impacto em ≤ 30 min → AGUARDAR."""
         st = {k: dash_state_of(v) for k, v in groups.items()}
@@ -16327,6 +16451,13 @@ class DashState:
 
         pos = [DASH_GROUP_LABELS[k] for k, v in st.items() if v > 0]
         neg = [DASH_GROUP_LABELS[k] for k, v in st.items() if v < 0]
+        if not price_ok:
+            return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR — SEM PREÇO", "reason": "sem cotação do XAU/USD (MT5 e web falharam)",
+                    "rows": rows, "missing": missing}
+        if released_minutes_ago is not None and 0 <= released_minutes_ago <= 15:
+            return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR — DADO RECÉM-DIVULGADO",
+                    "reason": f"evento de alto impacto há {released_minutes_ago:.0f} min: esperar a volatilidade da divulgação assentar",
+                    "rows": rows, "missing": missing}
         if event_minutes is not None and 0 <= event_minutes <= 30:
             return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR — EVENTO DE ALTO IMPACTO",
                     "reason": f"dado importante em {event_minutes:.0f} min: esperar a reação do dólar e dos juros", "rows": rows, "missing": missing}
@@ -16401,7 +16532,7 @@ class DashState:
         d = 1 if r.score > 0 else -1 if r.score < 0 else 0
         trend_vals = []
         for tf in ("H4", "D1"):
-            ind = dash_tf_indicators(s.candles.get(tf) or [])
+            ind = dash_tf_indicators(s.candles.get(tf) or [], tf)
             if ind:
                 trend_vals.append(ind["ema_read"])
         trend = sum(trend_vals) / len(trend_vals) if trend_vals else None
@@ -16435,7 +16566,9 @@ class DashState:
                 {"name": "Volatilidade", "icon": vol_icon, "value": None, "detail": vol_txt}]
         against = [x["name"] for x in rows if x["icon"] == "🔴"]
         event = r.event
-        if d == 0 or abs(r.score) < 40:
+        if s.price <= 0:
+            status, icon = "SEM PREÇO — NÃO ENTRAR", "🟡"
+        elif d == 0 or abs(r.score) < 40:
             status, icon = "SEM VIÉS SUFICIENTE — NÃO ENTRAR", "🟡"
         elif vol_icon == "🔴" or (trend is not None and dash_state_of(trend) == -d):
             status, icon = "NÃO ENTRAR — " + ("volatilidade extrema" if vol_icon == "🔴" else "tendência maior contra o viés"), "🔴"
@@ -16444,7 +16577,7 @@ class DashState:
         else:
             status, icon = "AGUARDAR CONFIRMAÇÃO", "🟡"
         plan = None
-        if d != 0 and atr_now:
+        if d != 0 and atr_now and s.price > 0 and abs(r.score) >= 40:
             price = s.price
             lv = dash_levels(h1[-120:], price, atr_now) if h1 else {"supports": [], "resistances": []}
             struct = (lv["supports"][0] - 0.25 * atr_now) if d > 0 and lv["supports"] else (lv["resistances"][0] + 0.25 * atr_now) if d < 0 and lv["resistances"] else None
@@ -16462,7 +16595,9 @@ class DashState:
             if risk_usd:
                 lots = risk_usd / (risk_pt * self.contract_oz) if risk_pt else 0.0
                 plan["risk_usd"] = risk_usd
-                plan["lots"] = math.floor(lots * 100) / 100
+                plan["lots"] = math.floor(lots * 100 + 1e-3) / 100      # tolerância: 0,2899999 lote ainda é 0,29
+                if plan["lots"] < 0.01:
+                    plan["lots_note"] = "risco menor que o de 0,01 lote — aumente o risco ou não entre"
         warn = None
         if event is not None:
             warn = f"Evento de alto impacto: {event.name} em {event.minutes:.0f} minutos"
@@ -16478,20 +16613,21 @@ class DashState:
         if not full:
             return {"tf": tf, "candles": [], "available": [k for k in DASH_TFS if s.candles.get(k)]}
         closes = [c.close for c in full]
-        e = {n: ema(closes, n) if len(closes) >= n else [] for n in (9, 21, 50, 200)}
+        e = {n: dash_ema(closes, n) for n in (9, 21, 50, 200)}
         vw = dash_vwap_series(full, tf, s.session_start[0] if s.session_start else 22)
         start = max(0, len(full) - DASH_BARS)
         vis = full[start:]
 
-        def at(series: list, i: int) -> Optional[float]:
-            return round(series[i], 2) if series and i < len(series) and (len(closes) - len(series)) <= i else None
+        def at(series: list, i: int, n: int) -> Optional[float]:
+            v = series[i] if i < len(series) else None
+            return None if v is None else round(v, 2)
 
         candles = []
         for i in range(start, len(full)):
             c = full[i]
             v = vw[i]
             candles.append({"t": int(c.time.timestamp()), "o": c.open, "h": c.high, "l": c.low, "c": c.close,
-                            "e9": at(e[9], i), "e21": at(e[21], i), "e50": at(e[50], i), "e200": at(e[200], i) if len(closes) >= 200 else None,
+                            "e9": at(e[9], i, 9), "e21": at(e[21], i, 21), "e50": at(e[50], i, 50), "e200": at(e[200], i, 200),
                             "vw": round(v["vwap"], 2), "sd": round(v["sd"], 2)})
         atr_tf = atr(full) or s.atr or 1.0
         levels = dash_levels(vis, s.price, atr_tf)
@@ -16521,6 +16657,14 @@ class DashState:
         self.prev_light = now
         if now not in ("COMPRA", "VENDA") or prev == now:
             return None
+        last = self.last_entry_alert or {}
+        try:
+            last_t = datetime.fromisoformat(str(last.get("time")))
+        except ValueError:
+            last_t = None
+        if last.get("side") == now and last_t is not None and last_t.tzinfo is not None and (s.time - last_t).total_seconds() < 3600:
+            return None                                       # semáforo piscando VENDA → AGUARDAR → VENDA: um alerta só por hora
+        self.last_entry_alert = {"side": now, "time": s.time.isoformat()}
         d = 1 if now == "COMPRA" else -1
         ok = []
         for tf, st in r.structure.items():
@@ -16554,7 +16698,9 @@ class DashState:
         news = self.news_block(r)
         groups = self.groups(macro, flow, tech, news, s, r)
         conf = self.confluence(groups, r.score)
-        light = self.traffic_light(groups, r.score, r.event.minutes if r.event else None)
+        released = [(s.time - e.time).total_seconds() / 60 for e in s.events
+                    if e.impact in ("ALTO", "MUITO ALTO") and 0 <= (s.time - e.time).total_seconds() <= 15 * 60]
+        light = self.traffic_light(groups, r.score, r.event.minutes if r.event else None, min(released) if released else None, s.price > 0)
         entry = self.entry(s, r, groups, conf, light, risk_usd)
         brain = self.brain(s, r, tech, groups)
         self.updated = datetime.now(timezone.utc)
@@ -16565,7 +16711,8 @@ class DashState:
                      "horizons": {k: {"label": h.label, "emoji": h.emoji, "score": h.score} for k, h in r.horizons.items()}},
             "macro": macro, "context": ctx, "flow": flow, "technical": tech, "news": news, "calendar": self.calendar_block(s),
             "confluence": {"groups": {k: {"label": DASH_GROUP_LABELS[k], "value": v, "icon": dash_icon(v)} for k, v in groups.items()},
-                           "value": conf, "macro": macro[:6], "flow": flow[:4], "technical": tech["items"], "themes": news["themes"]},
+                           "value": conf, "macro": macro[:6], "flow": flow[:4], "technical": tech["items"], "themes": news["themes"],
+                           "note": "" if abs(r.score) >= 40 else f"viés fraco (score {r.score:+.0f}): confluência alta sem força não é sinal"},
             "light": light, "brain": brain, "entry": entry,
             "event": None if r.event is None else {"name": r.event.name, "minutes": r.event.minutes, "if_above": r.event.if_above,
                                                   "if_below": r.event.if_below, "volatility": r.event.volatility},
@@ -16619,11 +16766,18 @@ class DashService:
         self.last_error = ""
         self.last_record: Optional[datetime] = None
         self.cycles = 0
+        self.cycles_started = 0
+        self.cycles_failed = 0
+        self.thread: Optional[threading.Thread] = None
+        self.allow_any_host = False                  # True só com --host 0.0.0.0 (rede local)
+        if notifier is not None and isinstance(notifier.state.get("painel_alerta"), dict):
+            self.state.last_entry_alert = notifier.state["painel_alerta"]
 
     def snapshot(self) -> MarketSnapshot:
         return self.source.snapshot() if hasattr(self.source, "snapshot") else self.source.collect()
 
     def cycle(self) -> dict:
+        self.cycles_started += 1
         s = self.snapshot()
         bias_apply_manual(s, self.manual_path)
         r = self.engine.analyze(s)
@@ -16641,6 +16795,9 @@ class DashService:
             alert = self.state.buy_sell_alert(payload["light"], s, r, payload["macro"], payload["technical"])
             if alert:
                 messages.append(("alerta_entrada", alert))
+            if alert and self.notifier is not None:
+                self.notifier.state["painel_alerta"] = self.state.last_entry_alert
+                self.notifier._save()
             for kind, text in messages:
                 self.state.add_alert(kind, text, s.time)
             payload["alerts"] = self.state.alerts
@@ -16657,24 +16814,53 @@ class DashService:
                 self.last_error = ""
             except Exception as e:  # noqa: BLE001 — o painel continua no ar com o último estado
                 self.last_error = f"{type(e).__name__}: {e}"
+                self.cycles_failed += 1
                 print(f"[painel] ciclo falhou: {self.last_error}")
             self.wake_event.wait(self.interval)
             self.wake_event.clear()
 
     def request_refresh(self, timeout: float = 120.0) -> bool:
-        """Pede uma leitura nova à thread de coleta e espera ela terminar."""
-        before = self.cycles
+        """Pede uma leitura NOVA — que comece depois do pedido — e espera ela terminar. Os ciclos são sequenciais numa thread só:
+        se houver um em andamento (com dados de antes do clique), o aviso fica armado e o próximo começa logo em seguida."""
+        target = self.cycles_started + 1
         self.wake_event.set()
         end = time.time() + timeout
-        while time.time() < end and self.cycles == before and not self.stop_event.is_set():
+        while time.time() < end and not self.stop_event.is_set():
+            if self.cycles + self.cycles_failed >= target:
+                return not self.last_error
             time.sleep(0.2)
-        return self.cycles != before
+        return False
 
     def state_json(self) -> dict:
         with self.lock:
             p = dict(self.state.payload)
+            p["alerts"] = list(self.state.alerts)
         p["service"] = {"cycles": self.cycles, "interval": self.interval, "error": self.last_error}
         return p
+
+    def start(self) -> threading.Thread:
+        self.thread = threading.Thread(target=self.run_loop, name="gold-painel-coleta", daemon=True)
+        self.thread.start()
+        return self.thread
+
+    def shutdown(self) -> None:
+        """Para a coleta, espera o ciclo em andamento e fecha banco e MT5 com o lock (nada fecha no meio de um ciclo)."""
+        self.stop_event.set()
+        self.wake_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=30)
+        with self.lock:
+            if self.memory is not None:
+                try:
+                    self.memory.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            client = getattr(self.source, "client", None)
+            if client is not None and hasattr(client, "close"):
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def dash_handler(service: DashService) -> type:
@@ -16690,26 +16876,53 @@ def dash_handler(service: DashService) -> type:
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, obj: Any) -> None:
-            self._send(200, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")
+        def _json(self, obj: Any, code: int = 200) -> None:
+            body = json.dumps(dash_clean(obj), ensure_ascii=False, default=str, allow_nan=False).encode("utf-8")
+            self._send(code, body, "application/json; charset=utf-8")
+
+        def _host_ok(self) -> bool:
+            """Anti DNS-rebinding: com o bind padrão (127.0.0.1) só aceita Host local."""
+            if service.allow_any_host:
+                return True
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+            return host in ("127.0.0.1", "localhost", "::1", "")
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._host_ok():
+                self._send(403, b"forbidden", "text/plain")
+                return
+            try:
+                self._get()
+            except Exception as e:  # noqa: BLE001 — erro vira 500 com mensagem, nunca conexão derrubada
+                try:
+                    self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        def do_POST(self) -> None:  # noqa: N802
+            if not self._host_ok():
+                self._send(403, b"forbidden", "text/plain")
+                return
+            if urlparse(self.path).path != "/api/refresh":
+                self._send(404, b"not found", "text/plain")
+                return
+            ok = service.request_refresh()
+            self._json({"ok": ok, "error": service.last_error})
+
+        def _get(self) -> None:
             u = urlparse(self.path)
             q = parse_qs(u.query)
 
             def num(name: str) -> Optional[float]:
-                try:
-                    v = float(q.get(name, [""])[0])
-                    return v if v > 0 else None
-                except ValueError:
-                    return None
+                v = dash_finite((q.get(name) or [""])[0] or None)
+                return v if v is not None and 0 < v < 1e9 else None
 
             if u.path in ("/", "/index.html"):
                 self._send(200, DASH_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif u.path == "/api/state":
                 self._json(service.state_json())
             elif u.path == "/api/chart":
-                tf = q.get("tf", ["H1"])[0].upper()
+                tf = (q.get("tf") or ["H1"])[0].upper()
                 with service.lock:
                     data = service.state.chart(tf if tf in DASH_TFS else "H1")
                 self._json(data)
@@ -16722,8 +16935,7 @@ def dash_handler(service: DashService) -> type:
                     data = service.state.history()
                 self._json(data)
             elif u.path == "/api/refresh":
-                ok = service.request_refresh()
-                self._json({"ok": ok, "error": service.last_error})
+                self._send(405, b"use POST", "text/plain")
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -16733,7 +16945,8 @@ def dash_handler(service: DashService) -> type:
 def dash_serve(service: DashService, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
                wait_first: float = 180.0) -> ThreadingHTTPServer:
     """Sobe a thread de coleta (1ª leitura já nela) e o HTTP. Devolve o servidor (chame .serve_forever())."""
-    threading.Thread(target=service.run_loop, name="gold-painel-coleta", daemon=True).start()
+    service.allow_any_host = host not in ("127.0.0.1", "localhost", "::1")
+    service.start()
     end = time.time() + wait_first
     while service.cycles == 0 and not service.last_error and time.time() < end:
         time.sleep(0.2)
@@ -16917,6 +17130,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 4px 
     <h2>🎯 CONFLUÊNCIA</h2>
     <div class="conf-big" id="confl">—</div>
     <div class="bar"><i id="conflBar" style="width:0"></i></div>
+    <div class="small warn-text" id="conflNote" style="color:var(--warn-text);margin-top:4px"></div>
     <div class="small muted" style="margin-top:6px">% do peso dos blocos (macro, fluxo, técnico, notícias, estrutura) que aponta na direção do viés.</div>
     <div id="eventBox"></div>
   </section>
@@ -17014,7 +17228,8 @@ const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({"&": 
 const fmt = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toLocaleString("pt-BR", {minimumFractionDigits: d, maximumFractionDigits: d});
 const sgn = (v, d = 0) => v == null ? "—" : (v > 0 ? "+" : "") + fmt(v, d);
 const cls = (v) => v == null ? "flat" : v > 0 ? "up" : v < 0 ? "down" : "flat";
-let STATE = null, TF = localStorageGet("tf") || "H1", CHART = null, HOVER = null;
+const TFS = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
+let STATE = null, TF = TFS.includes(localStorageGet("tf")) ? localStorageGet("tf") : "H1", CHART = null, HOVER = null, BUSY = false, CHART_SEQ = 0;
 const OVERLAYS = {ema: "EMAs", vwap: "VWAP", bands: "Bandas VWAP", levels: "Suporte/Resistência", fib: "Fibonacci", signals: "Sinais da IA", entry: "Entrada hipotética", events: "Eventos"};
 const OV = Object.fromEntries(Object.keys(OVERLAYS).map((k) => [k, (localStorageGet("ov_" + k) ?? "1") === "1"]));
 
@@ -17033,13 +17248,15 @@ async function getJSON(url) { const r = await fetch(url, {cache: "no-store"}); i
 async function loadState() {
   try {
     STATE = await getJSON("/api/state");
-    renderState(STATE);
   } catch (e) {
-    $("srctxt").textContent = "sem conexão com o motor"; $("srcdot").style.background = cssVar("--crit");
+    $("srctxt").textContent = "sem conexão com o motor — mostrando a última leitura"; $("srcdot").style.background = cssVar("--crit");
+    return;
   }
+  try { renderState(STATE); } catch (e) { console.error("falha ao desenhar o painel", e); }
 }
 
 function renderState(s) {
+  if (s.confluence && $("conflNote")) $("conflNote").textContent = s.confluence.note || "";
   if (!s.price) { $("srctxt").textContent = s.service && s.service.error ? "erro: " + s.service.error : "aguardando 1ª leitura…"; return; }
   const st = s.status || {};
   const mt5 = st.mt5 === "ok";
@@ -17113,7 +17330,7 @@ async function loadHistory() {
 
 // ---------------------------------------------------------------- gráfico
 function buildToolbar() {
-  $("tfButtons").innerHTML = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"].map((t) => `<button class="btn tfb ${t === TF ? "on" : ""}" data-tf="${t}">${t}</button>`).join(" ");
+  $("tfButtons").innerHTML = TFS.map((t) => `<button class="btn tfb ${t === TF ? "on" : ""}" data-tf="${t}">${t}</button>`).join(" ");
   $("ovButtons").innerHTML = Object.entries(OVERLAYS).map(([k, l]) => `<button class="btn tfb ${OV[k] ? "on" : ""}" data-ov="${k}" aria-pressed="${OV[k]}">${l}</button>`).join(" ");
   document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { TF = b.dataset.tf; localStorageSet("tf", TF); buildToolbar(); loadChart(); });
   document.querySelectorAll("[data-ov]").forEach((b) => b.onclick = () => { const k = b.dataset.ov; OV[k] = !OV[k]; localStorageSet("ov_" + k, OV[k] ? "1" : "0"); buildToolbar(); drawChart(); });
@@ -17123,7 +17340,12 @@ function buildToolbar() {
 }
 
 async function loadChart() {
-  try { CHART = await getJSON("/api/chart?tf=" + TF); drawChart(); } catch (e) { CHART = null; drawChart(); }
+  const tf = TF, seq = ++CHART_SEQ;
+  try {
+    const data = await getJSON("/api/chart?tf=" + tf);
+    if (tf !== TF || seq !== CHART_SEQ) return;          // resposta atrasada de outro timeframe: descarta
+    CHART = data; drawChart();
+  } catch (e) { /* servidor fora: mantém o último gráfico */ }
 }
 
 function drawChart() {
@@ -17143,12 +17365,19 @@ function drawChart() {
   const consider = (v) => { if (v != null && isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } };
   cs.forEach((c) => { consider(c.l); consider(c.h); });
   const e = CHART.entry;
+  consider(CHART.price);
   if (OV.entry && e) { consider(e.stop); consider(e.target); }
   const span = hi - lo || 1; lo -= span * 0.06; hi += span * 0.06;
   const slot = pw / (n + extra), bw = Math.max(1, Math.min(12, slot * 0.66));
   const X = (i) => padL + slot * (i + 0.5), Y = (v) => padT + (hi - v) / (hi - lo) * ph;
-  const t0 = cs[0].t, dt = n > 1 ? (cs[n - 1].t - cs[0].t) / (n - 1) : 60;
-  const XT = (t) => X((t - t0) / dt);
+  const t0 = cs[0].t, TFSEC = {M1: 60, M5: 300, M15: 900, M30: 1800, H1: 3600, H4: 14400, D1: 86400}[TF] || 3600;
+  const idxAt = (t) => {                                     // último candle que abriu em/antes de t (busca binária nos horários reais)
+    if (t < cs[0].t) return -1;
+    let lo2 = 0, hi2 = n - 1;
+    while (lo2 < hi2) { const mid = (lo2 + hi2 + 1) >> 1; if (cs[mid].t <= t) lo2 = mid; else hi2 = mid - 1; }
+    return lo2;
+  };
+  const XT = (t) => t > cs[n - 1].t + TFSEC ? X(n - 1 + (t - cs[n - 1].t) / TFSEC) : X(idxAt(t));
   // grade + eixo de preço
   g.strokeStyle = C.grid; g.lineWidth = 1; g.fillStyle = C.muted; g.textAlign = "left";
   const step = niceStep(hi - lo, 7);
@@ -17216,7 +17445,7 @@ function drawChart() {
   // sinais da IA
   if (OV.signals) {
     (CHART.signals || []).forEach((sg) => {
-      const idx = Math.round((sg.t - t0) / dt); if (idx < 0 || idx >= n) return;
+      const idx = idxAt(sg.t); if (idx < 0 || sg.t > cs[n - 1].t + TFSEC) return;
       const c = cs[idx], x = X(idx), up = sg.side > 0, y = up ? Y(c.l) + 12 : Y(c.h) - 12;
       g.fillStyle = up ? C.good : C.crit; g.strokeStyle = C.surface; g.lineWidth = 2;
       g.beginPath(); if (up) { g.moveTo(x, y - 6); g.lineTo(x - 6, y + 5); g.lineTo(x + 6, y + 5); } else { g.moveTo(x, y + 6); g.lineTo(x - 6, y - 5); g.lineTo(x + 6, y - 5); }
@@ -17231,7 +17460,7 @@ function drawChart() {
   if (HOVER != null && HOVER >= 0 && HOVER < n) {
     g.strokeStyle = C.muted; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(X(HOVER)) + 0.5, padT); g.lineTo(Math.round(X(HOVER)) + 0.5, padT + ph); g.stroke();
   }
-  CHART._geo = {X, slot, padL, n};
+  CHART._geo = {X, slot, padL, n, idxAt};
 }
 function axisTag(g, y, text, bg, fg, x, w) { g.fillStyle = bg; g.fillRect(x, y - 9, w, 18); g.fillStyle = fg; g.textAlign = "left"; g.fillText(text, x + 4, y + 4); }
 function niceStep(range, ticks) { const raw = range / ticks, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p; }
@@ -17267,7 +17496,11 @@ async function openEntry() {
   if (risk > 0) $("riskIn").value = risk;
   let e;
   try { e = await getJSON("/api/entry" + (risk > 0 ? "?risk=" + risk : "")); } catch (err) { e = null; }
-  if (!e || !e.rows) { $("enStatus").textContent = "Sem leitura ainda."; $("dlg").showModal(); return; }
+  if (!e || !e.rows) {
+    ["enRows", "enPlan", "enWarn"].forEach((id) => { $(id).innerHTML = ""; }); $("enConf").textContent = "—";
+    $("enStatus").textContent = e && e.error ? "Erro: " + e.error : "Sem leitura ainda.";
+    if (!$("dlg").open) $("dlg").showModal(); return;
+  }
   $("enRows").innerHTML = e.rows.map((r) => row(r.icon, r.name, r.value == null ? (r.detail || null) : r.value, r.value == null ? "" : r.detail, r.value != null)).join("");
   $("enConf").innerHTML = `<b>${fmt(e.confluence, 0)}%</b>`;
   $("enStatus").textContent = "STATUS: " + e.icon + " " + e.status;
@@ -17278,7 +17511,7 @@ async function openEntry() {
       <span>Stop</span><b>${fmt(p.stop)} <span class="muted small">${esc(p.stop_rule)} · ${fmt(p.risk_points)} pts</span></b>
       <span>Alvo</span><b>${fmt(p.target)} <span class="muted small">${esc(p.target_rule)}${p.next_level ? " · próximo nível " + fmt(p.next_level) : ""}</span></b>
       <span>Risco/lote</span><b>US$ ${fmt(p.risk_per_lot_usd)}</b>
-      ${p.lots != null ? `<span>Lote p/ US$ ${fmt(p.risk_usd, 0)}</span><b>${fmt(p.lots, 2)} lote(s)</b>` : `<span>Risco</span><b class="muted">informe o risco em US$ abaixo</b>`}
+      ${p.lots != null ? `<span>Lote p/ US$ ${fmt(p.risk_usd, 0)}</span><b>${fmt(p.lots, 2)} lote(s)${p.lots_note ? ` <span class="down small">${esc(p.lots_note)}</span>` : ""}</b>` : `<span>Risco</span><b class="muted">informe o risco em US$ abaixo</b>`}
     </div>` : "";
   $("enWarn").innerHTML = e.event_warning ? `<div class="warnline">⚠️ ${esc(e.event_warning)}</div>` : "";
   $("enNote").textContent = e.note;
@@ -17287,7 +17520,15 @@ async function openEntry() {
 $("btnEntry").onclick = openEntry;
 $("riskGo").onclick = () => { localStorageSet("risk", $("riskIn").value); openEntry(); };
 $("dlgClose").onclick = () => $("dlg").close();
-$("btnRefresh").onclick = async () => { $("btnRefresh").disabled = true; try { await getJSON("/api/refresh"); } catch (e) { /* segue */ } $("btnRefresh").disabled = false; tick(); };
+$("btnRefresh").onclick = async () => {
+  const b = $("btnRefresh"); b.disabled = true; b.textContent = "↻ lendo…";
+  let msg = "";
+  try { const r = await fetch("/api/refresh", {method: "POST", cache: "no-store"}); const j = await r.json(); if (!j.ok) msg = "sem nova leitura" + (j.error ? ": " + j.error : ""); }
+  catch (e) { msg = "sem conexão com o motor"; }
+  b.disabled = false; b.textContent = "↻ Atualizar";
+  await tick();
+  if (msg) $("upd").textContent = "⚠ " + msg;
+};
 $("btnTheme").onclick = () => {
   const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
   const nxt = cur === "light" ? "dark" : "light"; document.documentElement.dataset.theme = nxt; localStorageSet("theme", nxt); drawChart();
@@ -17295,7 +17536,11 @@ $("btnTheme").onclick = () => {
 (function () { const t = localStorageGet("theme"); if (t) document.documentElement.dataset.theme = t; })();
 window.addEventListener("resize", () => drawChart());
 
-async function tick() { await loadState(); await loadChart(); loadHistory(); }
+async function tick() {
+  if (BUSY) return;                                     // intervalo + botão não se atropelam
+  BUSY = true;
+  try { await loadState(); await loadChart(); await loadHistory(); } finally { BUSY = false; }
+}
 buildToolbar(); tick(); setInterval(tick, 15000);
 </script>
 </body>
@@ -19103,29 +19348,35 @@ def cmd_bias(args: argparse.Namespace) -> int:
     source = _bias_source(args)
     try:
         while True:
-            snap = source.snapshot() if hasattr(source, "snapshot") else source.collect()
-            bias_apply_manual(snap, args.manual)
-            reading = engine.analyze(snap)
-            if mem is not None:
-                h1 = snap.candles.get("H1") or []
-                resolved = mem.resolve(h1, snap.time) if h1 else 0
-                if resolved:
-                    print(f"[memória] {resolved} previsão(ões) resolvida(s) contra o preço real")
-                mem.record(reading, args.mode)
-            if args.mode == "manha":
-                messages = [("relatorio", format_bias_morning(reading))]
-            elif args.mode == "fechamento":
-                messages = [("relatorio", format_bias_closing(reading, mem))]
-            elif args.mode == "relatorio":
-                messages = [("relatorio", format_bias_message(reading))]
-            else:
-                messages = notifier.decide(reading)
-            for kind, text in messages:
-                if not args.send:
-                    print(f"\n--- [{kind}] ---")
-                sender.send(text)
-            if not messages and args.verbose:
-                print(f"{reading.time:%H:%M} sem mudança relevante — {reading.emoji} {reading.label} {reading.score:+.0f} ({reading.confidence:.0f}%)")
+            try:
+                snap = source.snapshot() if hasattr(source, "snapshot") else source.collect()
+                bias_apply_manual(snap, args.manual)
+                reading = engine.analyze(snap)
+                if mem is not None:
+                    h1 = snap.candles.get("H1") or []
+                    resolved = mem.resolve(h1, snap.time) if h1 else 0
+                    if resolved:
+                        print(f"[memória] {resolved} previsão(ões) resolvida(s) contra o preço real")
+                if args.mode == "manha":
+                    messages = [("relatorio", format_bias_morning(reading))]
+                elif args.mode == "fechamento":
+                    messages = [("relatorio", format_bias_closing(reading, mem))]   # antes de gravar: nunca compara a leitura com ela mesma
+                elif args.mode == "relatorio":
+                    messages = [("relatorio", format_bias_message(reading))]
+                else:
+                    messages = notifier.decide(reading)
+                if mem is not None and args.source != "sample":           # dados sintéticos não entram no histórico real
+                    mem.record(reading, args.mode)
+                for kind, text in messages:
+                    if not args.send:
+                        print(f"\n--- [{kind}] ---")
+                    sender.send(text)
+                if not messages and args.verbose:
+                    print(f"{reading.time:%H:%M} sem mudança relevante — {reading.emoji} {reading.label} {reading.score:+.0f} ({reading.confidence:.0f}%)")
+            except Exception as e:  # noqa: BLE001 — o monitor não morre por um ciclo ruim
+                print(f"[bias] ciclo falhou: {type(e).__name__}: {e}")
+                if args.once or args.mode != "monitor":
+                    return 1
             if args.once or args.mode in ("manha", "fechamento", "relatorio"):
                 break
             time.sleep(args.interval)
@@ -19140,9 +19391,12 @@ def cmd_bias(args: argparse.Namespace) -> int:
 def cmd_painel(args: argparse.Namespace) -> int:
     """GOLD MARKET INTELLIGENCE — PAINEL: cockpit do ouro no navegador (apoio à decisão; nunca envia ordens)."""
 
-    mem = BiasMemory(args.db) if args.db else None
-    service = DashService(_bias_source(args), GoldBiasEngine(), mem, BiasNotifier(args.state) if args.send or args.state else None,
-                          TelegramSender(dry_run=not args.send, quiet=not args.send), interval=args.interval, manual_path=args.manual,
+    sample = args.source == "sample"
+    mem = BiasMemory(":memory:" if sample else args.db) if args.db else None     # dados sintéticos nunca entram no histórico real
+    # estado dos alertas do painel é SEPARADO do comando `bias` (--state próprio): um não marca como "enviado" o que o outro não enviou
+    notifier = BiasNotifier(None if sample else args.state)
+    sender = TelegramSender() if args.send else None
+    service = DashService(_bias_source(args), GoldBiasEngine(), mem, notifier, sender, interval=args.interval, manual_path=args.manual,
                           contract_oz=args.contract)
     srv = dash_serve(service, args.host, args.port, open_browser=not args.no_browser)
     try:
@@ -19150,10 +19404,8 @@ def cmd_painel(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        service.stop_event.set()
         srv.server_close()
-        if mem is not None:
-            mem.close()
+        service.shutdown()
     return 0
 
 
@@ -19271,13 +19523,13 @@ def _main(argv: list[str]) -> int:
     pn.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
     pn.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")
     pn.add_argument("--mt5-path", default=None)
-    pn.add_argument("--calendar", default=None, help="CSV/JSON de calendário econômico")
+    pn.add_argument("--calendar", default=None, help="JSON de calendário econômico")
     pn.add_argument("--no-cot", action="store_true")
     pn.add_argument("--no-fred", action="store_true")
     pn.add_argument("--no-news", action="store_true")
     pn.add_argument("--manual", default="dados/manual.json", help="JSON com dados sem fonte automática (China, BCs, ETFs, eventos)")
     pn.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (histórico × resultado; vazio desliga)")
-    pn.add_argument("--state", default="dados/gold_bias_state.json", help="estado anti-repetição dos alertas")
+    pn.add_argument("--state", default="dados/painel_state.json", help="estado anti-repetição dos alertas do painel (separado do comando bias)")
     pn.add_argument("--interval", type=int, default=60, help="segundos entre leituras")
     pn.add_argument("--host", default="127.0.0.1", help="127.0.0.1 = só este computador (0.0.0.0 abre na rede local)")
     pn.add_argument("--port", type=int, default=8765)
@@ -19293,7 +19545,7 @@ def _main(argv: list[str]) -> int:
     bi.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
     bi.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")
     bi.add_argument("--mt5-path", default=None)
-    bi.add_argument("--calendar", default=None, help="CSV/JSON de calendário econômico (eventos de alto impacto)")
+    bi.add_argument("--calendar", default=None, help="JSON de calendário econômico (eventos de alto impacto)")
     bi.add_argument("--no-cot", action="store_true")
     bi.add_argument("--no-fred", action="store_true")
     bi.add_argument("--no-news", action="store_true")

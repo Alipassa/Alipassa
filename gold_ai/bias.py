@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
 
 from .events import EVENT_GOLD_SENSITIVITY
-from .factors import score_dolar, score_fed, score_fluxo, score_geopolitica, score_inflacao, score_juros_reais, score_tecnico
+from .factors import cot_age_weight, score_dolar, score_fed, score_fluxo, score_geopolitica, score_inflacao, score_juros_reais, score_tecnico
 from .models import Candle, EconomicEvent, FactorScore, MarketSnapshot, NewsItem, TechnicalReading
 
 # §23 — pesos do GOLD BIAS SCORE (soma 100). Ajustáveis por backtesting (BiasMemory.suggest_weights).
@@ -50,12 +50,12 @@ BIAS_NEWS_ROUTE: dict[str, str] = {"fed": "fed", "macro": "inflacao", "employmen
 BIAS_NEWS_IMPORTANCE: dict[str, float] = {"fed": 1.0, "macro": 0.9, "employment": 0.85, "geopolitical": 0.8, "systemic": 0.9,
                                           "flow": 0.7, "china": 0.6, "india": 0.5, "dollar": 0.8, "generic": 0.3}
 BIAS_SOURCE_TIERS: tuple[tuple[str, float], ...] = (
-    (r"federal ?reserve|\bfed\b|fomc|ecb|bce|boj|pboc|banco central|central bank|treasury|bls|bea|census|world gold council|wgc|cftc", 1.0),
+    (r"federal ?reserve|\bfed\b|\bfomc\b|\becb\b|\bbce\b|\bboj\b|\bpboc\b|banco central|central bank|\btreasury\b|\bbls\b|\bbea\b|census bureau|world gold council|\bwgc\b|\bcftc\b", 1.0),
     (r"reuters|bloomberg|dow ?jones|wsj|financial times|\bft\b|cnbc|marketwatch|associated press|\bap\b|nikkei|valor", 0.85),
-    (r"kitco|fxstreet|investing|forexlive|yahoo|comex|cme|spdr|lbma", 0.75),
+    (r"kitco|fxstreet|investing\.com|forexlive|yahoo|\bcomex\b|\bcme\b|\bspdr\b|\blbma\b", 0.75),
     (r"twitter|\bx\.com\b|reddit|telegram|tiktok|youtube|forum", 0.25),
 )
-BIAS_RUMOR_RE = re.compile(r"\b(rumou?r|unconfirmed|sources say|reportedly|could|may|speculat|boato|rumor|não confirmad)\w*", re.IGNORECASE)
+BIAS_RUMOR_RE = re.compile(r"\b(rumou?rs?|unconfirmed|sources (say|said)|reportedly|speculat\w*|boatos?|rumores|não confirmad\w*)\b", re.IGNORECASE)
 BIAS_EMPLOYMENT_RE = re.compile(r"\b(payrolls?|nfp|jobs|jobless|unemployment|desemprego|emprego|adp|jolts|hourly earnings)\b", re.IGNORECASE)
 BIAS_NEWS_HALF_LIFE_MIN = 180.0
 
@@ -202,9 +202,10 @@ def bias_score_inflacao(s: MarketSnapshot, w: float) -> FactorScore:
 def bias_score_fluxo(s: MarketSnapshot, w: float) -> FactorScore:
     """Fluxo institucional: ETFs + bancos centrais + agressão + OI (+ COT semanal quando houver)."""
     f = score_fluxo(s, w)
-    if s.cot_managed_money_net_change is None:
+    age_w = cot_age_weight(s.cot_age_days)          # COT é semanal: perde peso com a idade; ≥ 35 dias = descartado
+    if s.cot_managed_money_net_change is None or age_w == 0.0:
         return f
-    cot = math.tanh(s.cot_managed_money_net_change / 15000.0)
+    cot = math.tanh(s.cot_managed_money_net_change / 15000.0) * age_w
     if not f.available:
         return FactorScore("fluxo", round(cot * 0.6 * w, 1), w, f"fluxo: só COT ({s.cot_managed_money_net_change:+.0f} contratos/sem)")
     ratio = bias_clip(0.75 * f.ratio + 0.25 * cot)
@@ -477,7 +478,7 @@ class GoldBiasEngine:
             out.append("Notícias desfavoráveis, mas o preço sobe — algo mais forte sustenta o ouro.")
         if bias_risk_mode(s) == "RISK-OFF" and s.price_change_pct < -0.3:
             out.append("Risk-off sem demanda por proteção: ouro caindo junto (possível venda por liquidez).")
-        if s.cot_managed_money_percentile is not None and s.cot_managed_money_percentile >= 90 and tec > 0.25:
+        if s.cot_managed_money_percentile is not None and s.cot_managed_money_percentile >= 90 and tec > 0.25 and cot_age_weight(s.cot_age_days) > 0:
             out.append("Especuladores muito comprados (COT ≥ p90) — risco de realização técnica.")
         return out
 
@@ -499,6 +500,7 @@ class GoldBiasEngine:
             conf -= 12
         if abs(score) < 20:
             conf = min(conf, 55)
+        conf = min(conf, 5 + 110 * coverage)      # sem dados não há confiança: 0 % dos pesos → 5 %, 50 % → 60 %
         return round(max(5.0, min(90.0, conf)), 0)
 
     def opinion(self, label: str, factors: Sequence[FactorScore], contradictions: Sequence[str], event: Optional[BiasEventWatch]) -> str:
@@ -525,7 +527,16 @@ class GoldBiasEngine:
             txt += f" A leitura pode mudar com {event.name} em {event.minutes:.0f} min."
         return txt
 
+    @staticmethod
+    def sanitize(s: MarketSnapshot) -> MarketSnapshot:
+        """NaN/inf de um feed (ex.: DXY quebrado no Yahoo) vira "sem dado" — nunca uma leitura extrema. Preço inválido = 0."""
+        for name, v in vars(s).items():
+            if isinstance(v, float) and not math.isfinite(v):
+                setattr(s, name, 0.0 if name in ("price", "price_change_pct", "atr") else None)
+        return s
+
     def analyze(self, s: MarketSnapshot) -> BiasReading:
+        self.sanitize(s)
         news = sorted((bias_score_news(n, s.time) for n in s.news), key=lambda n: abs(n.effect), reverse=True)
         factors, readings = self.factors(s, news)
         score, coverage = self.total(factors)
@@ -582,7 +593,10 @@ def format_bias_message(r: BiasReading, title: str = "🥇 GOLD MARKET AI", loca
     raw = r.raw
     f = r.factor
     hz = " · ".join(f"{BIAS_HORIZON_LABELS[k]}: {h.emoji} {h.label.title()}" for k, h in r.horizons.items())
-    lines = [title, "", f"⏰ {local:%d/%m %H:%M} (UTC{local_tz_hours:+.0f})", f"XAU/USD: {bias_fmt_price(r.price)}", "",
+    lines = [title, "", f"⏰ {local:%d/%m %H:%M} (UTC{local_tz_hours:+.0f})", f"XAU/USD: {bias_fmt_price(r.price)}", ""]
+    if r.coverage < 0.5:
+        lines += [f"⚠️ DADOS INSUFICIENTES: só {r.coverage:.0%} dos fatores com dado — leitura fraca, não use para decidir.", ""]
+    lines += [
              f"VIÉS: {r.emoji} {r.label}", f"CONFIANÇA: {r.confidence:.0f}%", f"SCORE: {r.score:+.0f}", hz, "",
              "RESUMO",
              f"• Dólar: {bias_arrow(raw.get('dxy'), 0.02)} {bias_factor_word(f('dolar'))}",
@@ -604,7 +618,8 @@ def format_bias_message(r: BiasReading, title: str = "🥇 GOLD MARKET AI", loca
     lines.append(f"• VWAP: {r.vwap} · EMA 9/21: {r.ema_cross}")
     lv = r.levels
     if lv.get("suporte") or lv.get("resistencia"):
-        lines.append(f"• Suporte {lv.get('suporte') or 0:.2f} · Resistência {lv.get('resistencia') or 0:.2f}")
+        fmt_lv = lambda v: f"{v:.2f}" if v else "—"  # noqa: E731
+        lines.append(f"• Suporte {fmt_lv(lv.get('suporte'))} · Resistência {fmt_lv(lv.get('resistencia'))}")
     if r.contradictions:
         lines += ["", "⚠️ CONTRADIÇÕES"] + [f"• {c}" for c in r.contradictions[:3]]
     lines += ["", "LEITURA DA IA", f"\"{r.opinion}\""]
@@ -669,15 +684,30 @@ class BiasNotifier:
                     self.state = json.load(fh)
             except (OSError, ValueError):
                 self.state = {}
+        if not isinstance(self.state, dict):
+            self.state = {}
 
     def _save(self) -> None:
+        """Gravação atômica (arquivo temporário + os.replace): queda no meio da escrita não corrompe o estado."""
         if not self.state_path:
             return
         d = os.path.dirname(self.state_path)
         if d:
             os.makedirs(d, exist_ok=True)
-        with open(self.state_path, "w", encoding="utf-8") as fh:
+        tmp = self.state_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(self.state, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, self.state_path)
+
+    @staticmethod
+    def label_with_hysteresis(score: float, prev_label: Optional[str], band: float = 3.0) -> str:
+        """Nova classe só quando o score entra ≥ `band` pontos nela — evita troca a cada ciclo na fronteira (39,9 ↔ 40,0)."""
+        label = bias_classify(score)[0]
+        if prev_label is None or label == prev_label:
+            return label
+        if bias_classify(score - band)[0] == label and bias_classify(score + band)[0] == label:
+            return label
+        return prev_label
 
     @staticmethod
     def snapshot_of(r: BiasReading) -> dict:
@@ -686,39 +716,56 @@ class BiasNotifier:
                 "news": [n.headline for n in r.news[:10]]}
 
     def decide(self, r: BiasReading) -> list[tuple[str, str]]:
-        """Lista de (tipo, texto). Tipos: relatorio · reversao · alerta · evento · atualizacao."""
-        prev = self.state.get("last")
+        """Lista de (tipo, texto). Tipos: relatorio · reversao · alerta · evento · atualizacao.
+
+        Compara com a ÚLTIMA MENSAGEM ENVIADA (não com o ciclo anterior): deriva lenta 41 → 49 → 57 → 69 também avisa.
+        Reversão = direção atual oposta à última direção não-neutra (ALTA → NEUTRO → BAIXA é reversão)."""
+        prev = self.state.get("sent") or self.state.get("last")
         out: list[tuple[str, str]] = []
-        if prev is None:
+        if not isinstance(prev, dict):
             out.append(("relatorio", format_bias_message(r)))
         else:
-            d_prev, d_now = bias_direction(prev.get("label", "NEUTRO")), r.direction
-            jump = abs(r.score - prev.get("score", 0.0))
-            new_news = [n for n in r.news if n.headline not in prev.get("news", []) and abs(n.impact) >= 2 and n.credibility >= 0.7 and n.recency > 0.7]
+            label = self.label_with_hysteresis(r.score, prev.get("label"))
+            d_now = bias_direction(label)
+            d_last = int(self.state.get("last_dir") or bias_direction(prev.get("label", "NEUTRO")))
+            jump = abs(r.score - float(prev.get("score", 0.0) or 0.0))
+            seen = set(prev.get("news", [])) | set((self.state.get("last") or {}).get("news", []))
+            new_news = [n for n in r.news if n.headline not in seen and abs(n.impact) >= 2 and n.credibility >= 0.7 and n.recency > 0.7]
+            last = self.state.get("last") or {}
             reasons = []
             if new_news:
                 reasons.append(f"notícia relevante — {new_news[0].headline[:100]}")
-            if r.fed_stance != prev.get("fed") and prev.get("fed") not in (None, "INDISPONÍVEL") and r.fed_stance != "INDISPONÍVEL":
-                reasons.append(f"FED mudou de {prev.get('fed')} para {r.fed_stance}")
-            if r.geo_level == "EXTREMO" and prev.get("geo") != "EXTREMO":
+            if r.fed_stance != last.get("fed") and last.get("fed") not in (None, "INDISPONÍVEL") and r.fed_stance != "INDISPONÍVEL":
+                reasons.append(f"FED mudou de {last.get('fed')} para {r.fed_stance}")
+            if r.geo_level == "EXTREMO" and last.get("geo") != "EXTREMO":
                 reasons.append("risco geopolítico EXTREMO")
-            broke = [tf for tf, st in r.structure.items() if "rompimento" in st and (prev.get("structure") or {}).get(tf) != st]
+            broke = [tf for tf, st in r.structure.items() if "rompimento" in st and (last.get("structure") or {}).get(tf) != st]
             if broke:
                 reasons.append(f"rompimento no {', '.join(broke)}")
-            if d_prev and d_now and d_prev != d_now:
+            if d_now and d_last and d_now != d_last:
                 out.append(("reversao", format_bias_reversal(r, prev)))
             elif jump >= self.alert_score_jump or (reasons and jump >= self.min_score_change / 2):
-                out.append(("alerta", format_bias_alert(r, "; ".join(reasons) or f"score mudou {r.score - prev.get('score', 0):+.0f} pontos", prev)))
-            elif r.label != prev.get("label") or jump >= self.min_score_change:
-                last_t = datetime.fromisoformat(self.state.get("last_sent", prev["time"]))
-                if (r.time - last_t).total_seconds() >= self.min_seconds or r.label != prev.get("label"):
+                out.append(("alerta", format_bias_alert(r, "; ".join(reasons) or f"score mudou {r.score - float(prev.get('score', 0) or 0):+.0f} pontos", prev)))
+            elif label != prev.get("label") or jump >= self.min_score_change:
+                try:
+                    last_t = datetime.fromisoformat(str(self.state.get("last_sent") or prev.get("time")))
+                except ValueError:
+                    last_t = None
+                if last_t is None or last_t.tzinfo is None or (r.time - last_t).total_seconds() >= self.min_seconds or label != prev.get("label"):
                     out.append(("atualizacao", format_bias_message(r, title="🥇 GOLD MARKET AI — ATUALIZAÇÃO")))
-        if r.event is not None and r.event.minutes <= 60 and self.state.get("warned_event") != f"{r.event.name}@{r.event.time.isoformat()}":
+        key = None if r.event is None else f"{r.event.name}@{r.event.time.isoformat()}"
+        if r.event is not None and r.event.minutes <= 60 and self.state.get("warned_event") != key:
             out.append(("evento", format_bias_event_warning(r.event, r)))
-            self.state["warned_event"] = f"{r.event.name}@{r.event.time.isoformat()}"
-        self.state["last"] = self.snapshot_of(r)
-        if out:
+            self.state["warned_event"] = key
+        snap = self.snapshot_of(r)
+        self.state["last"] = snap
+        if any(k != "evento" for k, _ in out):
+            self.state["sent"] = snap
             self.state["last_sent"] = r.time.isoformat()
+            if r.direction:
+                self.state["last_dir"] = r.direction
+        elif "last_dir" not in self.state and r.direction:
+            self.state["last_dir"] = r.direction
         self._save()
         return out
 
@@ -755,11 +802,21 @@ class BiasMemory:
 
     @staticmethod
     def price_at(candles: Sequence[Candle], t: datetime) -> Optional[float]:
-        """Fechamento do primeiro candle que termina em/depois de t (sem olhar o futuro além do alvo)."""
-        for c in candles:
-            if c.time >= t:
-                return c.close
-        return None
+        """Preço no instante t = fechamento do último candle já ENCERRADO em t (candle.time = abertura; ele fecha quando o
+        próximo abre). Nunca olha além de t. Buraco entre candles = mercado fechado (fim de semana): vale o último fechamento.
+        None se o histórico não cobre t (alvo antes do 1º candle — bot desligado por dias — ou depois do último)."""
+        if len(candles) < 2 or candles[0].time > t or candles[-1].time < t:
+            return None
+        tail = list(candles[-50:])
+        steps = sorted((b.time - a.time) for a, b in zip(tail[:-1], tail[1:]))
+        bar = steps[len(steps) // 2]                       # duração típica de um candle
+        best = None
+        for a, b in zip(candles[:-1], candles[1:]):
+            if min(b.time, a.time + bar) <= t:            # encerrado: o próximo abriu ou passou a duração (antes de um buraco)
+                best = a
+            else:
+                break
+        return None if best is None else best.close
 
     def resolve(self, candles: Sequence[Candle], now: datetime) -> int:
         """Resolve previsões cujo horizonte já passou: ACERTO se a direção bateu (ou lateral ficou dentro da faixa)."""
@@ -797,7 +854,7 @@ class BiasMemory:
                 a[0] += hit
                 a[1] += 1
             thr = BIAS_MOVE_THRESHOLD_PCT.get(h, 0.2)
-            if abs(move) <= thr:
+            if h != "1d" or abs(move) <= thr:          # fatores: só o horizonte de 1 dia (os 3 horizontes são correlacionados)
                 continue
             for name, sc in json.loads(factors).items():
                 if abs(sc) < 0.5:
@@ -820,9 +877,18 @@ class BiasMemory:
         tot = sum(raw.values())
         return {k: round(v * 100 / tot, 1) for k, v in raw.items()}
 
-    def today(self, day: datetime) -> list[tuple]:
-        d = day.date().isoformat()
-        return self.db.execute("SELECT id, time, price, score, label, confidence, news FROM bias_predictions WHERE substr(time, 1, 10) = ? ORDER BY time", (d,)).fetchall()
+    def today(self, day: datetime, tz_hours: float = -3.0) -> list[tuple]:
+        """Leituras do dia LOCAL de `day` (padrão: Brasília, UTC−3): (id, time, price, score, label, confidence, news, kind)."""
+        local = (day + timedelta(hours=tz_hours)).date()
+        out = []
+        for row in self.db.execute("SELECT id, time, price, score, label, confidence, news, kind FROM bias_predictions ORDER BY time"):
+            try:
+                t = datetime.fromisoformat(row[1])
+            except (TypeError, ValueError):
+                continue
+            if t.tzinfo is not None and (t + timedelta(hours=tz_hours)).date() == local:
+                out.append(row)
+        return out
 
 
 def render_bias_stats(mem: BiasMemory) -> str:
@@ -850,11 +916,11 @@ def format_bias_closing(r: BiasReading, mem: Optional[BiasMemory], candles: Sequ
     rows = mem.today(r.time) if mem else []
     lines = ["🌙 GOLD MARKET AI — FECHAMENTO", "", f"XAU/USD: {bias_fmt_price(r.price)}"]
     if rows:
-        first = rows[0]
+        first = next((x for x in rows if x[7] == "manha"), rows[0])     # a previsão da manhã; sem ela, a 1ª leitura do dia
         move = (r.price / first[2] - 1) * 100 if first[2] else 0.0
         real = 1 if move > BIAS_MOVE_THRESHOLD_PCT["1d"] else -1 if move < -BIAS_MOVE_THRESHOLD_PCT["1d"] else 0
-        lines += [f"Dia: {move:+.2f}% desde a 1ª leitura ({bias_fmt_price(first[2])})",
-                  f"Previsão da manhã: {first[4]} ({first[5]:.0f}%) → resultado: {'ALTA' if real > 0 else 'BAIXA' if real < 0 else 'LATERAL'} "
+        lines += [f"Dia: {move:+.2f}% desde {'o relatório da manhã' if first[7] == 'manha' else 'a 1ª leitura'} ({bias_fmt_price(first[2])})",
+                  f"Previsão {'da manhã' if first[7] == 'manha' else 'da 1ª leitura'}: {first[4]} ({first[5]:.0f}%) → resultado: {'ALTA' if real > 0 else 'BAIXA' if real < 0 else 'LATERAL'} "
                   f"{'✅ ACERTO' if bias_direction(first[4]) == real else '❌ ERRO'}",
                   f"Leituras no dia: {len(rows)} · viés final {r.emoji} {r.label}"]
         news = {}
@@ -891,22 +957,39 @@ def bias_apply_manual(s: MarketSnapshot, path: Optional[str]) -> list[str]:
     except (OSError, ValueError) as e:
         print(f"[manual] {path} ignorado: {e}")
         return []
+    if not isinstance(data, dict):
+        print(f"[manual] {path} ignorado: o conteúdo precisa ser um objeto JSON {{...}}")
+        return []
+
+    def num(v: object) -> Optional[float]:
+        if v is None or isinstance(v, bool):
+            return None
+        try:
+            x = float(v)            # aceita "0.3" como texto
+        except (TypeError, ValueError):
+            return None
+        return x if math.isfinite(x) else None
+
     applied = []
     for name in BIAS_MANUAL_FIELDS:
-        v = data.get(name)
-        if isinstance(v, (int, float)) and getattr(s, name) is None:
-            setattr(s, name, float(v))
+        v = num(data.get(name))
+        if v is not None and getattr(s, name) is None:
+            setattr(s, name, v)
             applied.append(name)
     known = {(e.name, e.time) for e in s.events}
-    for ev in data.get("eventos", []) or []:
+    eventos = data.get("eventos")
+    for ev in eventos if isinstance(eventos, list) else []:
+        if not isinstance(ev, dict):
+            continue
         try:
             t = datetime.fromisoformat(str(ev["time"]).replace("Z", "+00:00"))
             t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-            e = EconomicEvent(str(ev["name"]), t, str(ev.get("impact", "ALTO")), ev.get("consensus"), ev.get("previous"), ev.get("actual"),
-                              str(ev.get("kind", "generic")), str(ev.get("unit", "")))
+            e = EconomicEvent(str(ev["name"]), t, str(ev.get("impact", "ALTO")).upper(), num(ev.get("consensus")), num(ev.get("previous")),
+                              num(ev.get("actual")), str(ev.get("kind", "generic")).lower(), str(ev.get("unit", "")))
         except (KeyError, TypeError, ValueError):
             continue
         if (e.name, e.time) not in known:
             s.events.append(e)
+            known.add((e.name, e.time))
             applied.append(f"evento {e.name}")
     return applied
