@@ -1,0 +1,12 @@
+{
+  "_comentario": "Copie para dados/manual.json. Só preenche o que a coleta automática deixou vazio. Escalas: -1..+1 (demanda, tom do FED: +1 dovish), toneladas, USD milhões, sigma.",
+  "china_demand": 0.3,
+  "india_demand": 0.1,
+  "central_bank_buying_tonnes": 25,
+  "etf_flow_musd": -120,
+  "fed_tone": -0.4,
+  "eventos": [
+    {"name": "CPI EUA", "time": "2026-10-14T12:30:00Z", "impact": "MUITO ALTO", "consensus": 0.3, "previous": 0.4, "kind": "cpi", "unit": "%"},
+    {"name": "FOMC — decisão", "time": "2026-10-28T18:00:00Z", "impact": "MUITO ALTO", "kind": "fomc"}
+  ]
+}

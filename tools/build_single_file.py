@@ -35,7 +35,7 @@ BUILD = build_stamp()
 ORDER = ["config", "models", "technical", "factors", "premove", "events", "evidence", "signals", "memory", "telegram", "engine", "report",
          "sources/sample", "data/http", "data/yahoo", "data/fred", "data/cftc", "data/news", "data/engine", "data/mt5", "data/dukascopy", "trading", "monitor",
          "markets", "news_engine", "reaction", "reaction_hires", "flow_anomaly", "history", "data/history_sources", "execution", "guard", "validation", "evaluation", "opportunity", "selector", "edge_report", "estimate", "sweep", "ablation", "doctor", "lifecycle", "exit_lab", "edge_bank", "leadlag", "autotune", "portfolio_sim",
-    "matrix", "efficiency", "false_signal", "diagnose", "propagation", "live_engine", "data/multi", "market_engine", "bias", "cli"]
+    "matrix", "efficiency", "false_signal", "diagnose", "propagation", "live_engine", "data/multi", "market_engine", "bias", "dashboard", "cli"]
 
 HEADER = f'''#!/usr/bin/env python3
 """MARKET AI ENGINE 6.0 — informação explícita (news/macro) + informação IMPLÍCITA (fluxo anômalo) · reação temporal · propagação entre ativos.
@@ -80,6 +80,7 @@ Modos: 🟢 PAPER (padrão) · 🟡 AUTHORIZE · 🟠 SEMI-LIVE · 🔴 LIVE (ex
 Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 
 Uso (4.0, multi-mercado):
+    python market_ai_engine_v6.py painel --source mt5 --send                           # 🥇 PAINEL (cockpit do ouro) em http://127.0.0.1:8765
     python market_ai_engine_v6.py bias --source mt5 --send                             # 🥇 GOLD BIAS: viés do ouro → Telegram (docs/DIRETRIZ_BIAS.md)
     python market_ai_engine_v6.py markets                                              # ranking agora, não opera
     python market_ai_engine_v6.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
@@ -194,6 +195,10 @@ def build() -> str:
     parts = [HEADER]
     for name in ORDER:
         body = strip_imports((ROOT / "gold_ai" / f"{name}.py").read_text(encoding="utf-8"))
+        if name == "dashboard":
+            html = (ROOT / "gold_ai" / "dashboard.html").read_text(encoding="utf-8")
+            assert '"""' not in html and not html.endswith("\\"), "dashboard.html não pode conter aspas triplas"
+            body = body.replace('DASH_HTML = r"""__DASH_HTML__"""', 'DASH_HTML = r"""' + html + '"""', 1)
         if name == "technical":
             body += "\n\n\n_atr = atr  # alias usado pelo Data Engine, MT5 e avaliação"
         if name == "factors":

@@ -1926,7 +1926,7 @@ def _bias_source(args: argparse.Namespace):
     from .telegram import load_env_file
 
     dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot,
-                            enable_fred=not args.no_fred, enable_news=not args.no_news)
+                            enable_fred=not args.no_fred, enable_news=not args.no_news, extended=True)
     data = DataEngine(dcfg)
     if args.source != "mt5":
         return data
@@ -1944,7 +1944,8 @@ def _bias_source(args: argparse.Namespace):
 
 def cmd_bias(args: argparse.Namespace) -> int:
     """GOLD BIAS ENGINE (docs/DIRETRIZ_BIAS.md): viés ALTA/BAIXA/NEUTRO do ouro, confiança, 3 horizontes e Telegram."""
-    from .bias import BiasMemory, BiasNotifier, GoldBiasEngine, format_bias_closing, format_bias_message, format_bias_morning, render_bias_stats
+    from .bias import (BiasMemory, BiasNotifier, GoldBiasEngine, bias_apply_manual, format_bias_closing, format_bias_message, format_bias_morning,
+                       render_bias_stats)
 
     mem = BiasMemory(args.db) if args.db else None
     if args.mode == "stats":
@@ -1961,6 +1962,7 @@ def cmd_bias(args: argparse.Namespace) -> int:
     try:
         while True:
             snap = source.snapshot() if hasattr(source, "snapshot") else source.collect()
+            bias_apply_manual(snap, args.manual)
             reading = engine.analyze(snap)
             if mem is not None:
                 h1 = snap.candles.get("H1") or []
@@ -1988,6 +1990,28 @@ def cmd_bias(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if mem is not None:
+            mem.close()
+    return 0
+
+
+def cmd_painel(args: argparse.Namespace) -> int:
+    """GOLD MARKET INTELLIGENCE — PAINEL: cockpit do ouro no navegador (apoio à decisão; nunca envia ordens)."""
+    from .bias import BiasMemory, BiasNotifier, GoldBiasEngine
+    from .dashboard import DashService, dash_serve
+
+    mem = BiasMemory(args.db) if args.db else None
+    service = DashService(_bias_source(args), GoldBiasEngine(), mem, BiasNotifier(args.state) if args.send or args.state else None,
+                          TelegramSender(dry_run=not args.send, quiet=not args.send), interval=args.interval, manual_path=args.manual,
+                          contract_oz=args.contract)
+    srv = dash_serve(service, args.host, args.port, open_browser=not args.no_browser)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        service.stop_event.set()
+        srv.server_close()
         if mem is not None:
             mem.close()
     return 0
@@ -2102,6 +2126,26 @@ def _main(argv: list[str]) -> int:
     e.add_argument("--flow", type=float, default=0.0)
     e.set_defaults(func=cmd_event)
 
+    pn = sub.add_parser("painel", help="🥇 PAINEL: cockpit do ouro no navegador (viés, confluência, semáforo, cérebro da IA, POSSO ENTRAR?, gráfico)")
+    pn.add_argument("--source", choices=["mt5", "web", "sample"], default="mt5", help="mt5 = preço da corretora + macro web (padrão)")
+    pn.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
+    pn.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")
+    pn.add_argument("--mt5-path", default=None)
+    pn.add_argument("--calendar", default=None, help="CSV/JSON de calendário econômico")
+    pn.add_argument("--no-cot", action="store_true")
+    pn.add_argument("--no-fred", action="store_true")
+    pn.add_argument("--no-news", action="store_true")
+    pn.add_argument("--manual", default="dados/manual.json", help="JSON com dados sem fonte automática (China, BCs, ETFs, eventos)")
+    pn.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (histórico × resultado; vazio desliga)")
+    pn.add_argument("--state", default="dados/gold_bias_state.json", help="estado anti-repetição dos alertas")
+    pn.add_argument("--interval", type=int, default=60, help="segundos entre leituras")
+    pn.add_argument("--host", default="127.0.0.1", help="127.0.0.1 = só este computador (0.0.0.0 abre na rede local)")
+    pn.add_argument("--port", type=int, default=8765)
+    pn.add_argument("--contract", type=float, default=100.0, help="onças por lote (XAUUSD padrão = 100)")
+    pn.add_argument("--no-browser", action="store_true", help="não abre o navegador sozinho")
+    pn.add_argument("--send", action="store_true", help="alertas também no Telegram (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID do .env)")
+    pn.set_defaults(func=cmd_painel)
+
     bi = sub.add_parser("bias", help="GOLD BIAS ENGINE: viés ALTA/BAIXA/NEUTRO do ouro (score, confiança, 3 horizontes, contradições) → Telegram")
     bi.add_argument("--mode", choices=["monitor", "relatorio", "manha", "fechamento", "stats"], default="monitor",
                     help="monitor = loop com atualizações/alertas só quando algo muda; manha/fechamento = relatórios do dia; stats = previsão × resultado")
@@ -2113,6 +2157,7 @@ def _main(argv: list[str]) -> int:
     bi.add_argument("--no-cot", action="store_true")
     bi.add_argument("--no-fred", action="store_true")
     bi.add_argument("--no-news", action="store_true")
+    bi.add_argument("--manual", default="dados/manual.json", help="JSON com dados sem fonte automática (China, BCs, ETFs, eventos)")
     bi.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (vazio desliga)")
     bi.add_argument("--state", default="dados/gold_bias_state.json", help="estado anti-repetição entre reinícios")
     bi.add_argument("--interval", type=int, default=300, help="segundos entre leituras no modo monitor")

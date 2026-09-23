@@ -731,7 +731,7 @@ class BiasMemory:
         d = os.path.dirname(path)
         if d and path != ":memory:":
             os.makedirs(d, exist_ok=True)
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, check_same_thread=False)   # painel: acesso de várias threads, serializado pelo lock do DashService
         self.db.execute("""CREATE TABLE IF NOT EXISTS bias_predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, price REAL, score REAL, label TEXT, confidence REAL,
             horizons TEXT, factors TEXT, news TEXT, contradictions TEXT, kind TEXT)""")
@@ -871,3 +871,42 @@ def format_bias_closing(r: BiasReading, mem: Optional[BiasMemory], candles: Sequ
         lines.append("Sem leituras gravadas hoje (rode com --db para comparar previsão × resultado).")
     lines += ["", "LEITURA DA IA", f"\"{r.opinion}\""]
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- dados manuais
+BIAS_MANUAL_FIELDS: tuple[str, ...] = (
+    "china_demand", "india_demand", "central_bank_buying_tonnes", "etf_flow_musd", "employment_surprise_sigma", "jobless_claims_change_pct",
+    "economy_momentum", "inflation_surprise_sigma", "inflation_trend", "fed_tone", "geopolitical_risk", "geopolitical_risk_change",
+)
+
+
+def bias_apply_manual(s: MarketSnapshot, path: Optional[str]) -> list[str]:
+    """Aplica `dados/manual.json` (campos sem fonte automática: China/Índia, bancos centrais, ETFs, emprego, tom do FED...) e
+    eventos do calendário. Só preenche o que a coleta automática deixou vazio. Devolve os campos aplicados."""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f"[manual] {path} ignorado: {e}")
+        return []
+    applied = []
+    for name in BIAS_MANUAL_FIELDS:
+        v = data.get(name)
+        if isinstance(v, (int, float)) and getattr(s, name) is None:
+            setattr(s, name, float(v))
+            applied.append(name)
+    known = {(e.name, e.time) for e in s.events}
+    for ev in data.get("eventos", []) or []:
+        try:
+            t = datetime.fromisoformat(str(ev["time"]).replace("Z", "+00:00"))
+            t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+            e = EconomicEvent(str(ev["name"]), t, str(ev.get("impact", "ALTO")), ev.get("consensus"), ev.get("previous"), ev.get("actual"),
+                              str(ev.get("kind", "generic")), str(ev.get("unit", "")))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (e.name, e.time) not in known:
+            s.events.append(e)
+            applied.append(f"evento {e.name}")
+    return applied

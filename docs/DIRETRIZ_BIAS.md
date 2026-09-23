@@ -67,3 +67,30 @@ emprego e inflação também leem os eventos divulgados do calendário/RSS (NFP,
 
 O score representa o **viés probabilístico do conjunto de informações**, não uma garantia de movimento. Linguagem usada:
 "viés atual", "cenário principal", "risco de reversão". Nunca "o ouro certamente vai subir/cair".
+
+## Segunda camada — PAINEL (cockpit do ouro) `[gold_ai/dashboard.py, gold_ai/dashboard.html]`
+
+```bash
+python market_ai_engine_v6.py painel --source mt5 --send        # abre http://127.0.0.1:8765  (scripts/rodar_painel.bat)
+```
+
+A IA analisa por trás e o painel mostra os dados que sustentam o sinal, para **você** decidir se entra ou não.
+Apoio à decisão: o painel **nunca envia ordens**. Servidor local em Python puro (sem dependências); só fica acessível na rede
+com `--host 0.0.0.0`.
+
+| Bloco | O que mostra |
+| --- | --- |
+| 💰 XAU/USD | preço (MT5), variação do dia, máxima, mínima, variação da janela, fonte |
+| 🧠 GOLD BIAS | viés, confiança, score −100..+100 (régua), horizontes horas · 1 dia · 5 dias |
+| 🚦 Semáforo | 🟢 COMPRA: macro, técnico e estrutura positivos, fluxo e notícias sem contrariar, score ≥ +40 · 🔴 VENDA: o espelho · 🟡 AGUARDAR: divergência, viés fraco ou evento de alto impacto em ≤ 30 min |
+| 🎯 Confluência | % do peso dos blocos (macro 40, técnico 20, fluxo 15, estrutura 15, notícias 10) que aponta na direção do viés |
+| 📊 Painel de confluência | MACRO (DXY, Treasury 10Y/2Y/30Y, juros reais, FED) · FLUXO (ETF, China, Índia, bancos centrais) · TÉCNICO (EMA 9/21, RSI, MACD, VWAP, ADX) · NOTÍCIAS (Fed, dólar, geopolítica, demanda física) |
+| 📈 Gráfico | candles M1…D1, EMA 9/21/50/200, VWAP + bandas ±1σ/±2σ, suportes/resistências, Fibonacci, sinais da IA (▲▼ quando o viés muda), entrada hipotética com zona de risco/alvo, eventos econômicos; cada camada liga/desliga |
+| 🧠 Cérebro da IA | fatos do ciclo, fator dominante, fator contrário, conclusão ("baixista, mas com risco de repique") e a leitura da IA |
+| 🔥 POSSO ENTRAR? | tendência, macro, notícias, fluxo, técnico, estrutura, volatilidade → confluência e STATUS (confirmado / aguardar / não entrar); entrada = preço atual, stop pela estrutura ou 1,5 ATR, alvo 2R, lote para o risco em US$ informado; aviso de evento |
+| 🌎 Macro · 🏦 Fluxo · 📅 Calendário · 📰 Notícias | detalhes com valores, petróleo WTI/Brent, VIX, geopolítica, economia, apetite a risco |
+| 🚨 Alertas | os mesmos do Telegram + ALERTA DE COMPRA/VENDA quando o semáforo abre, com a lista do que confirmou |
+| 🗂 Histórico | "o que a IA disse às 10:30 × o que o ouro fez depois" (4 h e 1 dia, ✅/❌) |
+
+Dados sem fonte automática (demanda da China/Índia, compras de bancos centrais, fluxo de ETFs, eventos do calendário):
+copie `dados/manual.exemplo.json` para `dados/manual.json`. Só preenche o que a coleta deixou vazio.

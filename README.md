@@ -29,7 +29,13 @@ três horizontes (horas · 1 dia · 5 dias), as contradições e a leitura da IA
 python market_ai_engine_v6.py bias --source mt5 --send          # monitor contínuo
 python market_ai_engine_v6.py bias --mode manha --send          # relatório da manhã  (--mode fechamento à tarde)
 python market_ai_engine_v6.py bias --mode stats                 # acerto por horizonte/fator/hora + pesos sugeridos
+python market_ai_engine_v6.py painel --source mt5 --send        # 🥇 PAINEL (cockpit do ouro) em http://127.0.0.1:8765
 ```
+
+**PAINEL — cockpit do ouro** (`scripts/rodar_painel.bat`): gráfico M1…D1 com EMAs, VWAP e bandas, suportes/resistências,
+Fibonacci, sinais da IA, entrada hipotética e eventos; painel de confluência; semáforo COMPRA / VENDA / AGUARDAR;
+"cérebro da IA"; botão **POSSO ENTRAR?**; alertas; histórico "o que a IA disse × o que o ouro fez". Apoio à decisão —
+nunca envia ordens. Detalhes em [docs/DIRETRIZ_BIAS.md](docs/DIRETRIZ_BIAS.md).
 
 ## 4.0 — MARKET AI ENGINE
 

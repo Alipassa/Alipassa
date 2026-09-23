@@ -128,6 +128,11 @@ class MarketSnapshot:
     china_demand: Optional[float] = None               # -1..+1 demanda física/importações/compras do PBoC
     india_demand: Optional[float] = None               # -1..+1 importações, festivais, casamentos, rupia
     us2y_change_bp: Optional[float] = None
+    us30y: Optional[float] = None
+    us30y_change_bp: Optional[float] = None
+    wti: Optional[float] = None
+    brent: Optional[float] = None
+    brent_change_pct: Optional[float] = None
 
     # Geopolítica (§10) e risco sistêmico (§11)
     geopolitical_risk: Optional[float] = None         # 0..100

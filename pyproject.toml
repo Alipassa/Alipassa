@@ -17,6 +17,9 @@ dev = ["pytest>=7"]
 [project.scripts]
 gold-ai = "gold_ai.cli:main"
 
+[tool.setuptools.package-data]
+gold_ai = ["*.html"]
+
 [tool.setuptools.packages.find]
 include = ["gold_ai*"]
 

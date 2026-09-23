@@ -41,6 +41,7 @@ Modos: 🟢 PAPER (padrão) · 🟡 AUTHORIZE · 🟠 SEMI-LIVE · 🔴 LIVE (ex
 Comandos Telegram: /STOP /PAUSE /RESUME /STATUS /CLOSE (com /CLOSE CONFIRM)
 
 Uso (4.0, multi-mercado):
+    python market_ai_engine_v6.py painel --source mt5 --send                           # 🥇 PAINEL (cockpit do ouro) em http://127.0.0.1:8765
     python market_ai_engine_v6.py bias --source mt5 --send                             # 🥇 GOLD BIAS: viés do ouro → Telegram (docs/DIRETRIZ_BIAS.md)
     python market_ai_engine_v6.py markets                                              # ranking agora, não opera
     python market_ai_engine_v6.py edge                                                 # 🚨 LIVE EDGE — o teste definitivo (o que foi vivido)
@@ -88,7 +89,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "6.0.0"
-__build__ = "2026-09-23 19:16 UTC · 376b7d8"
+__build__ = "2026-09-23 19:37 UTC · 06eb535+"
 
 
 # ============================================================================
@@ -341,6 +342,11 @@ class MarketSnapshot:
     china_demand: Optional[float] = None               # -1..+1 demanda física/importações/compras do PBoC
     india_demand: Optional[float] = None               # -1..+1 importações, festivais, casamentos, rupia
     us2y_change_bp: Optional[float] = None
+    us30y: Optional[float] = None
+    us30y_change_bp: Optional[float] = None
+    wti: Optional[float] = None
+    brent: Optional[float] = None
+    brent_change_pct: Optional[float] = None
 
     # Geopolítica (§10) e risco sistêmico (§11)
     geopolitical_risk: Optional[float] = None         # 0..100
@@ -4134,6 +4140,9 @@ class DataEngineConfig:
     enable_cot: bool = True
     enable_news: bool = True
     market_symbol: str = "XAUUSD"     # mercado para o NEWS ENGINE no modo de mercado único
+    extended: bool = False            # GOLD BIAS / PAINEL: também Treasury 30Y, variação do 2Y, níveis de WTI e Brent
+    us30y_symbol: str = "^TYX"
+    brent_symbol: str = "BZ=F"
 
 
 class DataEngine:
@@ -4199,6 +4208,21 @@ class DataEngine:
             cs = self.yahoo.candles(self.cfg.us2y_symbol, "M15")
             s.us2y = cs[-1].close
         self._try("us2y", us2y)
+
+        def extended() -> None:
+            if not self.cfg.extended:
+                return
+            cs2 = self.yahoo.candles(self.cfg.us2y_symbol, "M15")
+            d2 = self.yahoo.change_over(cs2, w, pct=False)
+            s.us2y_change_bp = d2 * 100 if d2 is not None else None
+            cs30 = self.yahoo.candles(self.cfg.us30y_symbol, "M15")
+            s.us30y = cs30[-1].close
+            d30 = self.yahoo.change_over(cs30, w, pct=False)
+            s.us30y_change_bp = d30 * 100 if d30 is not None else None
+            s.wti = self.yahoo.candles(self.cfg.oil_symbol, "M15")[-1].close
+            csb = self.yahoo.candles(self.cfg.brent_symbol, "M15")
+            s.brent, s.brent_change_pct = csb[-1].close, self.yahoo.change_over(csb, w)
+        self._try("extended", extended)
 
         def fed() -> None:
             cs = self.yahoo.candles(self.cfg.fedfunds_symbol, "M15")
@@ -15784,7 +15808,7 @@ class BiasMemory:
         d = os.path.dirname(path)
         if d and path != ":memory:":
             os.makedirs(d, exist_ok=True)
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, check_same_thread=False)   # painel: acesso de várias threads, serializado pelo lock do DashService
         self.db.execute("""CREATE TABLE IF NOT EXISTS bias_predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, price REAL, score REAL, label TEXT, confidence REAL,
             horizons TEXT, factors TEXT, news TEXT, contradictions TEXT, kind TEXT)""")
@@ -15924,6 +15948,1362 @@ def format_bias_closing(r: BiasReading, mem: Optional[BiasMemory], candles: Sequ
         lines.append("Sem leituras gravadas hoje (rode com --db para comparar previsão × resultado).")
     lines += ["", "LEITURA DA IA", f"\"{r.opinion}\""]
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- dados manuais
+BIAS_MANUAL_FIELDS: tuple[str, ...] = (
+    "china_demand", "india_demand", "central_bank_buying_tonnes", "etf_flow_musd", "employment_surprise_sigma", "jobless_claims_change_pct",
+    "economy_momentum", "inflation_surprise_sigma", "inflation_trend", "fed_tone", "geopolitical_risk", "geopolitical_risk_change",
+)
+
+
+def bias_apply_manual(s: MarketSnapshot, path: Optional[str]) -> list[str]:
+    """Aplica `dados/manual.json` (campos sem fonte automática: China/Índia, bancos centrais, ETFs, emprego, tom do FED...) e
+    eventos do calendário. Só preenche o que a coleta automática deixou vazio. Devolve os campos aplicados."""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f"[manual] {path} ignorado: {e}")
+        return []
+    applied = []
+    for name in BIAS_MANUAL_FIELDS:
+        v = data.get(name)
+        if isinstance(v, (int, float)) and getattr(s, name) is None:
+            setattr(s, name, float(v))
+            applied.append(name)
+    known = {(e.name, e.time) for e in s.events}
+    for ev in data.get("eventos", []) or []:
+        try:
+            t = datetime.fromisoformat(str(ev["time"]).replace("Z", "+00:00"))
+            t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+            e = EconomicEvent(str(ev["name"]), t, str(ev.get("impact", "ALTO")), ev.get("consensus"), ev.get("previous"), ev.get("actual"),
+                              str(ev.get("kind", "generic")), str(ev.get("unit", "")))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (e.name, e.time) not in known:
+            s.events.append(e)
+            applied.append(f"evento {e.name}")
+    return applied
+
+
+# ============================================================================
+# DASHBOARD
+# ============================================================================
+
+"""GOLD MARKET INTELLIGENCE — PAINEL (cockpit do ouro). Segunda camada do GOLD BIAS ENGINE.
+
+A IA analisa por trás (MT5 + macro + notícias + técnico → GOLD BIAS) e o painel mostra os dados que sustentam o sinal,
+para VOCÊ decidir se entra ou não. Apoio à decisão: o painel NUNCA envia ordens.
+
+    python market_ai_engine_v6.py painel --source mt5 --send     # abre http://127.0.0.1:8765
+
+Arquitetura:  MT5 / DataEngine → snapshot → GoldBiasEngine → DashState (este módulo) → HTTP local (JSON + página)
+                                                           └→ BiasNotifier/Telegram · BiasMemory (previsão × resultado)
+
+Blocos: preço · viés/confiança/score · macro (DXY, Treasury 2Y/10Y/30Y, juros reais, FED, petróleo, VIX) · notícias ·
+geopolítica · China · fluxo · técnico · calendário · PAINEL DE CONFLUÊNCIA · SEMÁFORO · CÉREBRO DA IA · POSSO ENTRAR? ·
+gráfico (candles, EMA 9/21/50/200, VWAP + bandas, suportes/resistências, Fibonacci, sinais da IA, entrada hipotética,
+zona de risco, eventos) em M1…D1 · alertas · histórico "o que a IA disse × o que o ouro fez".
+"""
+
+
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+
+DASH_TFS: tuple[str, ...] = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
+DASH_BARS = 160                      # candles visíveis no gráfico
+DASH_CONTRACT_OZ = 100.0             # XAUUSD: 1 lote = 100 onças (ajuste com --contract)
+DASH_GROUP_WEIGHTS: dict[str, float] = {"macro": 0.40, "fluxo": 0.15, "tecnico": 0.20, "noticias": 0.10, "estrutura": 0.15}
+DASH_GROUP_LABELS: dict[str, str] = {"macro": "Macro", "fluxo": "Fluxo", "tecnico": "Técnico", "noticias": "Notícias", "estrutura": "Estrutura"}
+
+
+def dash_t(x: float) -> float:
+    return math.tanh(x)
+
+
+def dash_state_of(v: Optional[float], thr: float = 20.0) -> int:
+    """+1 favorável ao ouro · −1 desfavorável · 0 neutro/sem dado."""
+    if v is None:
+        return 0
+    return 1 if v >= thr else -1 if v <= -thr else 0
+
+
+def dash_icon(v: Optional[float], thr: float = 20.0) -> str:
+    if v is None:
+        return "⚪"
+    return {1: "🟢", -1: "🔴", 0: "🟡"}[dash_state_of(v, thr)]
+
+
+def dash_item(name: str, value: Optional[float], detail: str = "", directional: bool = True) -> dict:
+    v = None if value is None else round(max(-100.0, min(100.0, value)), 0)
+    return {"name": name, "value": v, "detail": detail, "icon": dash_icon(v) if directional else ("🟢" if (v or 0) >= 25 else "🟡"),
+            "state": dash_state_of(v) if directional else 0, "directional": directional}
+
+
+def dash_mean(items: Sequence[dict]) -> Optional[float]:
+    vals = [i["value"] for i in items if i["value"] is not None and i.get("directional", True)]
+    return round(sum(vals) / len(vals), 0) if vals else None
+
+
+# --------------------------------------------------------------------------- técnico por timeframe
+def dash_tf_indicators(candles: Sequence[Candle]) -> dict:
+    """RSI, MACD, ADX, EMAs, VWAP da janela, ATR — valores brutos + leitura −100..+100 (sentido do ouro)."""
+    closes = [c.close for c in candles]
+    if len(closes) < 30:
+        return {}
+    e9, e21, e50 = ema(closes, 9)[-1], ema(closes, 21)[-1], ema(closes, 50)[-1]
+    e200 = ema(closes, 200)[-1] if len(closes) >= 200 else None
+    r = rsi(closes)
+    _, _, hist = macd(closes)
+    a = adx(candles)
+    at = atr(candles) or 0.0
+    vw = dash_vwap_series(candles, "H1")[-1]
+    close = closes[-1]
+    out = {"close": close, "ema9": e9, "ema21": e21, "ema50": e50, "ema200": e200, "rsi": r, "macd_hist": hist[-1] if hist else None,
+           "adx": a, "atr": at, "vwap": vw["vwap"]}
+    out["ema_read"] = (40 if e9 > e21 else -40) + (30 if close > e50 else -30) + ((30 if close > e200 else -30) if e200 is not None else 0)
+    out["rsi_read"] = None if r is None else max(-100.0, min(100.0, (r - 50) * 4))
+    out["macd_read"] = None if not hist or not at else 100 * dash_t(hist[-1] / (0.5 * at))
+    out["vwap_read"] = None if not vw["vwap"] or not at else 100 * dash_t((close - vw["vwap"]) / at)
+    out["adx_read"] = a
+    return out
+
+
+def dash_vwap_series(candles: Sequence[Candle], tf: str, session_hour: int = 22) -> list[dict]:
+    """VWAP ancorado: sessão (≤ H1, reinicia às session_hour UTC), semana (H4) ou mês (D1); bandas de ±1σ e ±2σ."""
+    out: list[dict] = []
+    pv = vol = pv2 = 0.0
+    anchor = None
+    for c in candles:
+        if tf in ("H4",):
+            key = (c.time - timedelta(days=c.time.weekday())).date()
+        elif tf in ("D1", "W1"):
+            key = (c.time.year, c.time.month)
+        else:
+            key = (c.time - timedelta(hours=session_hour)).date()
+        if key != anchor:
+            anchor, pv, vol, pv2 = key, 0.0, 0.0, 0.0
+        tp = (c.high + c.low + c.close) / 3
+        v = c.volume or 1.0
+        pv += tp * v
+        pv2 += tp * tp * v
+        vol += v
+        mean = pv / vol
+        sd = math.sqrt(max(0.0, pv2 / vol - mean * mean))
+        out.append({"vwap": mean, "sd": sd})
+    return out
+
+
+def dash_pivots(candles: Sequence[Candle], k: int = 3) -> tuple[list[float], list[float]]:
+    highs, lows = [], []
+    for i in range(k, len(candles) - k):
+        win = candles[i - k:i + k + 1]
+        if candles[i].high == max(c.high for c in win):
+            highs.append(candles[i].high)
+        if candles[i].low == min(c.low for c in win):
+            lows.append(candles[i].low)
+    return highs, lows
+
+
+def dash_levels(candles: Sequence[Candle], price: float, atr_: float) -> dict:
+    """Suportes (abaixo do preço) e resistências (acima), agrupando pivôs a menos de 0,3 ATR."""
+    highs, lows = dash_pivots(candles)
+    tol = max(atr_ * 0.3, price * 0.0002)
+
+    def cluster(vals: list[float]) -> list[float]:
+        out: list[float] = []
+        for v in sorted(vals):
+            if out and abs(v - out[-1]) <= tol:
+                out[-1] = (out[-1] + v) / 2
+            else:
+                out.append(v)
+        return out
+
+    levels = cluster(highs + lows)
+    res = sorted([v for v in levels if v > price + tol * 0.2])[:3]
+    sup = sorted([v for v in levels if v < price - tol * 0.2], reverse=True)[:3]
+    s1, r1 = swing_levels(candles)
+    if not sup and s1 is not None and s1 < price:
+        sup = [s1]
+    if not res and r1 is not None and r1 > price:
+        res = [r1]
+    return {"supports": [round(v, 2) for v in sup], "resistances": [round(v, 2) for v in res]}
+
+
+def dash_fibonacci(candles: Sequence[Candle]) -> Optional[dict]:
+    """Retração da maior perna da janela: do extremo mais antigo ao mais recente."""
+    if len(candles) < 10:
+        return None
+    hi_i = max(range(len(candles)), key=lambda i: candles[i].high)
+    lo_i = min(range(len(candles)), key=lambda i: candles[i].low)
+    hi, lo = candles[hi_i].high, candles[lo_i].low
+    if hi <= lo:
+        return None
+    up = lo_i < hi_i                                   # perna de alta: fundo antes do topo → retrações a partir do topo
+    levels = []
+    for f in (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0):
+        levels.append({"ratio": f, "price": round(hi - (hi - lo) * f if up else lo + (hi - lo) * f, 2)})
+    return {"direction": "alta" if up else "baixa", "high": hi, "low": lo, "levels": levels}
+
+
+# --------------------------------------------------------------------------- estado do painel
+class DashState:
+    """Transforma (snapshot, leitura do GOLD BIAS) no JSON do painel. Guarda séries por timeframe para o gráfico."""
+
+    def __init__(self, memory: Optional[BiasMemory] = None, contract_oz: float = DASH_CONTRACT_OZ, local_tz_hours: float = -3.0) -> None:
+        self.memory = memory
+        self.contract_oz = contract_oz
+        self.local_tz_hours = local_tz_hours
+        self.snapshot: Optional[MarketSnapshot] = None
+        self.reading: Optional[BiasReading] = None
+        self.payload: dict = {}
+        self.alerts: list[dict] = []
+        self.prev_light: Optional[str] = None
+        self.prev_score: Optional[float] = None
+        self.score_before: Optional[float] = None     # score da leitura anterior (para "IA mudou de X → Y")
+        self.status: dict[str, str] = {}
+        self.updated: Optional[datetime] = None
+
+    # ---- blocos
+    def price_block(self, s: MarketSnapshot) -> dict:
+        d1 = s.candles.get("D1") or []
+        h1 = s.candles.get("H1") or []
+        prev_close = d1[-2].close if len(d1) >= 2 else (h1[-25].close if len(h1) >= 25 else None)
+        day = d1[-1] if d1 else None
+        hi = day.high if day else (max(c.high for c in h1[-24:]) if h1 else None)
+        lo = day.low if day else (min(c.low for c in h1[-24:]) if h1 else None)
+        if hi is not None:
+            hi, lo = max(hi, s.price), min(lo, s.price)
+        return {"price": round(s.price, 2), "change_pct": round((s.price / prev_close - 1) * 100, 2) if prev_close else None,
+                "change_abs": round(s.price - prev_close, 2) if prev_close else None, "high": hi, "low": lo,
+                "window_change_pct": round(s.price_change_pct, 2), "source": s.price_source or ("mt5" if self.status.get("mt5") == "ok" else "web/sample")}
+
+    def macro_block(self, s: MarketSnapshot, r: BiasReading) -> list[dict]:
+        f = r.factor
+        items = [
+            dash_item("DXY", f("dolar").ratio * 100 if f("dolar").available else None,
+                      (f"{s.dxy:.2f} " if s.dxy else "") + (f"({s.dxy_change_pct:+.2f}%)" if s.dxy_change_pct is not None else "")),
+            dash_item("Treasury 10Y", -100 * dash_t(s.us10y_change_bp / 8) if s.us10y_change_bp is not None else None,
+                      (f"{s.us10y:.2f}% " if s.us10y else "") + (f"({s.us10y_change_bp:+.1f} bp)" if s.us10y_change_bp is not None else "")),
+            dash_item("Treasury 2Y", -100 * dash_t(s.us2y_change_bp / 8) if s.us2y_change_bp is not None else None,
+                      (f"{s.us2y:.2f}% " if s.us2y else "") + (f"({s.us2y_change_bp:+.1f} bp)" if s.us2y_change_bp is not None else "")),
+            dash_item("Treasury 30Y", -100 * dash_t(s.us30y_change_bp / 8) if s.us30y_change_bp is not None else None,
+                      (f"{s.us30y:.2f}% " if s.us30y else "") + (f"({s.us30y_change_bp:+.1f} bp)" if s.us30y_change_bp is not None else "")),
+            dash_item("Juros reais", f("juros_reais").ratio * 100 if f("juros_reais").available else None,
+                      f"{s.real_yield_change_bp:+.1f} bp" if s.real_yield_change_bp is not None else ""),
+            dash_item("FED", f("fed").ratio * 100 if f("fed").available else None, r.fed_stance.title() + (f" · {r.fed_shift}" if r.fed_shift else "")),
+            dash_item("Inflação", f("inflacao").ratio * 100 if f("inflacao").available else None, ""),
+            dash_item("Emprego", f("emprego").ratio * 100 if f("emprego").available else None, ""),
+        ]
+        return items
+
+    @staticmethod
+    def context_block(s: MarketSnapshot, r: BiasReading) -> dict:
+        oil_v = None
+        if s.oil_change_pct is not None or s.brent_change_pct is not None:
+            ch = [x for x in (s.oil_change_pct, s.brent_change_pct) if x is not None]
+            oil_v = -100 * dash_t(sum(ch) / len(ch) / 3)          # petróleo subindo → inflação → FED duro → leve pressão
+        vix_v = None
+        if s.vix is not None:
+            vix_v = 100 * dash_t(((s.vix - 18) / 10) + (s.vix_change_pct or 0) / 20)
+        vix_mode = "—" if s.vix is None else ("calmo" if s.vix < 15 else "normal" if s.vix < 20 else "tenso" if s.vix < 28 else "estresse")
+        return {
+            "oil": dash_item("Petróleo", oil_v, " · ".join(x for x in (
+                f"WTI {s.wti:.2f}" if s.wti else "", f"({s.oil_change_pct:+.2f}%)" if s.oil_change_pct is not None else "",
+                f"Brent {s.brent:.2f}" if s.brent else "", f"({s.brent_change_pct:+.2f}%)" if s.brent_change_pct is not None else "") if x)),
+            "vix": dash_item("VIX", vix_v, (f"{s.vix:.1f} · {vix_mode}" if s.vix is not None else "") + (f" · {r.risk_mode}" if r.risk_mode != "INDISPONÍVEL" else "")),
+            "geo": {"level": r.geo_level, "icon": r.geo_emoji, "value": s.geopolitical_risk, "change": s.geopolitical_risk_change},
+            "economy": r.economy, "risk_mode": r.risk_mode,
+        }
+
+    def flow_block(self, s: MarketSnapshot, r: BiasReading) -> list[dict]:
+        ci = r.factor("china_india")
+        return [
+            dash_item("ETF GOLD", 100 * dash_t(s.etf_flow_musd / 300) if s.etf_flow_musd is not None else None,
+                      f"{s.etf_flow_musd:+.0f} M USD" if s.etf_flow_musd is not None else ""),
+            dash_item("China", 100 * s.china_demand if s.china_demand is not None else (ci.ratio * 100 if ci and ci.available else None),
+                      "demanda física" + (f" {s.china_demand:+.2f}" if s.china_demand is not None else "")),
+            dash_item("Índia", 100 * s.india_demand if s.india_demand is not None else None, "importações/joias"),
+            dash_item("Bancos centrais", 100 * dash_t(s.central_bank_buying_tonnes / 30) if s.central_bank_buying_tonnes is not None else None,
+                      f"{s.central_bank_buying_tonnes:+.0f} t" if s.central_bank_buying_tonnes is not None else ""),
+            dash_item("COT (especuladores)", 100 * dash_t(s.cot_managed_money_net_change / 15000) if s.cot_managed_money_net_change is not None else None,
+                      (f"{s.cot_managed_money_net_change:+.0f} contratos" if s.cot_managed_money_net_change is not None else "")
+                      + (f" · p{s.cot_managed_money_percentile:.0f}" if s.cot_managed_money_percentile is not None else "")),
+            dash_item("Agressão (fluxo)", 100 * s.order_flow_imbalance if s.order_flow_imbalance is not None else None, "volume comprador − vendedor"),
+        ]
+
+    def technical_block(self, s: MarketSnapshot, r: BiasReading) -> dict:
+        per_tf = {}
+        for tf in ("M15", "H1", "H4", "D1"):
+            cs = s.candles.get(tf) or []
+            ind = dash_tf_indicators(cs)
+            if ind:
+                per_tf[tf] = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in ind.items()}
+                per_tf[tf]["structure"] = bias_structure(cs)
+        ref = per_tf.get("H1") or per_tf.get("M15") or next(iter(per_tf.values()), {})
+        adx_v = ref.get("adx")
+        items = [
+            dash_item("EMA 9/21", ref.get("ema_read"), "9 acima da 21" if ref.get("ema9", 0) > ref.get("ema21", 0) else "9 abaixo da 21" if ref else ""),
+            dash_item("RSI", ref.get("rsi_read"), f"{ref['rsi']:.0f}" if ref.get("rsi") is not None else ""),
+            dash_item("MACD", ref.get("macd_read"), f"hist {ref['macd_hist']:+.2f}" if ref.get("macd_hist") is not None else ""),
+            dash_item("VWAP", ref.get("vwap_read"), ("acima" if ref.get("vwap_read", 0) > 0 else "abaixo") if ref.get("vwap_read") is not None else ""),
+            dash_item("ADX", None if adx_v is None else min(100.0, adx_v * 2.5),
+                      "" if adx_v is None else f"{adx_v:.0f} · {'tendência' if adx_v >= 25 else 'tendência fraca' if adx_v >= 18 else 'sem tendência'}", directional=False),
+        ]
+        return {"items": items, "per_tf": per_tf, "vwap": r.vwap, "ema_cross": r.ema_cross, "structure": r.structure}
+
+    @staticmethod
+    def news_block(r: BiasReading) -> dict:
+        items = [{"headline": n.headline, "source": n.source, "time": n.time.isoformat(), "impact": n.impact, "factor": BIAS_FACTOR_LABELS.get(n.factor, "—"),
+                  "credibility": n.credibility, "recency": n.recency, "icon": "🟢" if n.impact > 0 else "🔴" if n.impact < 0 else "🟡"} for n in r.news[:12]]
+        # resumo por tema (como no painel de confluência: "🔴 Fed hawkish · 🔴 Dólar forte · 🟡 Geopolítica · 🟢 Demanda física")
+        f = r.factor
+        themes = []
+        for key, pos, neg, neu in (("fed", "Fed dovish", "Fed hawkish", "Fed neutro"), ("dolar", "Dólar fraco", "Dólar forte", "Dólar estável"),
+                                   ("geopolitica", "Geopolítica em alta", "Geopolítica aliviando", "Geopolítica estável"),
+                                   ("china_india", "Demanda física forte", "Demanda física fraca", "Demanda física estável")):
+            fs = f(key)
+            if fs is None or not fs.available:
+                continue
+            v = fs.ratio * 100
+            themes.append({"label": pos if v >= 20 else neg if v <= -20 else neu, "icon": dash_icon(v), "value": round(v)})
+        return {"items": items, "themes": themes}
+
+    def calendar_block(self, s: MarketSnapshot) -> list[dict]:
+        out = []
+        for e in sorted(s.events, key=lambda x: x.time):
+            mins = (e.time - s.time).total_seconds() / 60
+            if mins < -12 * 60 or mins > 7 * 24 * 60:
+                continue
+            out.append({"name": e.name, "time": e.time.isoformat(), "minutes": round(mins), "impact": e.impact, "consensus": e.consensus,
+                        "previous": e.previous, "actual": e.actual, "unit": e.unit, "kind": e.kind, "done": e.actual is not None or mins < 0})
+        return out[:15]
+
+    # ---- confluência, semáforo, cérebro, entrada
+    def groups(self, macro: list[dict], flow: list[dict], tech: dict, news: dict, s: MarketSnapshot, r: BiasReading) -> dict:
+        struct_vals = []
+        for tf, w in (("H1", 0.3), ("H4", 0.4), ("D1", 0.3)):
+            st = r.structure.get(tf, "")
+            v = 100 if ("ALTA" in st or "rompimento de alta" in st) else -100 if ("BAIXA" in st or "rompimento de baixa" in st) else 0 if st else None
+            if v is not None:
+                struct_vals.append((v, w))
+        estrutura = round(sum(v * w for v, w in struct_vals) / sum(w for _, w in struct_vals)) if struct_vals else None
+        news_vals = [n["impact"] * n["credibility"] * n["recency"] for n in news["items"] if n["recency"] > 0.2]
+        noticias = round(100 * dash_t(sum(news_vals) / 2)) if news_vals else None
+        return {"macro": dash_mean(macro), "fluxo": dash_mean(flow), "tecnico": dash_mean(tech["items"]), "noticias": noticias, "estrutura": estrutura}
+
+    @staticmethod
+    def confluence(groups: dict, score: float) -> float:
+        """% do peso (× intensidade) dos blocos com leitura que aponta na direção do viés."""
+        d = 1 if score > 0 else -1 if score < 0 else 0
+        if d == 0:
+            best = max(((abs(v), v) for v in groups.values() if v is not None), default=(0, 0))
+            d = 1 if best[1] > 0 else -1 if best[1] < 0 else 0
+        num = den = 0.0
+        for k, v in groups.items():
+            if v is None or abs(v) < 10:
+                continue
+            w = DASH_GROUP_WEIGHTS[k] * min(1.0, abs(v) / 60)
+            den += w
+            if v * d > 0:
+                num += w
+        return round(100 * num / den) if den else 0.0
+
+    @staticmethod
+    def traffic_light(groups: dict, score: float, event_minutes: Optional[float]) -> dict:
+        """🟢 COMPRA · 🔴 VENDA · 🟡 AGUARDAR. Compra exige macro, técnico e estrutura positivos, fluxo e notícias sem contrariar e
+        score ≥ +40 (a venda é o espelho). Divergência ou evento de alto impacto em ≤ 30 min → AGUARDAR."""
+        st = {k: dash_state_of(v) for k, v in groups.items()}
+        rows = [{"group": DASH_GROUP_LABELS[k], "icon": dash_icon(groups[k]), "value": groups[k]} for k in DASH_GROUP_LABELS]
+        missing = [DASH_GROUP_LABELS[k] for k, v in groups.items() if v is None]
+
+        def side(d: int) -> bool:
+            return st["macro"] == d and st["tecnico"] == d and st["estrutura"] == d and st["fluxo"] != -d and st["noticias"] != -d and score * d >= 40
+
+        pos = [DASH_GROUP_LABELS[k] for k, v in st.items() if v > 0]
+        neg = [DASH_GROUP_LABELS[k] for k, v in st.items() if v < 0]
+        if event_minutes is not None and 0 <= event_minutes <= 30:
+            return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR — EVENTO DE ALTO IMPACTO",
+                    "reason": f"dado importante em {event_minutes:.0f} min: esperar a reação do dólar e dos juros", "rows": rows, "missing": missing}
+        if side(1):
+            return {"state": "COMPRA", "icon": "🟢", "title": "CENÁRIO FAVORÁVEL À COMPRA", "reason": "macro, técnico e estrutura alinhados para alta; fluxo e notícias não contrariam",
+                    "rows": rows, "missing": missing}
+        if side(-1):
+            return {"state": "VENDA", "icon": "🔴", "title": "CENÁRIO FAVORÁVEL À VENDA", "reason": "macro, técnico e estrutura alinhados para baixa; fluxo e notícias não contrariam",
+                    "rows": rows, "missing": missing}
+        if pos and neg:
+            reason = f"divergência: {', '.join(pos)} 🟢 × {', '.join(neg)} 🔴"
+        elif abs(score) < 40:
+            reason = f"viés sem força (score {score:+.0f}; precisa de ±40)"
+        else:
+            reason = "falta confirmação de " + ", ".join(DASH_GROUP_LABELS[k] for k in ("macro", "tecnico", "estrutura") if st[k] != (1 if score > 0 else -1))
+        return {"state": "AGUARDAR", "icon": "🟡", "title": "AGUARDAR CONFIRMAÇÃO", "reason": reason, "rows": rows, "missing": missing}
+
+    @staticmethod
+    def brain(s: MarketSnapshot, r: BiasReading, tech: dict, groups: dict) -> dict:
+        """POR QUE A IA ESTÁ PENSANDO ISSO? Fatos em linguagem direta, fator dominante, fator contrário e conclusão."""
+        facts: list[str] = []
+        if s.dxy_change_pct is not None and abs(s.dxy_change_pct) >= 0.05:
+            facts.append("DXY ganhou força." if s.dxy_change_pct > 0 else "DXY perdeu força.")
+        if s.us10y_change_bp is not None and abs(s.us10y_change_bp) >= 1:
+            facts.append(f"Treasury 10Y {'subiu' if s.us10y_change_bp > 0 else 'caiu'} {abs(s.us10y_change_bp):.1f} bp.")
+        if s.real_yield_change_bp is not None and abs(s.real_yield_change_bp) >= 1:
+            facts.append(f"Juros reais {'subiram' if s.real_yield_change_bp > 0 else 'caíram'}.")
+        if r.fed_stance in ("HAWKISH", "DOVISH"):
+            facts.append("Expectativa de política monetária mais restritiva aumentou." if r.fed_stance == "HAWKISH"
+                         else "Expectativa de cortes de juros aumentou.")
+        if r.fed_shift:
+            facts.append(f"Discurso do FED mudou: {r.fed_shift}.")
+        ref = tech["per_tf"].get("H1") or {}
+        lv = r.levels
+        if ref and lv.get("suporte") and s.price < lv["suporte"]:
+            facts.append("XAU/USD perdeu suporte técnico.")
+        if ref and lv.get("resistencia") and s.price > lv["resistencia"]:
+            facts.append("XAU/USD rompeu resistência.")
+        for tf, st in r.structure.items():
+            if "rompimento" in st:
+                facts.append(f"{tf}: {st}.")
+        if r.ema_cross.startswith("cruzamento"):
+            facts.append("EMA 9 cruzou " + ("acima" if "alta" in r.ema_cross else "abaixo") + " da EMA 21.")
+        if ref.get("rsi") is not None and (ref["rsi"] >= 70 or ref["rsi"] <= 30):
+            facts.append(f"RSI em {ref['rsi']:.0f} ({'sobrecomprado' if ref['rsi'] >= 70 else 'sobrevendido'}).")
+        if s.etf_flow_musd is not None and abs(s.etf_flow_musd) >= 50:
+            facts.append(f"ETFs de ouro com {'entradas' if s.etf_flow_musd > 0 else 'saídas'} de {abs(s.etf_flow_musd):.0f} M USD.")
+        if r.geo_level in ("ALTO", "EXTREMO"):
+            facts.append(f"Risco geopolítico {r.geo_level.lower()}.")
+        top_news = [n for n in r.news if abs(n.impact) >= 2][:2]
+        facts += [f"Notícia: {n.headline[:90]}" for n in top_news]
+        avail = [f for f in r.factors if f.available]
+        d = r.direction or (1 if r.score > 0 else -1 if r.score < 0 else 0)
+        dom = max(avail, key=lambda f: abs(f.score), default=None)
+        contra = max((f for f in avail if d and f.score * d < 0), key=lambda f: abs(f.score), default=None)
+        word = {1: "altista", -1: "baixista", 0: "lateral/incerto"}[r.direction]
+        conclusion = f"Cenário {word}"
+        rsi_h1 = ref.get("rsi")
+        if r.direction < 0 and ((rsi_h1 is not None and rsi_h1 <= 35) or (contra is not None and abs(contra.score) >= 0.4 * contra.max_score)):
+            conclusion += ", mas com risco de repique"
+        elif r.direction > 0 and ((rsi_h1 is not None and rsi_h1 >= 65) or (contra is not None and abs(contra.score) >= 0.4 * contra.max_score)):
+            conclusion += ", mas com risco de realização"
+        elif r.contradictions:
+            conclusion += ", com divergências — confirmar antes de agir"
+        return {"bias": r.label, "emoji": r.emoji, "facts": facts[:10] or ["Nenhuma variação relevante no ciclo — mercado sem gatilho."],
+                "dominant": None if dom is None else f"{BIAS_FACTOR_LABELS[dom.name]} — {dom.rationale}",
+                "contrary": None if contra is None else f"{BIAS_FACTOR_LABELS[contra.name]} — {contra.rationale}",
+                "conclusion": conclusion + ".", "opinion": r.opinion, "contradictions": r.contradictions}
+
+    def entry(self, s: MarketSnapshot, r: BiasReading, groups: dict, confluence: float, light: dict, risk_usd: Optional[float] = None) -> dict:
+        """POSSO ENTRAR? — checklist, status, entrada/stop/alvo hipotéticos e lote para o risco informado. Não envia ordem."""
+        d = 1 if r.score > 0 else -1 if r.score < 0 else 0
+        trend_vals = []
+        for tf in ("H4", "D1"):
+            ind = dash_tf_indicators(s.candles.get(tf) or [])
+            if ind:
+                trend_vals.append(ind["ema_read"])
+        trend = sum(trend_vals) / len(trend_vals) if trend_vals else None
+        h1 = s.candles.get("H1") or []
+        atr_now = atr(h1) or s.atr or 0.0
+        atr_ref = None
+        if len(h1) > 80:
+            trs = [atr(h1[:i]) for i in range(len(h1) - 60, len(h1), 10)]
+            trs = [x for x in trs if x]
+            atr_ref = sum(trs) / len(trs) if trs else None
+        vol_ratio = atr_now / atr_ref if atr_ref else None
+        if vol_ratio is None:
+            vol_icon, vol_txt = "⚪", "sem histórico"
+        elif vol_ratio > 2.2:
+            vol_icon, vol_txt = "🔴", f"extrema ({vol_ratio:.1f}× o normal)"
+        elif vol_ratio > 1.5 or vol_ratio < 0.6:
+            vol_icon, vol_txt = "🟡", f"{'elevada' if vol_ratio > 1 else 'muito baixa'} ({vol_ratio:.1f}× o normal)"
+        else:
+            vol_icon, vol_txt = "🟢", f"normal ({vol_ratio:.1f}×)"
+
+        def row(name: str, v: Optional[float], txt: str = "") -> dict:
+            aligned = None if v is None or d == 0 else dash_state_of(v) * d
+            icon = "⚪" if v is None else ("🟢" if aligned == 1 else "🔴" if aligned == -1 else "🟡") if d else dash_icon(v)
+            side = "COMPRA" if d > 0 else "VENDA"
+            if not txt and v is not None and d:
+                txt = f"confirma a {side}" if aligned == 1 else f"contra a {side}" if aligned == -1 else "neutro"
+            return {"name": name, "icon": icon, "value": v, "detail": txt}
+
+        rows = [row("Tendência (H4/D1)", trend), row("Macro", groups["macro"]), row("Notícias", groups["noticias"]),
+                row("Fluxo", groups["fluxo"]), row("Técnico", groups["tecnico"]), row("Estrutura", groups["estrutura"]),
+                {"name": "Volatilidade", "icon": vol_icon, "value": None, "detail": vol_txt}]
+        against = [x["name"] for x in rows if x["icon"] == "🔴"]
+        event = r.event
+        if d == 0 or abs(r.score) < 40:
+            status, icon = "SEM VIÉS SUFICIENTE — NÃO ENTRAR", "🟡"
+        elif vol_icon == "🔴" or (trend is not None and dash_state_of(trend) == -d):
+            status, icon = "NÃO ENTRAR — " + ("volatilidade extrema" if vol_icon == "🔴" else "tendência maior contra o viés"), "🔴"
+        elif light["state"] in ("COMPRA", "VENDA") and confluence >= 70 and not against:
+            status, icon = "CENÁRIO CONFIRMADO", "🟢"
+        else:
+            status, icon = "AGUARDAR CONFIRMAÇÃO", "🟡"
+        plan = None
+        if d != 0 and atr_now:
+            price = s.price
+            lv = dash_levels(h1[-120:], price, atr_now) if h1 else {"supports": [], "resistances": []}
+            struct = (lv["supports"][0] - 0.25 * atr_now) if d > 0 and lv["supports"] else (lv["resistances"][0] + 0.25 * atr_now) if d < 0 and lv["resistances"] else None
+            dist = abs(price - struct) if struct is not None else None
+            if dist is None or dist < 0.8 * atr_now or dist > 3 * atr_now:
+                stop, how = price - d * 1.5 * atr_now, "1,5 × ATR H1"
+            else:
+                stop, how = struct, "além do suporte/resistência mais próximo"
+            risk_pt = abs(price - stop)
+            target = price + d * 2 * risk_pt
+            nxt = (lv["resistances"][0] if d > 0 and lv["resistances"] else lv["supports"][0] if d < 0 and lv["supports"] else None)
+            plan = {"side": "COMPRA" if d > 0 else "VENDA", "entry": round(price, 2), "stop": round(stop, 2), "stop_rule": how, "target": round(target, 2),
+                    "target_rule": "2R (2 × o risco)", "next_level": nxt, "risk_points": round(risk_pt, 2),
+                    "risk_per_lot_usd": round(risk_pt * self.contract_oz, 2)}
+            if risk_usd:
+                lots = risk_usd / (risk_pt * self.contract_oz) if risk_pt else 0.0
+                plan["risk_usd"] = risk_usd
+                plan["lots"] = math.floor(lots * 100) / 100
+        warn = None
+        if event is not None:
+            warn = f"Evento de alto impacto: {event.name} em {event.minutes:.0f} minutos"
+        return {"rows": rows, "confluence": confluence, "status": status, "icon": icon, "plan": plan, "event_warning": warn, "against": against,
+                "note": "Apoio à decisão: o painel não envia ordens. Confirme preço, spread e risco na corretora antes de executar."}
+
+    # ---- gráfico
+    def chart(self, tf: str, risk_usd: Optional[float] = None) -> dict:
+        s, r = self.snapshot, self.reading
+        if s is None or r is None:
+            return {"tf": tf, "candles": []}
+        full = s.candles.get(tf) or []
+        if not full:
+            return {"tf": tf, "candles": [], "available": [k for k in DASH_TFS if s.candles.get(k)]}
+        closes = [c.close for c in full]
+        e = {n: ema(closes, n) if len(closes) >= n else [] for n in (9, 21, 50, 200)}
+        vw = dash_vwap_series(full, tf, s.session_start[0] if s.session_start else 22)
+        start = max(0, len(full) - DASH_BARS)
+        vis = full[start:]
+
+        def at(series: list, i: int) -> Optional[float]:
+            return round(series[i], 2) if series and i < len(series) and (len(closes) - len(series)) <= i else None
+
+        candles = []
+        for i in range(start, len(full)):
+            c = full[i]
+            v = vw[i]
+            candles.append({"t": int(c.time.timestamp()), "o": c.open, "h": c.high, "l": c.low, "c": c.close,
+                            "e9": at(e[9], i), "e21": at(e[21], i), "e50": at(e[50], i), "e200": at(e[200], i) if len(closes) >= 200 else None,
+                            "vw": round(v["vwap"], 2), "sd": round(v["sd"], 2)})
+        atr_tf = atr(full) or s.atr or 1.0
+        levels = dash_levels(vis, s.price, atr_tf)
+        fib = dash_fibonacci(vis)
+        t0, t1 = vis[0].time, vis[-1].time
+        events = [{"t": int(ev.time.timestamp()), "name": ev.name, "impact": ev.impact, "future": ev.time > s.time}
+                  for ev in s.events if t0 <= ev.time <= t1 + timedelta(hours=12)]
+        signals = []
+        if self.memory is not None:
+            prev = None
+            for t, score, label in self.memory.db.execute("SELECT time, score, label FROM bias_predictions ORDER BY time").fetchall():
+                tt = datetime.fromisoformat(t)
+                if tt < t0:
+                    prev = label
+                    continue
+                if label != prev and ("ALTA" in label or "BAIXA" in label):
+                    signals.append({"t": int(tt.timestamp()), "label": label, "score": score, "side": 1 if "ALTA" in label else -1})
+                prev = label
+        entry = self.payload.get("entry", {}).get("plan") if self.payload else None
+        return {"tf": tf, "candles": candles, "levels": levels, "fib": fib, "events": events, "signals": signals[-30:], "entry": entry,
+                "price": s.price, "available": [k for k in DASH_TFS if s.candles.get(k)]}
+
+    # ---- alertas
+    def buy_sell_alert(self, light: dict, s: MarketSnapshot, r: BiasReading, macro: list[dict], tech: dict) -> Optional[str]:
+        """🚨 ALERTA DE COMPRA/VENDA quando o semáforo passa a COMPRA/VENDA — com a lista do que confirmou."""
+        prev, now = self.prev_light, light["state"]
+        self.prev_light = now
+        if now not in ("COMPRA", "VENDA") or prev == now:
+            return None
+        d = 1 if now == "COMPRA" else -1
+        ok = []
+        for tf, st in r.structure.items():
+            if ("rompimento de alta" in st and d > 0) or ("rompimento de baixa" in st and d < 0):
+                ok.append(f"XAU/USD {'rompeu resistência' if d > 0 else 'perdeu suporte'} ({tf})")
+        for it in macro[:5]:
+            if it["value"] is not None and it["state"] == d:
+                ok.append(f"{it['name']} {'favorável' if d > 0 else 'desfavorável'} ao ouro {it['detail']}".strip())
+        for it in tech["items"]:
+            if it["directional"] and it["value"] is not None and it["state"] == d:
+                ok.append(f"{it['name']} confirmou")
+        if self.score_before is not None and round(self.score_before) != round(r.score):
+            ok.append(f"IA mudou de {self.score_before:+.0f} → {r.score:+.0f}")
+        return "\n".join([f"🚨 ALERTA DE {now}", "", *[f"• {x}" for x in ok[:8]], "",
+                          "XAU/USD: " + f"{s.price:,.2f}".replace(",", "_").replace(".", ",").replace("_", "."),
+                          f"Viés: {r.emoji} {r.label} · confiança {r.confidence:.0f}%", "Apoio à decisão — confira o painel antes de entrar."])
+
+    def add_alert(self, kind: str, text: str, when: datetime) -> None:
+        self.alerts.insert(0, {"kind": kind, "time": when.isoformat(), "text": text})
+        del self.alerts[40:]
+
+    # ---- montagem
+    def update(self, s: MarketSnapshot, r: BiasReading, status: Optional[dict] = None, risk_usd: Optional[float] = None) -> dict:
+        self.score_before = self.prev_score
+        self.snapshot, self.reading = s, r
+        self.status = dict(status or {})
+        macro = self.macro_block(s, r)
+        ctx = self.context_block(s, r)
+        flow = self.flow_block(s, r)
+        tech = self.technical_block(s, r)
+        news = self.news_block(r)
+        groups = self.groups(macro, flow, tech, news, s, r)
+        conf = self.confluence(groups, r.score)
+        light = self.traffic_light(groups, r.score, r.event.minutes if r.event else None)
+        entry = self.entry(s, r, groups, conf, light, risk_usd)
+        brain = self.brain(s, r, tech, groups)
+        self.updated = datetime.now(timezone.utc)
+        self.payload = {
+            "time": s.time.isoformat(), "updated": self.updated.isoformat(), "local_tz_hours": self.local_tz_hours,
+            "price": self.price_block(s),
+            "bias": {"label": r.label, "emoji": r.emoji, "direction": r.direction, "score": r.score, "confidence": r.confidence, "coverage": r.coverage,
+                     "horizons": {k: {"label": h.label, "emoji": h.emoji, "score": h.score} for k, h in r.horizons.items()}},
+            "macro": macro, "context": ctx, "flow": flow, "technical": tech, "news": news, "calendar": self.calendar_block(s),
+            "confluence": {"groups": {k: {"label": DASH_GROUP_LABELS[k], "value": v, "icon": dash_icon(v)} for k, v in groups.items()},
+                           "value": conf, "macro": macro[:6], "flow": flow[:4], "technical": tech["items"], "themes": news["themes"]},
+            "light": light, "brain": brain, "entry": entry,
+            "event": None if r.event is None else {"name": r.event.name, "minutes": r.event.minutes, "if_above": r.event.if_above,
+                                                  "if_below": r.event.if_below, "volatility": r.event.volatility},
+            "alerts": self.alerts, "status": self.status,
+            "disclaimer": "Viés probabilístico, não garantia de movimento. Apoio à decisão — o painel não executa ordens.",
+        }
+        self.prev_score = r.score
+        return self.payload
+
+    def entry_for(self, risk_usd: Optional[float]) -> dict:
+        s, r = self.snapshot, self.reading
+        if s is None or r is None:
+            return {}
+        p = self.payload
+        groups = {k: v["value"] for k, v in p["confluence"]["groups"].items()}
+        return self.entry(s, r, groups, p["confluence"]["value"], p["light"], risk_usd)
+
+    def history(self, limit: int = 60) -> list[dict]:
+        """O que a IA disse × o que o ouro fez depois (previsões resolvidas contra o preço real)."""
+        if self.memory is None:
+            return []
+        rows = self.memory.db.execute("""SELECT p.id, p.time, p.price, p.score, p.label, p.confidence, o.horizon, o.move_pct, o.hit
+            FROM bias_predictions p LEFT JOIN bias_outcomes o ON o.prediction_id = p.id ORDER BY p.time DESC LIMIT ?""", (limit * 3,)).fetchall()
+        out: dict[int, dict] = {}
+        for pid, t, price, score, label, conf, h, move, hit in rows:
+            d = out.setdefault(pid, {"time": t, "price": price, "score": score, "label": label, "confidence": conf, "outcomes": {}})
+            if h:
+                d["outcomes"][h] = {"move_pct": move, "hit": bool(hit)}
+        return list(out.values())[:limit]
+
+
+# --------------------------------------------------------------------------- serviço (coleta em segundo plano + HTTP)
+class DashService:
+    """Loop de coleta/análise em thread + HTTP local. O Telegram recebe o mesmo que o comando `bias` (anti-repetição)."""
+
+    def __init__(self, source: Any, engine: Optional[GoldBiasEngine] = None, memory: Optional[BiasMemory] = None,
+                 notifier: Optional[BiasNotifier] = None, sender: Any = None, interval: int = 60, manual_path: Optional[str] = None,
+                 contract_oz: float = DASH_CONTRACT_OZ, record_every: int = 300) -> None:
+        self.source = source
+        self.engine = engine or GoldBiasEngine()
+        self.memory = memory
+        self.notifier = notifier
+        self.sender = sender
+        self.interval = interval
+        self.manual_path = manual_path
+        self.record_every = record_every
+        self.state = DashState(memory, contract_oz)
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.wake_event = threading.Event()   # "Atualizar" acorda a thread de coleta (MT5 sempre acessado pela mesma thread)
+        self.last_error = ""
+        self.last_record: Optional[datetime] = None
+        self.cycles = 0
+
+    def snapshot(self) -> MarketSnapshot:
+        return self.source.snapshot() if hasattr(self.source, "snapshot") else self.source.collect()
+
+    def cycle(self) -> dict:
+        s = self.snapshot()
+        bias_apply_manual(s, self.manual_path)
+        r = self.engine.analyze(s)
+        status = dict(getattr(self.source, "status", {}) or {})
+        with self.lock:
+            if self.memory is not None:
+                h1 = s.candles.get("H1") or []
+                if h1:
+                    self.memory.resolve(h1, s.time)
+                if self.last_record is None or (s.time - self.last_record).total_seconds() >= self.record_every:
+                    self.memory.record(r, "painel")
+                    self.last_record = s.time
+            payload = self.state.update(s, r, status)
+            messages = self.notifier.decide(r) if self.notifier is not None else []
+            alert = self.state.buy_sell_alert(payload["light"], s, r, payload["macro"], payload["technical"])
+            if alert:
+                messages.append(("alerta_entrada", alert))
+            for kind, text in messages:
+                self.state.add_alert(kind, text, s.time)
+            payload["alerts"] = self.state.alerts
+            self.cycles += 1
+        for _kind, text in messages:
+            if self.sender is not None:
+                self.sender.send(text)
+        return payload
+
+    def run_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.cycle()
+                self.last_error = ""
+            except Exception as e:  # noqa: BLE001 — o painel continua no ar com o último estado
+                self.last_error = f"{type(e).__name__}: {e}"
+                print(f"[painel] ciclo falhou: {self.last_error}")
+            self.wake_event.wait(self.interval)
+            self.wake_event.clear()
+
+    def request_refresh(self, timeout: float = 120.0) -> bool:
+        """Pede uma leitura nova à thread de coleta e espera ela terminar."""
+        before = self.cycles
+        self.wake_event.set()
+        end = time.time() + timeout
+        while time.time() < end and self.cycles == before and not self.stop_event.is_set():
+            time.sleep(0.2)
+        return self.cycles != before
+
+    def state_json(self) -> dict:
+        with self.lock:
+            p = dict(self.state.payload)
+        p["service"] = {"cycles": self.cycles, "interval": self.interval, "error": self.last_error}
+        return p
+
+
+def dash_handler(service: DashService) -> type:
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:  # silencioso: a janela mostra só o que importa
+            return
+
+        def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json(self, obj: Any) -> None:
+            self._send(200, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")
+
+        def do_GET(self) -> None:  # noqa: N802
+            u = urlparse(self.path)
+            q = parse_qs(u.query)
+
+            def num(name: str) -> Optional[float]:
+                try:
+                    v = float(q.get(name, [""])[0])
+                    return v if v > 0 else None
+                except ValueError:
+                    return None
+
+            if u.path in ("/", "/index.html"):
+                self._send(200, DASH_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            elif u.path == "/api/state":
+                self._json(service.state_json())
+            elif u.path == "/api/chart":
+                tf = q.get("tf", ["H1"])[0].upper()
+                with service.lock:
+                    data = service.state.chart(tf if tf in DASH_TFS else "H1")
+                self._json(data)
+            elif u.path == "/api/entry":
+                with service.lock:
+                    data = service.state.entry_for(num("risk"))
+                self._json(data)
+            elif u.path == "/api/history":
+                with service.lock:
+                    data = service.state.history()
+                self._json(data)
+            elif u.path == "/api/refresh":
+                ok = service.request_refresh()
+                self._json({"ok": ok, "error": service.last_error})
+            else:
+                self._send(404, b"not found", "text/plain")
+
+    return Handler
+
+
+def dash_serve(service: DashService, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
+               wait_first: float = 180.0) -> ThreadingHTTPServer:
+    """Sobe a thread de coleta (1ª leitura já nela) e o HTTP. Devolve o servidor (chame .serve_forever())."""
+    threading.Thread(target=service.run_loop, name="gold-painel-coleta", daemon=True).start()
+    end = time.time() + wait_first
+    while service.cycles == 0 and not service.last_error and time.time() < end:
+        time.sleep(0.2)
+    if service.last_error:
+        print(f"[painel] primeira leitura falhou: {service.last_error} — o painel sobe e tenta de novo a cada {service.interval}s")
+    srv = ThreadingHTTPServer((host, port), dash_handler(service))
+    url = f"http://{host}:{srv.server_address[1]}/"
+    print(f"🥇 GOLD MARKET INTELLIGENCE — painel em {url}  (Ctrl+C para sair)")
+    if open_browser:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+    return srv
+
+
+DASH_HTML = r"""<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gold Market Intelligence</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%A5%87%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --good: #0ca30c; --warn: #fab219; --crit: #d03b3b; --good-text: #3fcf3f; --crit-text: #ff7a7a; --warn-text: #fab219;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  --gold: #d4a72c; --zone-good: rgba(12,163,12,0.13); --zone-crit: rgba(208,59,59,0.13); --fib: rgba(212,167,44,0.55);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec; --ink: #0b0b0b; --ink-2: #52514e; --muted: #6f6d67;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --good-text: #006300; --crit-text: #b3261e; --warn-text: #8a5a00;
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+    --gold: #9a7414; --zone-good: rgba(12,163,12,0.10); --zone-crit: rgba(208,59,59,0.10); --fib: rgba(154,116,20,0.55);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec; --ink: #0b0b0b; --ink-2: #52514e; --muted: #6f6d67;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --good-text: #006300; --crit-text: #b3261e; --warn-text: #8a5a00;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+  --gold: #9a7414; --zone-good: rgba(12,163,12,0.10); --zone-crit: rgba(208,59,59,0.10); --fib: rgba(154,116,20,0.55);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button, input { font: inherit; color: inherit; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 15px; margin: 0; letter-spacing: .04em; color: var(--gold); font-weight: 700; }
+header .sp { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--ink-2); background: var(--surface-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.btn { border: 1px solid var(--border); background: var(--surface-2); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--gold); color: #111; border-color: transparent; font-weight: 700; }
+.btn.on { outline: 2px solid var(--s1); outline-offset: -2px; }
+main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(12, minmax(0, 1fr)); max-width: 1680px; margin: 0 auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.span-3 { grid-column: span 3; } .span-4 { grid-column: span 4; } .span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; }
+.span-8 { grid-column: span 8; } .span-9 { grid-column: span 9; } .span-12 { grid-column: span 12; }
+@media (max-width: 1200px) { .span-3, .span-4, .span-5 { grid-column: span 6; } .span-8, .span-9 { grid-column: span 12; } }
+@media (max-width: 760px) { main { padding: 12px; gap: 12px; } .span-3, .span-4, .span-5, .span-6, .span-8, .span-9 { grid-column: span 12; } }
+.hero-price { font-size: 38px; font-weight: 700; line-height: 1.1; }
+.delta { font-size: 16px; font-weight: 600; }
+.up { color: var(--good-text); } .down { color: var(--crit-text); } .flat { color: var(--ink-2); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; color: var(--ink-2); font-size: 13px; margin-top: 8px; }
+.kv b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.bias-box { border: 1px solid var(--border); border-radius: 10px; padding: 12px; text-align: center; background: var(--surface-2); }
+.bias-label { font-size: 26px; font-weight: 800; letter-spacing: .02em; }
+.gauge { position: relative; height: 10px; border-radius: 5px; margin: 12px 0 4px; background: linear-gradient(90deg, var(--crit) 0%, var(--surface) 50%, var(--good) 100%); border: 1px solid var(--border); }
+.gauge i { position: absolute; top: -5px; width: 4px; height: 18px; border-radius: 2px; background: var(--ink); transform: translateX(-2px); }
+.gauge-scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 10px; }
+.light { display: flex; gap: 14px; align-items: center; }
+.lamp { display: grid; gap: 6px; padding: 8px; background: #111; border-radius: 12px; border: 1px solid var(--border); }
+.lamp span { width: 26px; height: 26px; border-radius: 50%; background: #2b2b2b; }
+.lamp span.on-g { background: var(--good); box-shadow: 0 0 14px var(--good); }
+.lamp span.on-y { background: var(--warn); box-shadow: 0 0 14px var(--warn); }
+.lamp span.on-r { background: var(--crit); box-shadow: 0 0 14px var(--crit); }
+.light-title { font-weight: 800; font-size: 16px; }
+.muted { color: var(--muted); } .ink2 { color: var(--ink-2); } .small { font-size: 12px; }
+.rows { display: grid; gap: 4px; }
+.row { display: grid; grid-template-columns: 22px 1fr auto; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--grid); }
+.row:last-child { border-bottom: 0; }
+.row .v { font-variant-numeric: tabular-nums; font-weight: 700; min-width: 42px; text-align: right; }
+.row .d { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sec { font-size: 11px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; margin: 10px 0 2px; font-weight: 600; }
+.conf-big { font-size: 30px; font-weight: 800; }
+.bar { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; margin-top: 4px; }
+.bar i { display: block; height: 100%; background: var(--gold); }
+.chart-card { display: flex; flex-direction: column; }
+.chart-wrap { position: relative; flex: 1; min-height: 520px; }
+canvas { display: block; width: 100%; }
+#chart { position: absolute; inset: 0; height: 100%; }
+@media (max-width: 760px) { .chart-wrap { min-height: 380px; } }
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+.toolbar .sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+.tfb { padding: 4px 10px; font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--ink-2); margin-top: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 14px; height: 2px; display: inline-block; }
+.tip { position: absolute; pointer-events: none; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; display: none; min-width: 160px; box-shadow: 0 4px 16px rgba(0,0,0,.35); z-index: 3; }
+.tip b { font-variant-numeric: tabular-nums; }
+ul.facts { margin: 0; padding-left: 18px; } ul.facts li { margin: 3px 0; }
+.brain-k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--grid); }
+th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+.news { display: grid; gap: 8px; max-height: 380px; overflow: auto; }
+.news div { border-bottom: 1px solid var(--grid); padding-bottom: 6px; }
+.alerts { display: grid; gap: 8px; max-height: 380px; overflow: auto; }
+.alert { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; font-size: 12px; }
+.warnline { margin-top: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--warn); color: var(--warn-text); font-weight: 600; }
+dialog { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--ink); max-width: 560px; width: calc(100% - 32px); padding: 18px; }
+dialog::backdrop { background: rgba(0,0,0,.55); }
+.status-big { font-size: 20px; font-weight: 800; margin: 10px 0; }
+.plan { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin-top: 8px; }
+.plan b { font-variant-numeric: tabular-nums; }
+.err { color: var(--crit-text); font-size: 12px; }
+footer { text-align: center; color: var(--muted); font-size: 12px; padding: 4px 16px 24px; }
+.tbl-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🥇 GOLD MARKET INTELLIGENCE</h1>
+  <span class="pill" id="src"><span class="dot" id="srcdot"></span><span id="srctxt">conectando…</span></span>
+  <span class="pill" id="upd">—</span>
+  <span class="sp"></span>
+  <button class="btn primary" id="btnEntry">🔥 POSSO ENTRAR?</button>
+  <button class="btn" id="btnRefresh" title="Nova leitura agora">↻ Atualizar</button>
+  <button class="btn" id="btnTheme" title="Tema claro/escuro">◐</button>
+</header>
+
+<main>
+  <section class="card span-3" aria-label="Preço">
+    <h2>💰 XAU/USD</h2>
+    <div class="hero-price" id="price">—</div>
+    <div class="delta" id="chg">—</div>
+    <div class="kv">
+      <span>Máxima</span><b id="hi">—</b>
+      <span>Mínima</span><b id="lo">—</b>
+      <span>Janela recente</span><b id="wchg">—</b>
+      <span>Fonte</span><b id="psrc">—</b>
+    </div>
+  </section>
+
+  <section class="card span-3" aria-label="Viés da IA">
+    <h2>🧠 GOLD BIAS</h2>
+    <div class="bias-box">
+      <div class="bias-label" id="biasLabel">—</div>
+      <div class="ink2"><span id="conf">—</span> de confiança · score <b id="score">—</b></div>
+      <div class="gauge" aria-hidden="true"><i id="gaugeMark" style="left:50%"></i></div>
+      <div class="gauge-scale"><span>−100 baixa</span><span>0</span><span>+100 alta</span></div>
+      <div class="chips" id="horizons"></div>
+    </div>
+  </section>
+
+  <section class="card span-3" aria-label="Semáforo operacional">
+    <h2>🚦 SEMÁFORO OPERACIONAL</h2>
+    <div class="light">
+      <div class="lamp" aria-hidden="true"><span id="lampR"></span><span id="lampY"></span><span id="lampG"></span></div>
+      <div>
+        <div class="light-title" id="lightTitle">—</div>
+        <div class="small ink2" id="lightReason"></div>
+      </div>
+    </div>
+    <div class="rows" id="lightRows" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card span-3" aria-label="Confluência">
+    <h2>🎯 CONFLUÊNCIA</h2>
+    <div class="conf-big" id="confl">—</div>
+    <div class="bar"><i id="conflBar" style="width:0"></i></div>
+    <div class="small muted" style="margin-top:6px">% do peso dos blocos (macro, fluxo, técnico, notícias, estrutura) que aponta na direção do viés.</div>
+    <div id="eventBox"></div>
+  </section>
+
+  <section class="card span-9 chart-card" aria-label="Gráfico">
+    <div class="toolbar" id="toolbar">
+      <strong>XAU/USD</strong><span class="sep"></span>
+      <span id="tfButtons"></span><span class="sep"></span>
+      <span id="ovButtons"></span>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="chart" role="img" aria-label="Gráfico de candles do XAU/USD com médias, VWAP, níveis e sinais"></canvas>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="card span-3" aria-label="Painel de confluência">
+    <h2>📊 PAINEL DE CONFLUÊNCIA</h2>
+    <div class="sec">Macro</div><div class="rows" id="cfMacro"></div>
+    <div class="sec">Fluxo</div><div class="rows" id="cfFlow"></div>
+    <div class="sec">Técnico</div><div class="rows" id="cfTech"></div>
+    <div class="sec">Notícias</div><div class="rows" id="cfNews"></div>
+  </section>
+
+  <section class="card span-5" aria-label="Cérebro da IA">
+    <h2>🧠 CÉREBRO DA IA — POR QUE ELA PENSA ISSO?</h2>
+    <div><b>Viés atual:</b> <span id="brBias">—</span></div>
+    <ul class="facts" id="brFacts"></ul>
+    <div class="brain-k">Fator dominante</div><div id="brDom">—</div>
+    <div class="brain-k">Fator contrário</div><div id="brCon">—</div>
+    <div class="brain-k">Conclusão</div><div id="brConc"><b>—</b></div>
+    <div class="brain-k">Leitura da IA</div><div class="ink2" id="brOp">—</div>
+    <div id="brContra"></div>
+  </section>
+
+  <section class="card span-4" aria-label="Macro e contexto">
+    <h2>🌎 MACRO · MERCADOS · RISCO</h2>
+    <div class="rows" id="macro"></div>
+    <div class="sec">Contexto</div>
+    <div class="rows" id="context"></div>
+  </section>
+
+  <section class="card span-3" aria-label="Fluxo">
+    <h2>🏦 FLUXO · 🇨🇳 DEMANDA</h2>
+    <div class="rows" id="flow"></div>
+    <div class="small muted" style="margin-top:8px">Sem fonte automática? Preencha <code>dados/manual.json</code> (China, Índia, bancos centrais, ETFs).</div>
+  </section>
+
+  <section class="card span-6" aria-label="Técnico por timeframe">
+    <h2>📈 TÉCNICO POR TIMEFRAME</h2>
+    <div class="tbl-wrap"><table id="techTbl"></table></div>
+  </section>
+
+  <section class="card span-6" aria-label="Calendário">
+    <h2>📅 CALENDÁRIO — PRÓXIMOS EVENTOS</h2>
+    <div class="tbl-wrap"><table id="cal"></table></div>
+  </section>
+
+  <section class="card span-4" aria-label="Notícias">
+    <h2>📰 NOTÍCIAS RELEVANTES</h2>
+    <div class="news" id="news"></div>
+  </section>
+
+  <section class="card span-4" aria-label="Alertas">
+    <h2>🚨 ALERTAS (também no Telegram)</h2>
+    <div class="alerts" id="alerts"></div>
+  </section>
+
+  <section class="card span-4" aria-label="Histórico">
+    <h2>🗂 O QUE A IA DISSE × O QUE O OURO FEZ</h2>
+    <div class="tbl-wrap"><table id="hist"></table></div>
+  </section>
+</main>
+<footer id="disc">Viés probabilístico, não garantia de movimento. Apoio à decisão — o painel não executa ordens.</footer>
+
+<dialog id="dlg">
+  <div style="display:flex;align-items:center;gap:8px"><h2 style="margin:0;font-size:16px">🔥 POSSO ENTRAR? — ANÁLISE DE ENTRADA</h2><span class="sp" style="flex:1"></span><button class="btn" id="dlgClose">✕</button></div>
+  <div class="small muted" style="margin-top:6px">🟢 confirma o lado da entrada · 🔴 contra · 🟡 neutro · ⚪ sem dado. Valores: −100 (contra o ouro) a +100 (a favor do ouro).</div>
+  <div class="rows" id="enRows" style="margin-top:6px"></div>
+  <div style="margin-top:10px"><b>CONFLUÊNCIA:</b> <span id="enConf">—</span></div>
+  <div class="status-big" id="enStatus">—</div>
+  <div id="enPlan"></div>
+  <div id="enWarn"></div>
+  <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:12px">Risco por operação (US$)
+    <input id="riskIn" type="number" min="0" step="10" style="width:110px;padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:var(--surface-2)">
+    <button class="btn" id="riskGo">Calcular lote</button></label>
+  <p class="small muted" id="enNote"></p>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmt = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toLocaleString("pt-BR", {minimumFractionDigits: d, maximumFractionDigits: d});
+const sgn = (v, d = 0) => v == null ? "—" : (v > 0 ? "+" : "") + fmt(v, d);
+const cls = (v) => v == null ? "flat" : v > 0 ? "up" : v < 0 ? "down" : "flat";
+let STATE = null, TF = localStorageGet("tf") || "H1", CHART = null, HOVER = null;
+const OVERLAYS = {ema: "EMAs", vwap: "VWAP", bands: "Bandas VWAP", levels: "Suporte/Resistência", fib: "Fibonacci", signals: "Sinais da IA", entry: "Entrada hipotética", events: "Eventos"};
+const OV = Object.fromEntries(Object.keys(OVERLAYS).map((k) => [k, (localStorageGet("ov_" + k) ?? "1") === "1"]));
+
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* sem storage: segue */ } }
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+function row(icon, name, value, detail, isNum = true) {
+  const v = value == null ? '<span class="muted">sem dado</span>' : (isNum ? sgn(value) : esc(value));
+  return `<div class="row"><span>${icon || "⚪"}</span><span>${esc(name)}${detail ? `<div class="d" title="${esc(detail)}">${esc(detail)}</div>` : ""}</span><span class="v ${isNum ? cls(value) : ""}">${v}</span></div>`;
+}
+function items(list) { return (list || []).map((i) => row(i.icon, i.name, i.directional === false ? (i.detail || null) : i.value, i.directional === false ? "" : i.detail, i.directional !== false)).join(""); }
+
+async function getJSON(url) { const r = await fetch(url, {cache: "no-store"}); if (!r.ok) throw new Error(r.status); return r.json(); }
+
+async function loadState() {
+  try {
+    STATE = await getJSON("/api/state");
+    renderState(STATE);
+  } catch (e) {
+    $("srctxt").textContent = "sem conexão com o motor"; $("srcdot").style.background = cssVar("--crit");
+  }
+}
+
+function renderState(s) {
+  if (!s.price) { $("srctxt").textContent = s.service && s.service.error ? "erro: " + s.service.error : "aguardando 1ª leitura…"; return; }
+  const st = s.status || {};
+  const mt5 = st.mt5 === "ok";
+  $("srcdot").style.background = cssVar(mt5 ? "--good" : "--warn");
+  $("srctxt").textContent = mt5 ? "MT5 conectado" : (st.mt5 ? "MT5: " + st.mt5 : "dados web/sample");
+  $("upd").textContent = "atualizado " + new Date(s.updated).toLocaleTimeString("pt-BR") + (s.service && s.service.error ? " · ⚠ " + s.service.error : "");
+  const p = s.price;
+  $("price").textContent = "$" + fmt(p.price);
+  $("chg").innerHTML = p.change_pct == null ? "—" : `<span class="${cls(p.change_pct)}">${p.change_pct > 0 ? "▲" : p.change_pct < 0 ? "▼" : "■"} ${sgn(p.change_pct, 2)}% (${sgn(p.change_abs, 2)}) no dia</span>`;
+  $("hi").textContent = fmt(p.high); $("lo").textContent = fmt(p.low);
+  $("wchg").innerHTML = `<span class="${cls(p.window_change_pct)}">${sgn(p.window_change_pct, 2)}%</span>`;
+  $("psrc").textContent = p.source;
+  const b = s.bias;
+  $("biasLabel").textContent = b.emoji + " " + b.label;
+  $("biasLabel").className = "bias-label " + (b.direction > 0 ? "up" : b.direction < 0 ? "down" : "flat");
+  $("conf").textContent = fmt(b.confidence, 0) + "%";
+  $("score").textContent = sgn(b.score);
+  $("gaugeMark").style.left = (50 + Math.max(-100, Math.min(100, b.score)) / 2) + "%";
+  const hl = {horas: "Horas", "1d": "1 dia", "5d": "5 dias"};
+  $("horizons").innerHTML = Object.entries(b.horizons).map(([k, h]) => `<span class="pill">${hl[k]}: ${h.emoji} ${esc(h.label.toLowerCase())}</span>`).join("");
+  // semáforo
+  const L = s.light;
+  $("lampR").className = L.state === "VENDA" ? "on-r" : ""; $("lampY").className = L.state === "AGUARDAR" ? "on-y" : ""; $("lampG").className = L.state === "COMPRA" ? "on-g" : "";
+  $("lightTitle").textContent = L.icon + " " + L.title; $("lightReason").textContent = L.reason;
+  $("lightRows").innerHTML = L.rows.map((r) => row(r.icon, r.group, r.value)).join("");
+  // confluência
+  const c = s.confluence;
+  $("confl").textContent = fmt(c.value, 0) + "%"; $("conflBar").style.width = Math.max(0, Math.min(100, c.value)) + "%";
+  $("cfMacro").innerHTML = items(c.macro); $("cfFlow").innerHTML = items(c.flow); $("cfTech").innerHTML = items(c.technical);
+  $("cfNews").innerHTML = (c.themes || []).map((t) => row(t.icon, t.label, t.value)).join("") || '<div class="muted small">sem notícias com tema</div>';
+  $("eventBox").innerHTML = s.event ? `<div class="warnline">⚠️ ${esc(s.event.name)} em ${s.event.minutes} min · volatilidade ${esc(s.event.volatility)}<div class="small" style="font-weight:400">Acima do esperado: ${esc(s.event.if_above)}<br>Abaixo: ${esc(s.event.if_below)}</div></div>` : "";
+  // cérebro
+  const br = s.brain;
+  $("brBias").innerHTML = `<b class="${b.direction > 0 ? "up" : b.direction < 0 ? "down" : "flat"}">${br.emoji} ${esc(br.bias)}</b>`;
+  $("brFacts").innerHTML = br.facts.map((f) => `<li>${esc(f)}</li>`).join("");
+  $("brDom").textContent = br.dominant || "—"; $("brCon").textContent = br.contrary || "nenhum relevante";
+  $("brConc").innerHTML = `<b>${esc(br.conclusion)}</b>`; $("brOp").textContent = br.opinion;
+  $("brContra").innerHTML = (br.contradictions || []).map((x) => `<div class="warnline small">⚠️ ${esc(x)}</div>`).join("");
+  // macro / contexto / fluxo
+  $("macro").innerHTML = items(s.macro);
+  const cx = s.context;
+  $("context").innerHTML = items([cx.oil, cx.vix]) + row(cx.geo.icon, "Geopolítica", cx.geo.level, cx.geo.value != null ? `índice ${fmt(cx.geo.value, 0)}/100` : "", false)
+    + row("📊", "Economia EUA", cx.economy, "", false) + row("🌐", "Apetite a risco", cx.risk_mode, "", false);
+  $("flow").innerHTML = items(s.flow);
+  // técnico por TF
+  const pt = s.technical.per_tf || {};
+  const tfs = Object.keys(pt);
+  const ic = (v) => v == null ? "⚪" : v >= 20 ? "🟢" : v <= -20 ? "🔴" : "🟡";
+  $("techTbl").innerHTML = `<tr><th>TF</th><th class="n">RSI</th><th class="n">MACD</th><th class="n">ADX</th><th>EMA 9/21/50/200</th><th>VWAP</th><th>Estrutura</th></tr>` +
+    tfs.map((tf) => { const x = pt[tf]; return `<tr><td><b>${tf}</b></td><td class="n">${ic(x.rsi_read)} ${fmt(x.rsi, 0)}</td><td class="n">${ic(x.macd_read)} ${fmt(x.macd_hist, 2)}</td><td class="n">${fmt(x.adx, 0)}</td><td>${ic(x.ema_read)} ${x.ema9 > x.ema21 ? "9>21" : "9<21"} · ${x.close > x.ema50 ? "acima" : "abaixo"} da 50${x.ema200 ? " · " + (x.close > x.ema200 ? "acima" : "abaixo") + " da 200" : ""}</td><td>${ic(x.vwap_read)} ${x.vwap_read == null ? "—" : x.vwap_read > 0 ? "acima" : "abaixo"}</td><td>${esc(x.structure)}</td></tr>`; }).join("");
+  // calendário
+  $("cal").innerHTML = `<tr><th>Evento</th><th>Quando</th><th class="n">Esperado</th><th class="n">Anterior</th><th class="n">Real</th></tr>` +
+    (s.calendar.length ? s.calendar.map((e) => `<tr><td>${e.impact === "MUITO ALTO" ? "🔴" : e.impact === "ALTO" ? "🟠" : "🟡"} ${esc(e.name)}</td><td>${new Date(e.time).toLocaleString("pt-BR", {weekday: "short", hour: "2-digit", minute: "2-digit"})}${!e.done ? ` <span class="muted small">(em ${e.minutes >= 90 ? Math.round(e.minutes / 60) + " h" : e.minutes + " min"})</span>` : ""}</td><td class="n">${e.consensus == null ? "—" : esc(e.consensus + e.unit)}</td><td class="n">${e.previous == null ? "—" : esc(e.previous + e.unit)}</td><td class="n">${e.actual == null ? "—" : esc(e.actual + e.unit)}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="muted">Nenhum evento carregado. Use --calendar ou "eventos" em dados/manual.json.</td></tr>`);
+  // notícias
+  $("news").innerHTML = s.news.items.length ? s.news.items.map((n) => `<div>${n.icon} <b>[${n.impact > 0 ? "+" : ""}${n.impact}]</b> ${esc(n.headline)}<div class="small muted">${esc(n.source || "—")} · ${new Date(n.time).toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"})} · fator ${esc(n.factor)} · credibilidade ${fmt(n.credibility * 100, 0)}%</div></div>`).join("") : '<div class="muted">Sem notícias no ciclo.</div>';
+  // alertas
+  $("alerts").innerHTML = s.alerts.length ? s.alerts.map((a) => `<div class="alert"><span class="muted">${new Date(a.time).toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"})} · ${esc(a.kind)}</span>\n${esc(a.text)}</div>`).join("") : '<div class="muted">Nenhum alerta ainda — a IA só avisa quando algo muda.</div>';
+  $("disc").textContent = s.disclaimer;
+}
+
+async function loadHistory() {
+  try {
+    const h = await getJSON("/api/history");
+    const oc = (o) => !o ? '<span class="muted">aguardando</span>' : `${o.hit ? "✅" : "❌"} <span class="${cls(o.move_pct)}">${sgn(o.move_pct, 2)}%</span>`;
+    $("hist").innerHTML = `<tr><th>Hora</th><th>IA disse</th><th class="n">Preço</th><th>4 h</th><th>1 dia</th></tr>` +
+      (h.length ? h.slice(0, 25).map((x) => `<tr><td>${new Date(x.time).toLocaleString("pt-BR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})}</td><td>${x.label.includes("ALTA") ? "🟢" : x.label.includes("BAIXA") ? "🔴" : "🟡"} ${esc(x.label)} <span class="muted small">${fmt(x.confidence, 0)}%</span></td><td class="n">${fmt(x.price)}</td><td>${oc(x.outcomes.horas)}</td><td>${oc(x.outcomes["1d"])}</td></tr>`).join("")
+        : `<tr><td colspan="5" class="muted">Sem previsões gravadas ainda.</td></tr>`);
+  } catch (e) { /* histórico é opcional */ }
+}
+
+// ---------------------------------------------------------------- gráfico
+function buildToolbar() {
+  $("tfButtons").innerHTML = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"].map((t) => `<button class="btn tfb ${t === TF ? "on" : ""}" data-tf="${t}">${t}</button>`).join(" ");
+  $("ovButtons").innerHTML = Object.entries(OVERLAYS).map(([k, l]) => `<button class="btn tfb ${OV[k] ? "on" : ""}" data-ov="${k}" aria-pressed="${OV[k]}">${l}</button>`).join(" ");
+  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { TF = b.dataset.tf; localStorageSet("tf", TF); buildToolbar(); loadChart(); });
+  document.querySelectorAll("[data-ov]").forEach((b) => b.onclick = () => { const k = b.dataset.ov; OV[k] = !OV[k]; localStorageSet("ov_" + k, OV[k] ? "1" : "0"); buildToolbar(); drawChart(); });
+  $("legend").innerHTML = [["--s1", "EMA 9"], ["--s2", "EMA 21"], ["--s3", "EMA 50"], ["--s4", "EMA 200"], ["--s5", "VWAP (± bandas tracejadas)"]]
+    .map(([c, l]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("") +
+    '<span>▯ candle de alta (vazado) · ▮ de baixa (cheio)</span><span>▲▼ sinal da IA</span><span>┆ evento econômico</span>';
+}
+
+async function loadChart() {
+  try { CHART = await getJSON("/api/chart?tf=" + TF); drawChart(); } catch (e) { CHART = null; drawChart(); }
+}
+
+function drawChart() {
+  const cv = $("chart"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const C = {ink: cssVar("--ink"), ink2: cssVar("--ink-2"), muted: cssVar("--muted"), grid: cssVar("--grid"), axis: cssVar("--axis"), surface: cssVar("--surface"),
+    good: cssVar("--good"), crit: cssVar("--crit"), warn: cssVar("--warn"), s: [cssVar("--s1"), cssVar("--s2"), cssVar("--s3"), cssVar("--s4"), cssVar("--s5")],
+    zg: cssVar("--zone-good"), zc: cssVar("--zone-crit"), fib: cssVar("--fib"), gold: cssVar("--gold")};
+  g.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
+  if (!CHART || !CHART.candles || !CHART.candles.length) {
+    g.fillStyle = C.muted; g.fillText(CHART && CHART.available ? `Sem candles em ${TF}. Disponíveis: ${CHART.available.join(", ")}` : "Carregando gráfico…", 16, 24); return;
+  }
+  const cs = CHART.candles, n = cs.length, extra = 12;             // espaço à direita: entrada hipotética e eventos futuros
+  const padL = 8, padR = 64, padT = 14, padB = 22, pw = W - padL - padR, ph = H - padT - padB;
+  let lo = Infinity, hi = -Infinity;
+  const consider = (v) => { if (v != null && isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } };
+  cs.forEach((c) => { consider(c.l); consider(c.h); });
+  const e = CHART.entry;
+  if (OV.entry && e) { consider(e.stop); consider(e.target); }
+  const span = hi - lo || 1; lo -= span * 0.06; hi += span * 0.06;
+  const slot = pw / (n + extra), bw = Math.max(1, Math.min(12, slot * 0.66));
+  const X = (i) => padL + slot * (i + 0.5), Y = (v) => padT + (hi - v) / (hi - lo) * ph;
+  const t0 = cs[0].t, dt = n > 1 ? (cs[n - 1].t - cs[0].t) / (n - 1) : 60;
+  const XT = (t) => X((t - t0) / dt);
+  // grade + eixo de preço
+  g.strokeStyle = C.grid; g.lineWidth = 1; g.fillStyle = C.muted; g.textAlign = "left";
+  const step = niceStep(hi - lo, 7);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) { const y = Math.round(Y(v)) + 0.5; g.beginPath(); g.moveTo(padL, y); g.lineTo(W - padR, y); g.stroke(); g.fillText(fmt(v, v >= 1000 ? 0 : 2), W - padR + 6, y + 4); }
+  // eixo de tempo
+  g.textAlign = "center";
+  const multiDay = cs[n - 1].t - cs[0].t > 20 * 3600, every = Math.max(1, Math.ceil(n / (W < 600 ? 4 : 7)));
+  for (let i = n - 1; i >= 0; i -= every) g.fillText(tlabel(cs[i].t, multiDay), X(i), H - 6);
+  // Fibonacci
+  if (OV.fib && CHART.fib) {
+    g.setLineDash([2, 4]); g.strokeStyle = C.fib; g.fillStyle = C.fib; g.textAlign = "left";
+    CHART.fib.levels.forEach((l) => { const y = Y(l.price); if (y < padT || y > padT + ph) return; g.beginPath(); g.moveTo(padL, y); g.lineTo(W - padR, y); g.stroke(); g.fillText(`Fib ${(l.ratio * 100).toFixed(1)}%`, padL + 4, y - 3); });
+    g.setLineDash([]);
+  }
+  // suportes / resistências
+  if (OV.levels && CHART.levels) {
+    g.lineWidth = 1.5; g.setLineDash([6, 4]); g.textAlign = "left";
+    CHART.levels.resistances.forEach((v, k) => { g.strokeStyle = C.crit; g.globalAlpha = 1 - k * 0.25; hline(g, Y(v), padL, W - padR); g.fillStyle = C.crit; g.fillText("R" + (k + 1), W - padR - 22, Y(v) - 3); });
+    CHART.levels.supports.forEach((v, k) => { g.strokeStyle = C.good; g.globalAlpha = 1 - k * 0.25; hline(g, Y(v), padL, W - padR); g.fillStyle = C.good; g.fillText("S" + (k + 1), W - padR - 22, Y(v) - 3); });
+    g.globalAlpha = 1; g.setLineDash([]);
+  }
+  // eventos
+  if (OV.events) {
+    (CHART.events || []).forEach((ev) => { const x = XT(ev.t); if (x < padL || x > W - padR) return; g.strokeStyle = C.warn; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(x, padT); g.lineTo(x, padT + ph); g.stroke(); g.setLineDash([]); g.save(); g.translate(x + 3, padT + 4); g.rotate(Math.PI / 2); g.fillStyle = C.warn; g.textAlign = "left"; g.fillText((ev.future ? "⏳ " : "") + ev.name, 0, 0); g.restore(); });
+  }
+  // bandas VWAP
+  if (OV.bands) {
+    g.strokeStyle = C.s[4]; g.lineWidth = 1; g.setLineDash([4, 4]); g.globalAlpha = 0.7;
+    [1, 2, -1, -2].forEach((k) => line(g, cs.map((c, i) => [X(i), c.vw != null && c.sd ? Y(c.vw + k * c.sd) : null])));
+    g.globalAlpha = 1; g.setLineDash([]);
+  }
+  // candles (alta = vazado, baixa = cheio: a forma também diferencia, não só a cor)
+  cs.forEach((c, i) => {
+    const x = X(i), up = c.c >= c.o, col = up ? C.good : C.crit;
+    g.strokeStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(Math.round(x) + 0.5, Y(c.h)); g.lineTo(Math.round(x) + 0.5, Y(c.l)); g.stroke();
+    const y1 = Y(Math.max(c.o, c.c)), y2 = Y(Math.min(c.o, c.c)), h = Math.max(1, y2 - y1);
+    if (up) { g.fillStyle = C.surface; g.fillRect(x - bw / 2, y1, bw, h); g.strokeRect(x - bw / 2 + 0.5, y1 + 0.5, Math.max(0, bw - 1), Math.max(0, h - 1)); }
+    else { g.fillStyle = col; g.fillRect(x - bw / 2, y1, bw, h); }
+  });
+  // EMAs e VWAP (2px) com rótulo direto no fim da linha
+  const series = [];
+  if (OV.ema) series.push(["e9", 0, "9"], ["e21", 1, "21"], ["e50", 2, "50"], ["e200", 3, "200"]);
+  if (OV.vwap) series.push(["vw", 4, "VWAP"]);
+  const labels = [];
+  series.forEach(([key, si, lab]) => {
+    g.strokeStyle = C.s[si]; g.lineWidth = 2; line(g, cs.map((c, i) => [X(i), c[key] != null ? Y(c[key]) : null]));
+    const last = [...cs].reverse().find((c) => c[key] != null);
+    if (last) labels.push({y: Y(last[key]), text: lab, color: C.s[si]});
+  });
+  labels.sort((a, b) => a.y - b.y).forEach((l, k, arr) => { if (k && l.y - arr[k - 1].y < 12) l.y = arr[k - 1].y + 12; });
+  g.textAlign = "left"; labels.forEach((l) => { g.fillStyle = l.color; g.fillText(l.text, X(n - 1) + 8, l.y + 4); });
+  // entrada hipotética + zona de risco (vermelha) / alvo (verde) à direita do último candle; stop e alvo etiquetados no eixo
+  if (OV.entry && e) {
+    const x0 = X(n - 1) + slot * 0.6, x1 = W - padR;
+    g.fillStyle = C.zc; g.fillRect(x0, Math.min(Y(e.entry), Y(e.stop)), x1 - x0, Math.abs(Y(e.entry) - Y(e.stop)));
+    g.fillStyle = C.zg; g.fillRect(x0, Math.min(Y(e.entry), Y(e.target)), x1 - x0, Math.abs(Y(e.entry) - Y(e.target)));
+    g.lineWidth = 1.5; g.setLineDash([5, 3]);
+    g.strokeStyle = C.crit; hline(g, Y(e.stop), x0, x1);
+    g.strokeStyle = C.good; hline(g, Y(e.target), x0, x1);
+    g.setLineDash([]);
+    axisTag(g, Y(e.stop), "stop " + fmt(e.stop, 0), C.crit, "#fff", W - padR, padR);
+    axisTag(g, Y(e.target), "alvo " + fmt(e.target, 0), C.good, "#fff", W - padR, padR);
+  }
+  // sinais da IA
+  if (OV.signals) {
+    (CHART.signals || []).forEach((sg) => {
+      const idx = Math.round((sg.t - t0) / dt); if (idx < 0 || idx >= n) return;
+      const c = cs[idx], x = X(idx), up = sg.side > 0, y = up ? Y(c.l) + 12 : Y(c.h) - 12;
+      g.fillStyle = up ? C.good : C.crit; g.strokeStyle = C.surface; g.lineWidth = 2;
+      g.beginPath(); if (up) { g.moveTo(x, y - 6); g.lineTo(x - 6, y + 5); g.lineTo(x + 6, y + 5); } else { g.moveTo(x, y + 6); g.lineTo(x - 6, y - 5); g.lineTo(x + 6, y - 5); }
+      g.closePath(); g.stroke(); g.fill();
+    });
+  }
+  // preço atual
+  const yp = Y(CHART.price);
+  g.strokeStyle = C.gold; g.setLineDash([1, 3]); hline(g, yp, padL, W - padR); g.setLineDash([]);
+  axisTag(g, yp, fmt(CHART.price, 2), C.gold, "#111", W - padR, padR);
+  // crosshair
+  if (HOVER != null && HOVER >= 0 && HOVER < n) {
+    g.strokeStyle = C.muted; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(X(HOVER)) + 0.5, padT); g.lineTo(Math.round(X(HOVER)) + 0.5, padT + ph); g.stroke();
+  }
+  CHART._geo = {X, slot, padL, n};
+}
+function axisTag(g, y, text, bg, fg, x, w) { g.fillStyle = bg; g.fillRect(x, y - 9, w, 18); g.fillStyle = fg; g.textAlign = "left"; g.fillText(text, x + 4, y + 4); }
+function niceStep(range, ticks) { const raw = range / ticks, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p; }
+function hline(g, y, x0, x1) { g.beginPath(); g.moveTo(x0, Math.round(y) + 0.5); g.lineTo(x1, Math.round(y) + 0.5); g.stroke(); }
+function line(g, pts) { g.beginPath(); let pen = false; pts.forEach(([x, y]) => { if (y == null) { pen = false; return; } if (!pen) { g.moveTo(x, y); pen = true; } else g.lineTo(x, y); }); g.stroke(); }
+function tlabel(t, multiDay) {
+  const d = new Date(t * 1000);
+  if (["D1", "H4"].includes(TF)) return d.toLocaleDateString("pt-BR", {day: "2-digit", month: "2-digit"});
+  const hm = d.toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"});
+  return multiDay ? d.toLocaleDateString("pt-BR", {day: "2-digit", month: "2-digit"}) + " " + hm : hm;
+}
+
+$("chart").addEventListener("mousemove", (ev) => {
+  if (!CHART || !CHART._geo) return;
+  const r = ev.target.getBoundingClientRect(), x = ev.clientX - r.left, gm = CHART._geo;
+  const i = Math.round((x - gm.padL) / gm.slot - 0.5);
+  if (i < 0 || i >= gm.n) { HOVER = null; $("tip").style.display = "none"; drawChart(); return; }
+  HOVER = i; drawChart();
+  const c = CHART.candles[i], tip = $("tip");
+  const chg = (c.c / c.o - 1) * 100;
+  tip.innerHTML = `<div class="muted">${new Date(c.t * 1000).toLocaleString("pt-BR")}</div>
+    <div>Abert. <b>${fmt(c.o)}</b> · Máx. <b>${fmt(c.h)}</b></div><div>Mín. <b>${fmt(c.l)}</b> · Fech. <b>${fmt(c.c)}</b> <span class="${cls(chg)}">${sgn(chg, 2)}%</span></div>
+    <div class="muted" style="margin-top:4px">EMA 9 <b>${fmt(c.e9)}</b> · 21 <b>${fmt(c.e21)}</b></div><div class="muted">EMA 50 <b>${fmt(c.e50)}</b> · 200 <b>${fmt(c.e200)}</b></div><div class="muted">VWAP <b>${fmt(c.vw)}</b></div>`;
+  tip.style.display = "block";
+  const left = x + 16 + tip.offsetWidth > r.width ? x - tip.offsetWidth - 16 : x + 16;
+  tip.style.left = left + "px"; tip.style.top = Math.max(0, ev.clientY - r.top - 40) + "px";
+});
+$("chart").addEventListener("mouseleave", () => { HOVER = null; $("tip").style.display = "none"; drawChart(); });
+
+// ---------------------------------------------------------------- POSSO ENTRAR?
+async function openEntry() {
+  const risk = parseFloat($("riskIn").value || localStorageGet("risk") || "0");
+  if (risk > 0) $("riskIn").value = risk;
+  let e;
+  try { e = await getJSON("/api/entry" + (risk > 0 ? "?risk=" + risk : "")); } catch (err) { e = null; }
+  if (!e || !e.rows) { $("enStatus").textContent = "Sem leitura ainda."; $("dlg").showModal(); return; }
+  $("enRows").innerHTML = e.rows.map((r) => row(r.icon, r.name, r.value == null ? (r.detail || null) : r.value, r.value == null ? "" : r.detail, r.value != null)).join("");
+  $("enConf").innerHTML = `<b>${fmt(e.confluence, 0)}%</b>`;
+  $("enStatus").textContent = "STATUS: " + e.icon + " " + e.status;
+  const p = e.plan;
+  $("enPlan").innerHTML = p ? `<div class="plan">
+      <span>Lado</span><b class="${p.side === "COMPRA" ? "up" : "down"}">${p.side} (hipotético)</b>
+      <span>Entrada</span><b>${fmt(p.entry)} <span class="muted small">preço atual</span></b>
+      <span>Stop</span><b>${fmt(p.stop)} <span class="muted small">${esc(p.stop_rule)} · ${fmt(p.risk_points)} pts</span></b>
+      <span>Alvo</span><b>${fmt(p.target)} <span class="muted small">${esc(p.target_rule)}${p.next_level ? " · próximo nível " + fmt(p.next_level) : ""}</span></b>
+      <span>Risco/lote</span><b>US$ ${fmt(p.risk_per_lot_usd)}</b>
+      ${p.lots != null ? `<span>Lote p/ US$ ${fmt(p.risk_usd, 0)}</span><b>${fmt(p.lots, 2)} lote(s)</b>` : `<span>Risco</span><b class="muted">informe o risco em US$ abaixo</b>`}
+    </div>` : "";
+  $("enWarn").innerHTML = e.event_warning ? `<div class="warnline">⚠️ ${esc(e.event_warning)}</div>` : "";
+  $("enNote").textContent = e.note;
+  if (!$("dlg").open) $("dlg").showModal();
+}
+$("btnEntry").onclick = openEntry;
+$("riskGo").onclick = () => { localStorageSet("risk", $("riskIn").value); openEntry(); };
+$("dlgClose").onclick = () => $("dlg").close();
+$("btnRefresh").onclick = async () => { $("btnRefresh").disabled = true; try { await getJSON("/api/refresh"); } catch (e) { /* segue */ } $("btnRefresh").disabled = false; tick(); };
+$("btnTheme").onclick = () => {
+  const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  const nxt = cur === "light" ? "dark" : "light"; document.documentElement.dataset.theme = nxt; localStorageSet("theme", nxt); drawChart();
+};
+(function () { const t = localStorageGet("theme"); if (t) document.documentElement.dataset.theme = t; })();
+window.addEventListener("resize", () => drawChart());
+
+async function tick() { await loadState(); await loadChart(); loadHistory(); }
+buildToolbar(); tick(); setInterval(tick, 15000);
+</script>
+</body>
+</html>
+"""
+if DASH_HTML == "__DASH_" + "HTML__":            # pacote: lê gold_ai/dashboard.html (no bundle o HTML já vem embutido acima)
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html"), encoding="utf-8") as _fh:
+        DASH_HTML = _fh.read()
 
 
 # ============================================================================
@@ -17691,7 +19071,7 @@ def _bias_source(args: argparse.Namespace):
         return SampleSource(scenario=args.scenario)
 
     dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot,
-                            enable_fred=not args.no_fred, enable_news=not args.no_news)
+                            enable_fred=not args.no_fred, enable_news=not args.no_news, extended=True)
     data = DataEngine(dcfg)
     if args.source != "mt5":
         return data
@@ -17724,6 +19104,7 @@ def cmd_bias(args: argparse.Namespace) -> int:
     try:
         while True:
             snap = source.snapshot() if hasattr(source, "snapshot") else source.collect()
+            bias_apply_manual(snap, args.manual)
             reading = engine.analyze(snap)
             if mem is not None:
                 h1 = snap.candles.get("H1") or []
@@ -17751,6 +19132,26 @@ def cmd_bias(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if mem is not None:
+            mem.close()
+    return 0
+
+
+def cmd_painel(args: argparse.Namespace) -> int:
+    """GOLD MARKET INTELLIGENCE — PAINEL: cockpit do ouro no navegador (apoio à decisão; nunca envia ordens)."""
+
+    mem = BiasMemory(args.db) if args.db else None
+    service = DashService(_bias_source(args), GoldBiasEngine(), mem, BiasNotifier(args.state) if args.send or args.state else None,
+                          TelegramSender(dry_run=not args.send, quiet=not args.send), interval=args.interval, manual_path=args.manual,
+                          contract_oz=args.contract)
+    srv = dash_serve(service, args.host, args.port, open_browser=not args.no_browser)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        service.stop_event.set()
+        srv.server_close()
         if mem is not None:
             mem.close()
     return 0
@@ -17865,6 +19266,26 @@ def _main(argv: list[str]) -> int:
     e.add_argument("--flow", type=float, default=0.0)
     e.set_defaults(func=cmd_event)
 
+    pn = sub.add_parser("painel", help="🥇 PAINEL: cockpit do ouro no navegador (viés, confluência, semáforo, cérebro da IA, POSSO ENTRAR?, gráfico)")
+    pn.add_argument("--source", choices=["mt5", "web", "sample"], default="mt5", help="mt5 = preço da corretora + macro web (padrão)")
+    pn.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
+    pn.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")
+    pn.add_argument("--mt5-path", default=None)
+    pn.add_argument("--calendar", default=None, help="CSV/JSON de calendário econômico")
+    pn.add_argument("--no-cot", action="store_true")
+    pn.add_argument("--no-fred", action="store_true")
+    pn.add_argument("--no-news", action="store_true")
+    pn.add_argument("--manual", default="dados/manual.json", help="JSON com dados sem fonte automática (China, BCs, ETFs, eventos)")
+    pn.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (histórico × resultado; vazio desliga)")
+    pn.add_argument("--state", default="dados/gold_bias_state.json", help="estado anti-repetição dos alertas")
+    pn.add_argument("--interval", type=int, default=60, help="segundos entre leituras")
+    pn.add_argument("--host", default="127.0.0.1", help="127.0.0.1 = só este computador (0.0.0.0 abre na rede local)")
+    pn.add_argument("--port", type=int, default=8765)
+    pn.add_argument("--contract", type=float, default=100.0, help="onças por lote (XAUUSD padrão = 100)")
+    pn.add_argument("--no-browser", action="store_true", help="não abre o navegador sozinho")
+    pn.add_argument("--send", action="store_true", help="alertas também no Telegram (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID do .env)")
+    pn.set_defaults(func=cmd_painel)
+
     bi = sub.add_parser("bias", help="GOLD BIAS ENGINE: viés ALTA/BAIXA/NEUTRO do ouro (score, confiança, 3 horizontes, contradições) → Telegram")
     bi.add_argument("--mode", choices=["monitor", "relatorio", "manha", "fechamento", "stats"], default="monitor",
                     help="monitor = loop com atualizações/alertas só quando algo muda; manha/fechamento = relatórios do dia; stats = previsão × resultado")
@@ -17876,6 +19297,7 @@ def _main(argv: list[str]) -> int:
     bi.add_argument("--no-cot", action="store_true")
     bi.add_argument("--no-fred", action="store_true")
     bi.add_argument("--no-news", action="store_true")
+    bi.add_argument("--manual", default="dados/manual.json", help="JSON com dados sem fonte automática (China, BCs, ETFs, eventos)")
     bi.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (vazio desliga)")
     bi.add_argument("--state", default="dados/gold_bias_state.json", help="estado anti-repetição entre reinícios")
     bi.add_argument("--interval", type=int, default=300, help="segundos entre leituras no modo monitor")

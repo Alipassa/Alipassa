@@ -42,6 +42,9 @@ class DataEngineConfig:
     enable_cot: bool = True
     enable_news: bool = True
     market_symbol: str = "XAUUSD"     # mercado para o NEWS ENGINE no modo de mercado único
+    extended: bool = False            # GOLD BIAS / PAINEL: também Treasury 30Y, variação do 2Y, níveis de WTI e Brent
+    us30y_symbol: str = "^TYX"
+    brent_symbol: str = "BZ=F"
 
 
 class DataEngine:
@@ -107,6 +110,21 @@ class DataEngine:
             cs = self.yahoo.candles(self.cfg.us2y_symbol, "M15")
             s.us2y = cs[-1].close
         self._try("us2y", us2y)
+
+        def extended() -> None:
+            if not self.cfg.extended:
+                return
+            cs2 = self.yahoo.candles(self.cfg.us2y_symbol, "M15")
+            d2 = self.yahoo.change_over(cs2, w, pct=False)
+            s.us2y_change_bp = d2 * 100 if d2 is not None else None
+            cs30 = self.yahoo.candles(self.cfg.us30y_symbol, "M15")
+            s.us30y = cs30[-1].close
+            d30 = self.yahoo.change_over(cs30, w, pct=False)
+            s.us30y_change_bp = d30 * 100 if d30 is not None else None
+            s.wti = self.yahoo.candles(self.cfg.oil_symbol, "M15")[-1].close
+            csb = self.yahoo.candles(self.cfg.brent_symbol, "M15")
+            s.brent, s.brent_change_pct = csb[-1].close, self.yahoo.change_over(csb, w)
+        self._try("extended", extended)
 
         def fed() -> None:
             cs = self.yahoo.candles(self.cfg.fedfunds_symbol, "M15")

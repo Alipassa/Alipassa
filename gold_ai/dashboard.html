@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gold Market Intelligence</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%A5%87%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --good: #0ca30c; --warn: #fab219; --crit: #d03b3b; --good-text: #3fcf3f; --crit-text: #ff7a7a; --warn-text: #fab219;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  --gold: #d4a72c; --zone-good: rgba(12,163,12,0.13); --zone-crit: rgba(208,59,59,0.13); --fib: rgba(212,167,44,0.55);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec; --ink: #0b0b0b; --ink-2: #52514e; --muted: #6f6d67;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --good-text: #006300; --crit-text: #b3261e; --warn-text: #8a5a00;
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+    --gold: #9a7414; --zone-good: rgba(12,163,12,0.10); --zone-crit: rgba(208,59,59,0.10); --fib: rgba(154,116,20,0.55);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec; --ink: #0b0b0b; --ink-2: #52514e; --muted: #6f6d67;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --good-text: #006300; --crit-text: #b3261e; --warn-text: #8a5a00;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+  --gold: #9a7414; --zone-good: rgba(12,163,12,0.10); --zone-crit: rgba(208,59,59,0.10); --fib: rgba(154,116,20,0.55);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button, input { font: inherit; color: inherit; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 15px; margin: 0; letter-spacing: .04em; color: var(--gold); font-weight: 700; }
+header .sp { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--ink-2); background: var(--surface-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.btn { border: 1px solid var(--border); background: var(--surface-2); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--gold); color: #111; border-color: transparent; font-weight: 700; }
+.btn.on { outline: 2px solid var(--s1); outline-offset: -2px; }
+main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(12, minmax(0, 1fr)); max-width: 1680px; margin: 0 auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.span-3 { grid-column: span 3; } .span-4 { grid-column: span 4; } .span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; }
+.span-8 { grid-column: span 8; } .span-9 { grid-column: span 9; } .span-12 { grid-column: span 12; }
+@media (max-width: 1200px) { .span-3, .span-4, .span-5 { grid-column: span 6; } .span-8, .span-9 { grid-column: span 12; } }
+@media (max-width: 760px) { main { padding: 12px; gap: 12px; } .span-3, .span-4, .span-5, .span-6, .span-8, .span-9 { grid-column: span 12; } }
+.hero-price { font-size: 38px; font-weight: 700; line-height: 1.1; }
+.delta { font-size: 16px; font-weight: 600; }
+.up { color: var(--good-text); } .down { color: var(--crit-text); } .flat { color: var(--ink-2); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; color: var(--ink-2); font-size: 13px; margin-top: 8px; }
+.kv b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.bias-box { border: 1px solid var(--border); border-radius: 10px; padding: 12px; text-align: center; background: var(--surface-2); }
+.bias-label { font-size: 26px; font-weight: 800; letter-spacing: .02em; }
+.gauge { position: relative; height: 10px; border-radius: 5px; margin: 12px 0 4px; background: linear-gradient(90deg, var(--crit) 0%, var(--surface) 50%, var(--good) 100%); border: 1px solid var(--border); }
+.gauge i { position: absolute; top: -5px; width: 4px; height: 18px; border-radius: 2px; background: var(--ink); transform: translateX(-2px); }
+.gauge-scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 10px; }
+.light { display: flex; gap: 14px; align-items: center; }
+.lamp { display: grid; gap: 6px; padding: 8px; background: #111; border-radius: 12px; border: 1px solid var(--border); }
+.lamp span { width: 26px; height: 26px; border-radius: 50%; background: #2b2b2b; }
+.lamp span.on-g { background: var(--good); box-shadow: 0 0 14px var(--good); }
+.lamp span.on-y { background: var(--warn); box-shadow: 0 0 14px var(--warn); }
+.lamp span.on-r { background: var(--crit); box-shadow: 0 0 14px var(--crit); }
+.light-title { font-weight: 800; font-size: 16px; }
+.muted { color: var(--muted); } .ink2 { color: var(--ink-2); } .small { font-size: 12px; }
+.rows { display: grid; gap: 4px; }
+.row { display: grid; grid-template-columns: 22px 1fr auto; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--grid); }
+.row:last-child { border-bottom: 0; }
+.row .v { font-variant-numeric: tabular-nums; font-weight: 700; min-width: 42px; text-align: right; }
+.row .d { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sec { font-size: 11px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; margin: 10px 0 2px; font-weight: 600; }
+.conf-big { font-size: 30px; font-weight: 800; }
+.bar { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; margin-top: 4px; }
+.bar i { display: block; height: 100%; background: var(--gold); }
+.chart-card { display: flex; flex-direction: column; }
+.chart-wrap { position: relative; flex: 1; min-height: 520px; }
+canvas { display: block; width: 100%; }
+#chart { position: absolute; inset: 0; height: 100%; }
+@media (max-width: 760px) { .chart-wrap { min-height: 380px; } }
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+.toolbar .sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+.tfb { padding: 4px 10px; font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--ink-2); margin-top: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 14px; height: 2px; display: inline-block; }
+.tip { position: absolute; pointer-events: none; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; display: none; min-width: 160px; box-shadow: 0 4px 16px rgba(0,0,0,.35); z-index: 3; }
+.tip b { font-variant-numeric: tabular-nums; }
+ul.facts { margin: 0; padding-left: 18px; } ul.facts li { margin: 3px 0; }
+.brain-k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--grid); }
+th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+.news { display: grid; gap: 8px; max-height: 380px; overflow: auto; }
+.news div { border-bottom: 1px solid var(--grid); padding-bottom: 6px; }
+.alerts { display: grid; gap: 8px; max-height: 380px; overflow: auto; }
+.alert { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; font-size: 12px; }
+.warnline { margin-top: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--warn); color: var(--warn-text); font-weight: 600; }
+dialog { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--ink); max-width: 560px; width: calc(100% - 32px); padding: 18px; }
+dialog::backdrop { background: rgba(0,0,0,.55); }
+.status-big { font-size: 20px; font-weight: 800; margin: 10px 0; }
+.plan { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin-top: 8px; }
+.plan b { font-variant-numeric: tabular-nums; }
+.err { color: var(--crit-text); font-size: 12px; }
+footer { text-align: center; color: var(--muted); font-size: 12px; padding: 4px 16px 24px; }
+.tbl-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🥇 GOLD MARKET INTELLIGENCE</h1>
+  <span class="pill" id="src"><span class="dot" id="srcdot"></span><span id="srctxt">conectando…</span></span>
+  <span class="pill" id="upd">—</span>
+  <span class="sp"></span>
+  <button class="btn primary" id="btnEntry">🔥 POSSO ENTRAR?</button>
+  <button class="btn" id="btnRefresh" title="Nova leitura agora">↻ Atualizar</button>
+  <button class="btn" id="btnTheme" title="Tema claro/escuro">◐</button>
+</header>
+
+<main>
+  <section class="card span-3" aria-label="Preço">
+    <h2>💰 XAU/USD</h2>
+    <div class="hero-price" id="price">—</div>
+    <div class="delta" id="chg">—</div>
+    <div class="kv">
+      <span>Máxima</span><b id="hi">—</b>
+      <span>Mínima</span><b id="lo">—</b>
+      <span>Janela recente</span><b id="wchg">—</b>
+      <span>Fonte</span><b id="psrc">—</b>
+    </div>
+  </section>
+
+  <section class="card span-3" aria-label="Viés da IA">
+    <h2>🧠 GOLD BIAS</h2>
+    <div class="bias-box">
+      <div class="bias-label" id="biasLabel">—</div>
+      <div class="ink2"><span id="conf">—</span> de confiança · score <b id="score">—</b></div>
+      <div class="gauge" aria-hidden="true"><i id="gaugeMark" style="left:50%"></i></div>
+      <div class="gauge-scale"><span>−100 baixa</span><span>0</span><span>+100 alta</span></div>
+      <div class="chips" id="horizons"></div>
+    </div>
+  </section>
+
+  <section class="card span-3" aria-label="Semáforo operacional">
+    <h2>🚦 SEMÁFORO OPERACIONAL</h2>
+    <div class="light">
+      <div class="lamp" aria-hidden="true"><span id="lampR"></span><span id="lampY"></span><span id="lampG"></span></div>
+      <div>
+        <div class="light-title" id="lightTitle">—</div>
+        <div class="small ink2" id="lightReason"></div>
+      </div>
+    </div>
+    <div class="rows" id="lightRows" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card span-3" aria-label="Confluência">
+    <h2>🎯 CONFLUÊNCIA</h2>
+    <div class="conf-big" id="confl">—</div>
+    <div class="bar"><i id="conflBar" style="width:0"></i></div>
+    <div class="small muted" style="margin-top:6px">% do peso dos blocos (macro, fluxo, técnico, notícias, estrutura) que aponta na direção do viés.</div>
+    <div id="eventBox"></div>
+  </section>
+
+  <section class="card span-9 chart-card" aria-label="Gráfico">
+    <div class="toolbar" id="toolbar">
+      <strong>XAU/USD</strong><span class="sep"></span>
+      <span id="tfButtons"></span><span class="sep"></span>
+      <span id="ovButtons"></span>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="chart" role="img" aria-label="Gráfico de candles do XAU/USD com médias, VWAP, níveis e sinais"></canvas>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="card span-3" aria-label="Painel de confluência">
+    <h2>📊 PAINEL DE CONFLUÊNCIA</h2>
+    <div class="sec">Macro</div><div class="rows" id="cfMacro"></div>
+    <div class="sec">Fluxo</div><div class="rows" id="cfFlow"></div>
+    <div class="sec">Técnico</div><div class="rows" id="cfTech"></div>
+    <div class="sec">Notícias</div><div class="rows" id="cfNews"></div>
+  </section>
+
+  <section class="card span-5" aria-label="Cérebro da IA">
+    <h2>🧠 CÉREBRO DA IA — POR QUE ELA PENSA ISSO?</h2>
+    <div><b>Viés atual:</b> <span id="brBias">—</span></div>
+    <ul class="facts" id="brFacts"></ul>
+    <div class="brain-k">Fator dominante</div><div id="brDom">—</div>
+    <div class="brain-k">Fator contrário</div><div id="brCon">—</div>
+    <div class="brain-k">Conclusão</div><div id="brConc"><b>—</b></div>
+    <div class="brain-k">Leitura da IA</div><div class="ink2" id="brOp">—</div>
+    <div id="brContra"></div>
+  </section>
+
+  <section class="card span-4" aria-label="Macro e contexto">
+    <h2>🌎 MACRO · MERCADOS · RISCO</h2>
+    <div class="rows" id="macro"></div>
+    <div class="sec">Contexto</div>
+    <div class="rows" id="context"></div>
+  </section>
+
+  <section class="card span-3" aria-label="Fluxo">
+    <h2>🏦 FLUXO · 🇨🇳 DEMANDA</h2>
+    <div class="rows" id="flow"></div>
+    <div class="small muted" style="margin-top:8px">Sem fonte automática? Preencha <code>dados/manual.json</code> (China, Índia, bancos centrais, ETFs).</div>
+  </section>
+
+  <section class="card span-6" aria-label="Técnico por timeframe">
+    <h2>📈 TÉCNICO POR TIMEFRAME</h2>
+    <div class="tbl-wrap"><table id="techTbl"></table></div>
+  </section>
+
+  <section class="card span-6" aria-label="Calendário">
+    <h2>📅 CALENDÁRIO — PRÓXIMOS EVENTOS</h2>
+    <div class="tbl-wrap"><table id="cal"></table></div>
+  </section>
+
+  <section class="card span-4" aria-label="Notícias">
+    <h2>📰 NOTÍCIAS RELEVANTES</h2>
+    <div class="news" id="news"></div>
+  </section>
+
+  <section class="card span-4" aria-label="Alertas">
+    <h2>🚨 ALERTAS (também no Telegram)</h2>
+    <div class="alerts" id="alerts"></div>
+  </section>
+
+  <section class="card span-4" aria-label="Histórico">
+    <h2>🗂 O QUE A IA DISSE × O QUE O OURO FEZ</h2>
+    <div class="tbl-wrap"><table id="hist"></table></div>
+  </section>
+</main>
+<footer id="disc">Viés probabilístico, não garantia de movimento. Apoio à decisão — o painel não executa ordens.</footer>
+
+<dialog id="dlg">
+  <div style="display:flex;align-items:center;gap:8px"><h2 style="margin:0;font-size:16px">🔥 POSSO ENTRAR? — ANÁLISE DE ENTRADA</h2><span class="sp" style="flex:1"></span><button class="btn" id="dlgClose">✕</button></div>
+  <div class="small muted" style="margin-top:6px">🟢 confirma o lado da entrada · 🔴 contra · 🟡 neutro · ⚪ sem dado. Valores: −100 (contra o ouro) a +100 (a favor do ouro).</div>
+  <div class="rows" id="enRows" style="margin-top:6px"></div>
+  <div style="margin-top:10px"><b>CONFLUÊNCIA:</b> <span id="enConf">—</span></div>
+  <div class="status-big" id="enStatus">—</div>
+  <div id="enPlan"></div>
+  <div id="enWarn"></div>
+  <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:12px">Risco por operação (US$)
+    <input id="riskIn" type="number" min="0" step="10" style="width:110px;padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:var(--surface-2)">
+    <button class="btn" id="riskGo">Calcular lote</button></label>
+  <p class="small muted" id="enNote"></p>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmt = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toLocaleString("pt-BR", {minimumFractionDigits: d, maximumFractionDigits: d});
+const sgn = (v, d = 0) => v == null ? "—" : (v > 0 ? "+" : "") + fmt(v, d);
+const cls = (v) => v == null ? "flat" : v > 0 ? "up" : v < 0 ? "down" : "flat";
+let STATE = null, TF = localStorageGet("tf") || "H1", CHART = null, HOVER = null;
+const OVERLAYS = {ema: "EMAs", vwap: "VWAP", bands: "Bandas VWAP", levels: "Suporte/Resistência", fib: "Fibonacci", signals: "Sinais da IA", entry: "Entrada hipotética", events: "Eventos"};
+const OV = Object.fromEntries(Object.keys(OVERLAYS).map((k) => [k, (localStorageGet("ov_" + k) ?? "1") === "1"]));
+
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* sem storage: segue */ } }
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+function row(icon, name, value, detail, isNum = true) {
+  const v = value == null ? '<span class="muted">sem dado</span>' : (isNum ? sgn(value) : esc(value));
+  return `<div class="row"><span>${icon || "⚪"}</span><span>${esc(name)}${detail ? `<div class="d" title="${esc(detail)}">${esc(detail)}</div>` : ""}</span><span class="v ${isNum ? cls(value) : ""}">${v}</span></div>`;
+}
+function items(list) { return (list || []).map((i) => row(i.icon, i.name, i.directional === false ? (i.detail || null) : i.value, i.directional === false ? "" : i.detail, i.directional !== false)).join(""); }
+
+async function getJSON(url) { const r = await fetch(url, {cache: "no-store"}); if (!r.ok) throw new Error(r.status); return r.json(); }
+
+async function loadState() {
+  try {
+    STATE = await getJSON("/api/state");
+    renderState(STATE);
+  } catch (e) {
+    $("srctxt").textContent = "sem conexão com o motor"; $("srcdot").style.background = cssVar("--crit");
+  }
+}
+
+function renderState(s) {
+  if (!s.price) { $("srctxt").textContent = s.service && s.service.error ? "erro: " + s.service.error : "aguardando 1ª leitura…"; return; }
+  const st = s.status || {};
+  const mt5 = st.mt5 === "ok";
+  $("srcdot").style.background = cssVar(mt5 ? "--good" : "--warn");
+  $("srctxt").textContent = mt5 ? "MT5 conectado" : (st.mt5 ? "MT5: " + st.mt5 : "dados web/sample");
+  $("upd").textContent = "atualizado " + new Date(s.updated).toLocaleTimeString("pt-BR") + (s.service && s.service.error ? " · ⚠ " + s.service.error : "");
+  const p = s.price;
+  $("price").textContent = "$" + fmt(p.price);
+  $("chg").innerHTML = p.change_pct == null ? "—" : `<span class="${cls(p.change_pct)}">${p.change_pct > 0 ? "▲" : p.change_pct < 0 ? "▼" : "■"} ${sgn(p.change_pct, 2)}% (${sgn(p.change_abs, 2)}) no dia</span>`;
+  $("hi").textContent = fmt(p.high); $("lo").textContent = fmt(p.low);
+  $("wchg").innerHTML = `<span class="${cls(p.window_change_pct)}">${sgn(p.window_change_pct, 2)}%</span>`;
+  $("psrc").textContent = p.source;
+  const b = s.bias;
+  $("biasLabel").textContent = b.emoji + " " + b.label;
+  $("biasLabel").className = "bias-label " + (b.direction > 0 ? "up" : b.direction < 0 ? "down" : "flat");
+  $("conf").textContent = fmt(b.confidence, 0) + "%";
+  $("score").textContent = sgn(b.score);
+  $("gaugeMark").style.left = (50 + Math.max(-100, Math.min(100, b.score)) / 2) + "%";
+  const hl = {horas: "Horas", "1d": "1 dia", "5d": "5 dias"};
+  $("horizons").innerHTML = Object.entries(b.horizons).map(([k, h]) => `<span class="pill">${hl[k]}: ${h.emoji} ${esc(h.label.toLowerCase())}</span>`).join("");
+  // semáforo
+  const L = s.light;
+  $("lampR").className = L.state === "VENDA" ? "on-r" : ""; $("lampY").className = L.state === "AGUARDAR" ? "on-y" : ""; $("lampG").className = L.state === "COMPRA" ? "on-g" : "";
+  $("lightTitle").textContent = L.icon + " " + L.title; $("lightReason").textContent = L.reason;
+  $("lightRows").innerHTML = L.rows.map((r) => row(r.icon, r.group, r.value)).join("");
+  // confluência
+  const c = s.confluence;
+  $("confl").textContent = fmt(c.value, 0) + "%"; $("conflBar").style.width = Math.max(0, Math.min(100, c.value)) + "%";
+  $("cfMacro").innerHTML = items(c.macro); $("cfFlow").innerHTML = items(c.flow); $("cfTech").innerHTML = items(c.technical);
+  $("cfNews").innerHTML = (c.themes || []).map((t) => row(t.icon, t.label, t.value)).join("") || '<div class="muted small">sem notícias com tema</div>';
+  $("eventBox").innerHTML = s.event ? `<div class="warnline">⚠️ ${esc(s.event.name)} em ${s.event.minutes} min · volatilidade ${esc(s.event.volatility)}<div class="small" style="font-weight:400">Acima do esperado: ${esc(s.event.if_above)}<br>Abaixo: ${esc(s.event.if_below)}</div></div>` : "";
+  // cérebro
+  const br = s.brain;
+  $("brBias").innerHTML = `<b class="${b.direction > 0 ? "up" : b.direction < 0 ? "down" : "flat"}">${br.emoji} ${esc(br.bias)}</b>`;
+  $("brFacts").innerHTML = br.facts.map((f) => `<li>${esc(f)}</li>`).join("");
+  $("brDom").textContent = br.dominant || "—"; $("brCon").textContent = br.contrary || "nenhum relevante";
+  $("brConc").innerHTML = `<b>${esc(br.conclusion)}</b>`; $("brOp").textContent = br.opinion;
+  $("brContra").innerHTML = (br.contradictions || []).map((x) => `<div class="warnline small">⚠️ ${esc(x)}</div>`).join("");
+  // macro / contexto / fluxo
+  $("macro").innerHTML = items(s.macro);
+  const cx = s.context;
+  $("context").innerHTML = items([cx.oil, cx.vix]) + row(cx.geo.icon, "Geopolítica", cx.geo.level, cx.geo.value != null ? `índice ${fmt(cx.geo.value, 0)}/100` : "", false)
+    + row("📊", "Economia EUA", cx.economy, "", false) + row("🌐", "Apetite a risco", cx.risk_mode, "", false);
+  $("flow").innerHTML = items(s.flow);
+  // técnico por TF
+  const pt = s.technical.per_tf || {};
+  const tfs = Object.keys(pt);
+  const ic = (v) => v == null ? "⚪" : v >= 20 ? "🟢" : v <= -20 ? "🔴" : "🟡";
+  $("techTbl").innerHTML = `<tr><th>TF</th><th class="n">RSI</th><th class="n">MACD</th><th class="n">ADX</th><th>EMA 9/21/50/200</th><th>VWAP</th><th>Estrutura</th></tr>` +
+    tfs.map((tf) => { const x = pt[tf]; return `<tr><td><b>${tf}</b></td><td class="n">${ic(x.rsi_read)} ${fmt(x.rsi, 0)}</td><td class="n">${ic(x.macd_read)} ${fmt(x.macd_hist, 2)}</td><td class="n">${fmt(x.adx, 0)}</td><td>${ic(x.ema_read)} ${x.ema9 > x.ema21 ? "9>21" : "9<21"} · ${x.close > x.ema50 ? "acima" : "abaixo"} da 50${x.ema200 ? " · " + (x.close > x.ema200 ? "acima" : "abaixo") + " da 200" : ""}</td><td>${ic(x.vwap_read)} ${x.vwap_read == null ? "—" : x.vwap_read > 0 ? "acima" : "abaixo"}</td><td>${esc(x.structure)}</td></tr>`; }).join("");
+  // calendário
+  $("cal").innerHTML = `<tr><th>Evento</th><th>Quando</th><th class="n">Esperado</th><th class="n">Anterior</th><th class="n">Real</th></tr>` +
+    (s.calendar.length ? s.calendar.map((e) => `<tr><td>${e.impact === "MUITO ALTO" ? "🔴" : e.impact === "ALTO" ? "🟠" : "🟡"} ${esc(e.name)}</td><td>${new Date(e.time).toLocaleString("pt-BR", {weekday: "short", hour: "2-digit", minute: "2-digit"})}${!e.done ? ` <span class="muted small">(em ${e.minutes >= 90 ? Math.round(e.minutes / 60) + " h" : e.minutes + " min"})</span>` : ""}</td><td class="n">${e.consensus == null ? "—" : esc(e.consensus + e.unit)}</td><td class="n">${e.previous == null ? "—" : esc(e.previous + e.unit)}</td><td class="n">${e.actual == null ? "—" : esc(e.actual + e.unit)}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="muted">Nenhum evento carregado. Use --calendar ou "eventos" em dados/manual.json.</td></tr>`);
+  // notícias
+  $("news").innerHTML = s.news.items.length ? s.news.items.map((n) => `<div>${n.icon} <b>[${n.impact > 0 ? "+" : ""}${n.impact}]</b> ${esc(n.headline)}<div class="small muted">${esc(n.source || "—")} · ${new Date(n.time).toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"})} · fator ${esc(n.factor)} · credibilidade ${fmt(n.credibility * 100, 0)}%</div></div>`).join("") : '<div class="muted">Sem notícias no ciclo.</div>';
+  // alertas
+  $("alerts").innerHTML = s.alerts.length ? s.alerts.map((a) => `<div class="alert"><span class="muted">${new Date(a.time).toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"})} · ${esc(a.kind)}</span>\n${esc(a.text)}</div>`).join("") : '<div class="muted">Nenhum alerta ainda — a IA só avisa quando algo muda.</div>';
+  $("disc").textContent = s.disclaimer;
+}
+
+async function loadHistory() {
+  try {
+    const h = await getJSON("/api/history");
+    const oc = (o) => !o ? '<span class="muted">aguardando</span>' : `${o.hit ? "✅" : "❌"} <span class="${cls(o.move_pct)}">${sgn(o.move_pct, 2)}%</span>`;
+    $("hist").innerHTML = `<tr><th>Hora</th><th>IA disse</th><th class="n">Preço</th><th>4 h</th><th>1 dia</th></tr>` +
+      (h.length ? h.slice(0, 25).map((x) => `<tr><td>${new Date(x.time).toLocaleString("pt-BR", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"})}</td><td>${x.label.includes("ALTA") ? "🟢" : x.label.includes("BAIXA") ? "🔴" : "🟡"} ${esc(x.label)} <span class="muted small">${fmt(x.confidence, 0)}%</span></td><td class="n">${fmt(x.price)}</td><td>${oc(x.outcomes.horas)}</td><td>${oc(x.outcomes["1d"])}</td></tr>`).join("")
+        : `<tr><td colspan="5" class="muted">Sem previsões gravadas ainda.</td></tr>`);
+  } catch (e) { /* histórico é opcional */ }
+}
+
+// ---------------------------------------------------------------- gráfico
+function buildToolbar() {
+  $("tfButtons").innerHTML = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"].map((t) => `<button class="btn tfb ${t === TF ? "on" : ""}" data-tf="${t}">${t}</button>`).join(" ");
+  $("ovButtons").innerHTML = Object.entries(OVERLAYS).map(([k, l]) => `<button class="btn tfb ${OV[k] ? "on" : ""}" data-ov="${k}" aria-pressed="${OV[k]}">${l}</button>`).join(" ");
+  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { TF = b.dataset.tf; localStorageSet("tf", TF); buildToolbar(); loadChart(); });
+  document.querySelectorAll("[data-ov]").forEach((b) => b.onclick = () => { const k = b.dataset.ov; OV[k] = !OV[k]; localStorageSet("ov_" + k, OV[k] ? "1" : "0"); buildToolbar(); drawChart(); });
+  $("legend").innerHTML = [["--s1", "EMA 9"], ["--s2", "EMA 21"], ["--s3", "EMA 50"], ["--s4", "EMA 200"], ["--s5", "VWAP (± bandas tracejadas)"]]
+    .map(([c, l]) => `<span><i style="background:var(${c})"></i>${l}</span>`).join("") +
+    '<span>▯ candle de alta (vazado) · ▮ de baixa (cheio)</span><span>▲▼ sinal da IA</span><span>┆ evento econômico</span>';
+}
+
+async function loadChart() {
+  try { CHART = await getJSON("/api/chart?tf=" + TF); drawChart(); } catch (e) { CHART = null; drawChart(); }
+}
+
+function drawChart() {
+  const cv = $("chart"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const C = {ink: cssVar("--ink"), ink2: cssVar("--ink-2"), muted: cssVar("--muted"), grid: cssVar("--grid"), axis: cssVar("--axis"), surface: cssVar("--surface"),
+    good: cssVar("--good"), crit: cssVar("--crit"), warn: cssVar("--warn"), s: [cssVar("--s1"), cssVar("--s2"), cssVar("--s3"), cssVar("--s4"), cssVar("--s5")],
+    zg: cssVar("--zone-good"), zc: cssVar("--zone-crit"), fib: cssVar("--fib"), gold: cssVar("--gold")};
+  g.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
+  if (!CHART || !CHART.candles || !CHART.candles.length) {
+    g.fillStyle = C.muted; g.fillText(CHART && CHART.available ? `Sem candles em ${TF}. Disponíveis: ${CHART.available.join(", ")}` : "Carregando gráfico…", 16, 24); return;
+  }
+  const cs = CHART.candles, n = cs.length, extra = 12;             // espaço à direita: entrada hipotética e eventos futuros
+  const padL = 8, padR = 64, padT = 14, padB = 22, pw = W - padL - padR, ph = H - padT - padB;
+  let lo = Infinity, hi = -Infinity;
+  const consider = (v) => { if (v != null && isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } };
+  cs.forEach((c) => { consider(c.l); consider(c.h); });
+  const e = CHART.entry;
+  if (OV.entry && e) { consider(e.stop); consider(e.target); }
+  const span = hi - lo || 1; lo -= span * 0.06; hi += span * 0.06;
+  const slot = pw / (n + extra), bw = Math.max(1, Math.min(12, slot * 0.66));
+  const X = (i) => padL + slot * (i + 0.5), Y = (v) => padT + (hi - v) / (hi - lo) * ph;
+  const t0 = cs[0].t, dt = n > 1 ? (cs[n - 1].t - cs[0].t) / (n - 1) : 60;
+  const XT = (t) => X((t - t0) / dt);
+  // grade + eixo de preço
+  g.strokeStyle = C.grid; g.lineWidth = 1; g.fillStyle = C.muted; g.textAlign = "left";
+  const step = niceStep(hi - lo, 7);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) { const y = Math.round(Y(v)) + 0.5; g.beginPath(); g.moveTo(padL, y); g.lineTo(W - padR, y); g.stroke(); g.fillText(fmt(v, v >= 1000 ? 0 : 2), W - padR + 6, y + 4); }
+  // eixo de tempo
+  g.textAlign = "center";
+  const multiDay = cs[n - 1].t - cs[0].t > 20 * 3600, every = Math.max(1, Math.ceil(n / (W < 600 ? 4 : 7)));
+  for (let i = n - 1; i >= 0; i -= every) g.fillText(tlabel(cs[i].t, multiDay), X(i), H - 6);
+  // Fibonacci
+  if (OV.fib && CHART.fib) {
+    g.setLineDash([2, 4]); g.strokeStyle = C.fib; g.fillStyle = C.fib; g.textAlign = "left";
+    CHART.fib.levels.forEach((l) => { const y = Y(l.price); if (y < padT || y > padT + ph) return; g.beginPath(); g.moveTo(padL, y); g.lineTo(W - padR, y); g.stroke(); g.fillText(`Fib ${(l.ratio * 100).toFixed(1)}%`, padL + 4, y - 3); });
+    g.setLineDash([]);
+  }
+  // suportes / resistências
+  if (OV.levels && CHART.levels) {
+    g.lineWidth = 1.5; g.setLineDash([6, 4]); g.textAlign = "left";
+    CHART.levels.resistances.forEach((v, k) => { g.strokeStyle = C.crit; g.globalAlpha = 1 - k * 0.25; hline(g, Y(v), padL, W - padR); g.fillStyle = C.crit; g.fillText("R" + (k + 1), W - padR - 22, Y(v) - 3); });
+    CHART.levels.supports.forEach((v, k) => { g.strokeStyle = C.good; g.globalAlpha = 1 - k * 0.25; hline(g, Y(v), padL, W - padR); g.fillStyle = C.good; g.fillText("S" + (k + 1), W - padR - 22, Y(v) - 3); });
+    g.globalAlpha = 1; g.setLineDash([]);
+  }
+  // eventos
+  if (OV.events) {
+    (CHART.events || []).forEach((ev) => { const x = XT(ev.t); if (x < padL || x > W - padR) return; g.strokeStyle = C.warn; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(x, padT); g.lineTo(x, padT + ph); g.stroke(); g.setLineDash([]); g.save(); g.translate(x + 3, padT + 4); g.rotate(Math.PI / 2); g.fillStyle = C.warn; g.textAlign = "left"; g.fillText((ev.future ? "⏳ " : "") + ev.name, 0, 0); g.restore(); });
+  }
+  // bandas VWAP
+  if (OV.bands) {
+    g.strokeStyle = C.s[4]; g.lineWidth = 1; g.setLineDash([4, 4]); g.globalAlpha = 0.7;
+    [1, 2, -1, -2].forEach((k) => line(g, cs.map((c, i) => [X(i), c.vw != null && c.sd ? Y(c.vw + k * c.sd) : null])));
+    g.globalAlpha = 1; g.setLineDash([]);
+  }
+  // candles (alta = vazado, baixa = cheio: a forma também diferencia, não só a cor)
+  cs.forEach((c, i) => {
+    const x = X(i), up = c.c >= c.o, col = up ? C.good : C.crit;
+    g.strokeStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(Math.round(x) + 0.5, Y(c.h)); g.lineTo(Math.round(x) + 0.5, Y(c.l)); g.stroke();
+    const y1 = Y(Math.max(c.o, c.c)), y2 = Y(Math.min(c.o, c.c)), h = Math.max(1, y2 - y1);
+    if (up) { g.fillStyle = C.surface; g.fillRect(x - bw / 2, y1, bw, h); g.strokeRect(x - bw / 2 + 0.5, y1 + 0.5, Math.max(0, bw - 1), Math.max(0, h - 1)); }
+    else { g.fillStyle = col; g.fillRect(x - bw / 2, y1, bw, h); }
+  });
+  // EMAs e VWAP (2px) com rótulo direto no fim da linha
+  const series = [];
+  if (OV.ema) series.push(["e9", 0, "9"], ["e21", 1, "21"], ["e50", 2, "50"], ["e200", 3, "200"]);
+  if (OV.vwap) series.push(["vw", 4, "VWAP"]);
+  const labels = [];
+  series.forEach(([key, si, lab]) => {
+    g.strokeStyle = C.s[si]; g.lineWidth = 2; line(g, cs.map((c, i) => [X(i), c[key] != null ? Y(c[key]) : null]));
+    const last = [...cs].reverse().find((c) => c[key] != null);
+    if (last) labels.push({y: Y(last[key]), text: lab, color: C.s[si]});
+  });
+  labels.sort((a, b) => a.y - b.y).forEach((l, k, arr) => { if (k && l.y - arr[k - 1].y < 12) l.y = arr[k - 1].y + 12; });
+  g.textAlign = "left"; labels.forEach((l) => { g.fillStyle = l.color; g.fillText(l.text, X(n - 1) + 8, l.y + 4); });
+  // entrada hipotética + zona de risco (vermelha) / alvo (verde) à direita do último candle; stop e alvo etiquetados no eixo
+  if (OV.entry && e) {
+    const x0 = X(n - 1) + slot * 0.6, x1 = W - padR;
+    g.fillStyle = C.zc; g.fillRect(x0, Math.min(Y(e.entry), Y(e.stop)), x1 - x0, Math.abs(Y(e.entry) - Y(e.stop)));
+    g.fillStyle = C.zg; g.fillRect(x0, Math.min(Y(e.entry), Y(e.target)), x1 - x0, Math.abs(Y(e.entry) - Y(e.target)));
+    g.lineWidth = 1.5; g.setLineDash([5, 3]);
+    g.strokeStyle = C.crit; hline(g, Y(e.stop), x0, x1);
+    g.strokeStyle = C.good; hline(g, Y(e.target), x0, x1);
+    g.setLineDash([]);
+    axisTag(g, Y(e.stop), "stop " + fmt(e.stop, 0), C.crit, "#fff", W - padR, padR);
+    axisTag(g, Y(e.target), "alvo " + fmt(e.target, 0), C.good, "#fff", W - padR, padR);
+  }
+  // sinais da IA
+  if (OV.signals) {
+    (CHART.signals || []).forEach((sg) => {
+      const idx = Math.round((sg.t - t0) / dt); if (idx < 0 || idx >= n) return;
+      const c = cs[idx], x = X(idx), up = sg.side > 0, y = up ? Y(c.l) + 12 : Y(c.h) - 12;
+      g.fillStyle = up ? C.good : C.crit; g.strokeStyle = C.surface; g.lineWidth = 2;
+      g.beginPath(); if (up) { g.moveTo(x, y - 6); g.lineTo(x - 6, y + 5); g.lineTo(x + 6, y + 5); } else { g.moveTo(x, y + 6); g.lineTo(x - 6, y - 5); g.lineTo(x + 6, y - 5); }
+      g.closePath(); g.stroke(); g.fill();
+    });
+  }
+  // preço atual
+  const yp = Y(CHART.price);
+  g.strokeStyle = C.gold; g.setLineDash([1, 3]); hline(g, yp, padL, W - padR); g.setLineDash([]);
+  axisTag(g, yp, fmt(CHART.price, 2), C.gold, "#111", W - padR, padR);
+  // crosshair
+  if (HOVER != null && HOVER >= 0 && HOVER < n) {
+    g.strokeStyle = C.muted; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(X(HOVER)) + 0.5, padT); g.lineTo(Math.round(X(HOVER)) + 0.5, padT + ph); g.stroke();
+  }
+  CHART._geo = {X, slot, padL, n};
+}
+function axisTag(g, y, text, bg, fg, x, w) { g.fillStyle = bg; g.fillRect(x, y - 9, w, 18); g.fillStyle = fg; g.textAlign = "left"; g.fillText(text, x + 4, y + 4); }
+function niceStep(range, ticks) { const raw = range / ticks, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p; }
+function hline(g, y, x0, x1) { g.beginPath(); g.moveTo(x0, Math.round(y) + 0.5); g.lineTo(x1, Math.round(y) + 0.5); g.stroke(); }
+function line(g, pts) { g.beginPath(); let pen = false; pts.forEach(([x, y]) => { if (y == null) { pen = false; return; } if (!pen) { g.moveTo(x, y); pen = true; } else g.lineTo(x, y); }); g.stroke(); }
+function tlabel(t, multiDay) {
+  const d = new Date(t * 1000);
+  if (["D1", "H4"].includes(TF)) return d.toLocaleDateString("pt-BR", {day: "2-digit", month: "2-digit"});
+  const hm = d.toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"});
+  return multiDay ? d.toLocaleDateString("pt-BR", {day: "2-digit", month: "2-digit"}) + " " + hm : hm;
+}
+
+$("chart").addEventListener("mousemove", (ev) => {
+  if (!CHART || !CHART._geo) return;
+  const r = ev.target.getBoundingClientRect(), x = ev.clientX - r.left, gm = CHART._geo;
+  const i = Math.round((x - gm.padL) / gm.slot - 0.5);
+  if (i < 0 || i >= gm.n) { HOVER = null; $("tip").style.display = "none"; drawChart(); return; }
+  HOVER = i; drawChart();
+  const c = CHART.candles[i], tip = $("tip");
+  const chg = (c.c / c.o - 1) * 100;
+  tip.innerHTML = `<div class="muted">${new Date(c.t * 1000).toLocaleString("pt-BR")}</div>
+    <div>Abert. <b>${fmt(c.o)}</b> · Máx. <b>${fmt(c.h)}</b></div><div>Mín. <b>${fmt(c.l)}</b> · Fech. <b>${fmt(c.c)}</b> <span class="${cls(chg)}">${sgn(chg, 2)}%</span></div>
+    <div class="muted" style="margin-top:4px">EMA 9 <b>${fmt(c.e9)}</b> · 21 <b>${fmt(c.e21)}</b></div><div class="muted">EMA 50 <b>${fmt(c.e50)}</b> · 200 <b>${fmt(c.e200)}</b></div><div class="muted">VWAP <b>${fmt(c.vw)}</b></div>`;
+  tip.style.display = "block";
+  const left = x + 16 + tip.offsetWidth > r.width ? x - tip.offsetWidth - 16 : x + 16;
+  tip.style.left = left + "px"; tip.style.top = Math.max(0, ev.clientY - r.top - 40) + "px";
+});
+$("chart").addEventListener("mouseleave", () => { HOVER = null; $("tip").style.display = "none"; drawChart(); });
+
+// ---------------------------------------------------------------- POSSO ENTRAR?
+async function openEntry() {
+  const risk = parseFloat($("riskIn").value || localStorageGet("risk") || "0");
+  if (risk > 0) $("riskIn").value = risk;
+  let e;
+  try { e = await getJSON("/api/entry" + (risk > 0 ? "?risk=" + risk : "")); } catch (err) { e = null; }
+  if (!e || !e.rows) { $("enStatus").textContent = "Sem leitura ainda."; $("dlg").showModal(); return; }
+  $("enRows").innerHTML = e.rows.map((r) => row(r.icon, r.name, r.value == null ? (r.detail || null) : r.value, r.value == null ? "" : r.detail, r.value != null)).join("");
+  $("enConf").innerHTML = `<b>${fmt(e.confluence, 0)}%</b>`;
+  $("enStatus").textContent = "STATUS: " + e.icon + " " + e.status;
+  const p = e.plan;
+  $("enPlan").innerHTML = p ? `<div class="plan">
+      <span>Lado</span><b class="${p.side === "COMPRA" ? "up" : "down"}">${p.side} (hipotético)</b>
+      <span>Entrada</span><b>${fmt(p.entry)} <span class="muted small">preço atual</span></b>
+      <span>Stop</span><b>${fmt(p.stop)} <span class="muted small">${esc(p.stop_rule)} · ${fmt(p.risk_points)} pts</span></b>
+      <span>Alvo</span><b>${fmt(p.target)} <span class="muted small">${esc(p.target_rule)}${p.next_level ? " · próximo nível " + fmt(p.next_level) : ""}</span></b>
+      <span>Risco/lote</span><b>US$ ${fmt(p.risk_per_lot_usd)}</b>
+      ${p.lots != null ? `<span>Lote p/ US$ ${fmt(p.risk_usd, 0)}</span><b>${fmt(p.lots, 2)} lote(s)</b>` : `<span>Risco</span><b class="muted">informe o risco em US$ abaixo</b>`}
+    </div>` : "";
+  $("enWarn").innerHTML = e.event_warning ? `<div class="warnline">⚠️ ${esc(e.event_warning)}</div>` : "";
+  $("enNote").textContent = e.note;
+  if (!$("dlg").open) $("dlg").showModal();
+}
+$("btnEntry").onclick = openEntry;
+$("riskGo").onclick = () => { localStorageSet("risk", $("riskIn").value); openEntry(); };
+$("dlgClose").onclick = () => $("dlg").close();
+$("btnRefresh").onclick = async () => { $("btnRefresh").disabled = true; try { await getJSON("/api/refresh"); } catch (e) { /* segue */ } $("btnRefresh").disabled = false; tick(); };
+$("btnTheme").onclick = () => {
+  const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  const nxt = cur === "light" ? "dark" : "light"; document.documentElement.dataset.theme = nxt; localStorageSet("theme", nxt); drawChart();
+};
+(function () { const t = localStorageGet("theme"); if (t) document.documentElement.dataset.theme = t; })();
+window.addEventListener("resize", () => drawChart());
+
+async function tick() { await loadState(); await loadChart(); loadHistory(); }
+buildToolbar(); tick(); setInterval(tick, 15000);
+</script>
+</body>
+</html>
