@@ -17,6 +17,20 @@ reais, Fed, inflação, geopolítica, fluxo, COT, opções, sentimento, técnico
 
 Python 3.10+, sem dependências externas.
 
+## 🥇 GOLD BIAS ENGINE — IA preditiva do ouro (viés → Telegram)
+
+Implementa a [Diretriz Operacional da IA Preditiva do Ouro](docs/DIRETRIZ_BIAS.md). Não opera. Lê o mercado inteiro (preço MT5
+da corretora, dólar, juros reais, FED, inflação, emprego, geopolítica, fluxo/ETFs, China/Índia, notícias e técnico) e
+entrega o **GOLD BIAS SCORE** (−100..+100), o viés **🟢 FORTE ALTA / ALTA · 🟡 NEUTRO · 🔴 BAIXA / FORTE BAIXA**, a confiança,
+três horizontes (horas · 1 dia · 5 dias), as contradições e a leitura da IA. Envia ao Telegram só quando algo muda
+(relatório, atualização, 🚨 alerta, 🚨 reversão, ⏳ evento de alto impacto) e grava cada previsão para medir **previsão × resultado**.
+
+```bash
+python market_ai_engine_v6.py bias --source mt5 --send          # monitor contínuo
+python market_ai_engine_v6.py bias --mode manha --send          # relatório da manhã  (--mode fechamento à tarde)
+python market_ai_engine_v6.py bias --mode stats                 # acerto por horizonte/fator/hora + pesos sugeridos
+```
+
 ## 4.0 — MARKET AI ENGINE
 
 > "Analisar vários mercados simultaneamente e operar somente aquele que apresentar a melhor vantagem estatística disponível

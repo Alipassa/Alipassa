@@ -121,6 +121,14 @@ class MarketSnapshot:
     inflation_surprise_sigma: Optional[float] = None  # (resultado − consenso) / desvio; >0 = inflação acima
     inflation_trend: Optional[float] = None           # -1 desacelerando .. +1 acelerando
 
+    # Emprego, atividade e demanda física (GOLD BIAS ENGINE — docs/DIRETRIZ_BIAS.md §8, §9, §12, §13)
+    employment_surprise_sigma: Optional[float] = None  # (resultado − consenso)/desvio; >0 = mercado de trabalho mais forte que o esperado
+    jobless_claims_change_pct: Optional[float] = None  # variação dos pedidos de seguro-desemprego (%)
+    economy_momentum: Optional[float] = None           # -1 recessão provável .. +1 crescimento forte (GDP/ISM/PMI/varejo)
+    china_demand: Optional[float] = None               # -1..+1 demanda física/importações/compras do PBoC
+    india_demand: Optional[float] = None               # -1..+1 importações, festivais, casamentos, rupia
+    us2y_change_bp: Optional[float] = None
+
     # Geopolítica (§10) e risco sistêmico (§11)
     geopolitical_risk: Optional[float] = None         # 0..100
     geopolitical_risk_change: Optional[float] = None  # variação recente

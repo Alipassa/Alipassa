@@ -1918,6 +1918,81 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bias_source(args: argparse.Namespace):
+    """Fontes do GOLD BIAS: MT5 da corretora + camadas macro do DataEngine (igual ao live); sem MT5, dados web; 'sample' = cenário sintético."""
+    if args.source == "sample":
+        return SampleSource(scenario=args.scenario)
+    from .data import DataEngine, DataEngineConfig
+    from .telegram import load_env_file
+
+    dcfg = DataEngineConfig(xau_symbol=args.symbol, calendar_path=args.calendar, enable_cot=not args.no_cot,
+                            enable_fred=not args.no_fred, enable_news=not args.no_news)
+    data = DataEngine(dcfg)
+    if args.source != "mt5":
+        return data
+    from .data.mt5 import MT5Config, MT5Source
+
+    mcfg = MT5Config.from_env(load_env_file())
+    if args.mt5_path:
+        mcfg.path = args.mt5_path
+    try:
+        return MT5Source(mcfg, data_engine=data)
+    except Exception as e:  # noqa: BLE001
+        print(f"MT5 indisponível ({e}); GOLD BIAS continua com dados web")
+        return data
+
+
+def cmd_bias(args: argparse.Namespace) -> int:
+    """GOLD BIAS ENGINE (docs/DIRETRIZ_BIAS.md): viés ALTA/BAIXA/NEUTRO do ouro, confiança, 3 horizontes e Telegram."""
+    from .bias import BiasMemory, BiasNotifier, GoldBiasEngine, format_bias_closing, format_bias_message, format_bias_morning, render_bias_stats
+
+    mem = BiasMemory(args.db) if args.db else None
+    if args.mode == "stats":
+        if mem is None:
+            print("use --db para ler o histórico de previsões")
+            return 1
+        print(render_bias_stats(mem))
+        mem.close()
+        return 0
+    engine = GoldBiasEngine()
+    sender = TelegramSender(dry_run=not args.send)
+    notifier = BiasNotifier(args.state)
+    source = _bias_source(args)
+    try:
+        while True:
+            snap = source.snapshot() if hasattr(source, "snapshot") else source.collect()
+            reading = engine.analyze(snap)
+            if mem is not None:
+                h1 = snap.candles.get("H1") or []
+                resolved = mem.resolve(h1, snap.time) if h1 else 0
+                if resolved:
+                    print(f"[memória] {resolved} previsão(ões) resolvida(s) contra o preço real")
+                mem.record(reading, args.mode)
+            if args.mode == "manha":
+                messages = [("relatorio", format_bias_morning(reading))]
+            elif args.mode == "fechamento":
+                messages = [("relatorio", format_bias_closing(reading, mem))]
+            elif args.mode == "relatorio":
+                messages = [("relatorio", format_bias_message(reading))]
+            else:
+                messages = notifier.decide(reading)
+            for kind, text in messages:
+                if not args.send:
+                    print(f"\n--- [{kind}] ---")
+                sender.send(text)
+            if not messages and args.verbose:
+                print(f"{reading.time:%H:%M} sem mudança relevante — {reading.emoji} {reading.label} {reading.score:+.0f} ({reading.confidence:.0f}%)")
+            if args.once or args.mode in ("manha", "fechamento", "relatorio"):
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if mem is not None:
+            mem.close()
+    return 0
+
+
 def cmd_event(args: argparse.Namespace) -> int:
     src = SampleSource(scenario="pre_evento")
     snap = src.snapshot()
@@ -2026,6 +2101,25 @@ def _main(argv: list[str]) -> int:
     e.add_argument("--gold", type=float, default=0.0)
     e.add_argument("--flow", type=float, default=0.0)
     e.set_defaults(func=cmd_event)
+
+    bi = sub.add_parser("bias", help="GOLD BIAS ENGINE: viés ALTA/BAIXA/NEUTRO do ouro (score, confiança, 3 horizontes, contradições) → Telegram")
+    bi.add_argument("--mode", choices=["monitor", "relatorio", "manha", "fechamento", "stats"], default="monitor",
+                    help="monitor = loop com atualizações/alertas só quando algo muda; manha/fechamento = relatórios do dia; stats = previsão × resultado")
+    bi.add_argument("--source", choices=["mt5", "web", "sample"], default="mt5", help="mt5 = preço da corretora + macro web (padrão)")
+    bi.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
+    bi.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")
+    bi.add_argument("--mt5-path", default=None)
+    bi.add_argument("--calendar", default=None, help="CSV/JSON de calendário econômico (eventos de alto impacto)")
+    bi.add_argument("--no-cot", action="store_true")
+    bi.add_argument("--no-fred", action="store_true")
+    bi.add_argument("--no-news", action="store_true")
+    bi.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (vazio desliga)")
+    bi.add_argument("--state", default="dados/gold_bias_state.json", help="estado anti-repetição entre reinícios")
+    bi.add_argument("--interval", type=int, default=300, help="segundos entre leituras no modo monitor")
+    bi.add_argument("--once", action="store_true")
+    bi.add_argument("--send", action="store_true", help="envia ao Telegram (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID do .env)")
+    bi.add_argument("--verbose", action="store_true")
+    bi.set_defaults(func=cmd_bias)
 
     lv = sub.add_parser("live", help="3.0 LIVE EXECUTION ENGINE — dados reais, decisão, execução no MT5 e gestão da posição")
     lv.add_argument("--symbol", default="GC=F", help="GC=F (futuro) ou XAUUSD=X (spot) para o Data Engine web")

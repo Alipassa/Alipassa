@@ -72,6 +72,7 @@ class SampleSource:
             s.put_call_ratio, s.implied_vol_change_pct = 1.05, 3.0
             s.sentiment, s.sentiment_change = 0.35, 0.2
             s.vix, s.vix_change_pct, s.credit_spread_bp = 15.0, 2.0, 330
+            s.employment_surprise_sigma, s.economy_momentum, s.china_demand, s.india_demand = -0.6, -0.1, 0.4, 0.2
             s.news = [NewsItem("CPI dos EUA abaixo do esperado; núcleo desacelera", "BLS", now, "macro", gold_impact=0.7, priced_in=0.3,
                                interpretation="aumenta probabilidade de corte do Fed → yields ↓ → dólar ↓ → suporte ao ouro")]
         elif sc == "confirmacao_alta":
@@ -86,6 +87,7 @@ class SampleSource:
             s.put_call_ratio = 1.0
             s.sentiment = 0.4
             s.vix, s.credit_spread_bp = 14.5, 320
+            s.employment_surprise_sigma, s.economy_momentum, s.china_demand = -0.5, 0.1, 0.3
         elif sc == "venda":
             s.candles = _candles_all(p, now, drift_per_hour=-1.4, vol=3.0, seed=self.seed)
             s.price_change_pct = -0.3
@@ -98,6 +100,7 @@ class SampleSource:
             s.put_call_ratio = 0.7
             s.sentiment, s.sentiment_change = -0.4, -0.2
             s.vix, s.credit_spread_bp = 13.0, 310
+            s.employment_surprise_sigma, s.economy_momentum, s.china_demand, s.india_demand = 1.1, 0.6, -0.2, -0.3
         elif sc == "reversao":
             # tendência de alta com distribuição (§16)
             s.candles = _candles_all(p, now, drift_per_hour=1.2, vol=3.0, seed=self.seed, volume_trend=-0.6)
