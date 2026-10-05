@@ -218,3 +218,22 @@ class PanelHttpAudit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewsReadingAudit(unittest.TestCase):
+    """Manchetes reais de 05/10/2026 lidas com sinal trocado pelo interpretador de palavras-chave."""
+
+    def impact(self, headline):
+        from gold_ai.bias import bias_score_news
+        from gold_ai.data.news import RuleInterpreter
+        from gold_ai.models import NewsItem
+        now = datetime.now(timezone.utc)
+        return bias_score_news(RuleInterpreter().interpret(NewsItem(headline, "FXStreet", now)), now).impact
+
+    def test_receding_hawkish_bets_are_positive(self):
+        self.assertGreater(self.impact("Silver Price Forecast: XAG/USD jumps to near $61.80 as hawkish Fed bets recede"), 0)
+        self.assertLess(self.impact("Rate-cut bets fade after hot CPI"), 0)
+
+    def test_gold_struggles_with_strong_dollar_is_negative(self):
+        self.assertLess(self.impact("Gold struggles as dovish Fed repricing meets stronger US Dollar, elevated yields"), 0)
+        self.assertGreater(self.impact("Gold rallies to record as Fed signals rate cut"), 0)

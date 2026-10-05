@@ -27,13 +27,17 @@ DEFAULT_FEEDS: tuple[str, ...] = (
 # palavra-chave → (categoria, impacto no ouro -1..+1)
 KEYWORDS: list[tuple[str, str, float]] = [
     # Fed / juros
-    (r"\b(rate cut|cuts? rates?|dovish|easing|corte de juros)\b", "fed", +0.6),
-    (r"\b(rate hike|hikes? rates?|hawkish|tightening|higher for longer|alta de juros)\b", "fed", -0.6),
+    (r"\b(rate[- ]cuts?|cuts? rates?|dovish|easing|corte de juros)\b", "fed", +0.6),
+    (r"\b(rate[- ]hikes?|hikes? rates?|hawkish|tightening|higher for longer|alta de juros)\b", "fed", -0.6),
     (r"\b(yields? (fall|drop|slide|tumble|decline)|treasury rally)\b", "macro", +0.4),
     (r"\b(yields? (rise|jump|surge|climb)|treasury sell-?off)\b", "macro", -0.4),
-    # dólar
-    (r"\b(dollar (falls|drops|weakens|slides|tumbles)|dxy (falls|drops))\b", "macro", +0.4),
-    (r"\b(dollar (rises|gains|strengthens|jumps|surges)|dxy (rises|jumps))\b", "macro", -0.4),
+    # dólar ("US Dollar", "U.S. dollar", "greenback"; adjetivos "stronger/weaker dollar")
+    (r"\b((us |u\.s\. )?(dollar|greenback) (falls|drops|weakens|slides|tumbles|slips|eases)|dxy (falls|drops)|(weaker|softer) (us |u\.s\. )?dollar)\b", "macro", +0.4),
+    (r"\b((us |u\.s\. )?(dollar|greenback) (rises|gains|strengthens|jumps|surges|firms)|dxy (rises|jumps)|(stronger|firmer) (us |u\.s\. )?dollar)\b", "macro", -0.4),
+    (r"\b(elevated|higher|rising) (treasury )?yields\b", "macro", -0.3),
+    # o próprio ouro na manchete ("gold struggles", "gold rallies")
+    (r"\bgold (struggles|falls|slides|drops|retreats|slumps|dips|declines|tumbles|loses|sinks|extends losses)\b", "flow", -0.6),
+    (r"\bgold (rises|rallies|jumps|climbs|gains|surges|soars|hits (a )?(fresh |new )?record|extends gains)\b", "flow", +0.6),
     # inflação / atividade
     (r"\b(inflation (cools|eases|slows|falls|softer)|cpi (falls|cools|misses))\b", "macro", +0.5),
     (r"\b(inflation (heats|accelerates|jumps|hotter|sticky)|cpi (jumps|beats|hotter))\b", "macro", -0.5),
@@ -51,6 +55,9 @@ KEYWORDS: list[tuple[str, str, float]] = [
     (r"\b(china (stimulus|easing|cuts? rrr))\b", "china", +0.3),
     (r"\b(china (slowdown|property crisis|deflation))\b", "china", +0.1),
 ]
+
+# expectativa que DIMINUI inverte o sentido do Fed: "hawkish Fed bets recede", "rate-cut bets fade"
+FADE_RE = re.compile(r"\b(recede|fade|ease|cool|unwind|pare|trim|dwindle|evaporate|wane|diminish|pared|trimmed)\w*\b")
 
 # extração de RESULTADO vs CONSENSO em manchetes
 RELEASE_RE = re.compile(
@@ -84,7 +91,10 @@ class RuleInterpreter:
         text = item.headline.lower()
         cat, impact, hits = "generic", 0.0, []
         for pattern, category, val in KEYWORDS:
-            if re.search(pattern, text):
+            m = re.search(pattern, text)
+            if m:
+                if category == "fed" and FADE_RE.search(text[m.end():m.end() + 45]):
+                    val = -val            # "hawkish Fed bets recede" = menos aperto → bom para o ouro (e o inverso)
                 hits.append(f"{category}:{val:+.1f}")
                 impact += val
                 if cat == "generic" or abs(val) > 0.4:
