@@ -32,8 +32,8 @@ KEYWORDS: list[tuple[str, str, float]] = [
     (r"\b(yields? (fall|drop|slide|tumble|decline)|treasury rally)\b", "macro", +0.4),
     (r"\b(yields? (rise|jump|surge|climb)|treasury sell-?off)\b", "macro", -0.4),
     # dólar ("US Dollar", "U.S. dollar", "greenback"; adjetivos "stronger/weaker dollar")
-    (r"\b((us |u\.s\. )?(dollar|greenback) (falls|drops|weakens|slides|tumbles|slips|eases)|dxy (falls|drops)|(weaker|softer) (us |u\.s\. )?dollar)\b", "macro", +0.4),
-    (r"\b((us |u\.s\. )?(dollar|greenback) (rises|gains|strengthens|jumps|surges|firms)|dxy (rises|jumps)|(stronger|firmer) (us |u\.s\. )?dollar)\b", "macro", -0.4),
+    (r"\b((us |u\.s\. )?(?<!zealand )(?<!australian )(?<!canadian )(?<!aussie )(?<!kiwi )(?<!singapore )(?<!hong kong )(dollar|greenback) (falls|drops|weakens|slides|tumbles|slips|eases|loses ground)|dxy (falls|drops)|(weaker|softer) (us |u\.s\. )?dollar)\b", "macro", +0.4),
+    (r"\b((us |u\.s\. )?(?<!zealand )(?<!australian )(?<!canadian )(?<!aussie )(?<!kiwi )(?<!singapore )(?<!hong kong )(dollar|greenback) (rises|gains|strengthens|jumps|surges|firms|regains( strength| ground)?|rebounds)|dxy (rises|jumps)|(stronger|firmer) (us |u\.s\. )?dollar)\b", "macro", -0.4),
     (r"\b(elevated|higher|rising) (treasury )?yields\b", "macro", -0.3),
     # o próprio ouro na manchete ("gold struggles", "gold rallies")
     (r"\bgold (struggles|falls|slides|drops|retreats|slumps|dips|declines|tumbles|loses|sinks|extends losses)\b", "flow", -0.6),

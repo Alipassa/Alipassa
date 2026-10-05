@@ -444,8 +444,11 @@ class DashState:
         facts += [f"Notícia: {n.headline[:90]}" for n in top_news]
         avail = [f for f in r.factors if f.available]
         d = r.direction or (1 if r.score > 0 else -1 if r.score < 0 else 0)
-        dom = max(avail, key=lambda f: abs(f.score), default=None)
+        # dominante = o fator mais forte A FAVOR da leitura; contrário = o mais forte CONTRA (nunca o mesmo fator)
+        dom = max((f for f in avail if d and f.score * d > 0), key=lambda f: abs(f.score), default=None)
         contra = max((f for f in avail if d and f.score * d < 0), key=lambda f: abs(f.score), default=None)
+        if dom is None and contra is None:
+            dom = max((f for f in avail if f.score), key=lambda f: abs(f.score), default=None)
         word = {1: "altista", -1: "baixista", 0: "lateral/incerto"}[r.direction]
         conclusion = f"Cenário {word}"
         rsi_h1 = ref.get("rsi")

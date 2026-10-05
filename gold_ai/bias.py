@@ -57,6 +57,8 @@ BIAS_SOURCE_TIERS: tuple[tuple[str, float], ...] = (
 )
 BIAS_RUMOR_RE = re.compile(r"\b(rumou?rs?|unconfirmed|sources (say|said)|reportedly|speculat\w*|boatos?|rumores|não confirmad\w*)\b", re.IGNORECASE)
 BIAS_EMPLOYMENT_RE = re.compile(r"\b(payrolls?|nfp|jobs|jobless|unemployment|desemprego|emprego|adp|jolts|hourly earnings)\b", re.IGNORECASE)
+BIAS_DOLLAR_RE = re.compile(r"\b(us dollar|u\.s\. dollar|dollar|greenback|dxy|usd)\b", re.IGNORECASE)
+BIAS_INFLATION_RE = re.compile(r"\b(cpi|pce|ppi|inflation|inflação|prices)\b", re.IGNORECASE)
 BIAS_NEWS_HALF_LIFE_MIN = 180.0
 
 BIAS_CLASSES: tuple[tuple[float, str, str], ...] = ((70, "FORTE ALTA", "🟢"), (40, "ALTA", "🟢"), (-39.999, "NEUTRO", "🟡"),
@@ -129,6 +131,8 @@ def bias_score_news(item: NewsItem, now: datetime) -> BiasNewsScore:
     cat = item.category or "generic"
     if cat == "macro" and BIAS_EMPLOYMENT_RE.search(item.headline):
         cat = "employment"
+    elif cat == "macro" and BIAS_DOLLAR_RE.search(item.headline) and not BIAS_INFLATION_RE.search(item.headline):
+        cat = "dollar"               # manchete de dólar alimenta o fator Dólar, não Inflação
     effective = item.gold_impact * (1.0 - bias_clip(item.priced_in, 0.0, 1.0))
     impact = int(max(-3, min(3, round(effective * 3))))
     age_min = max(0.0, (now - item.time).total_seconds() / 60.0)

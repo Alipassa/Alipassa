@@ -1947,6 +1947,20 @@ def cmd_bias(args: argparse.Namespace) -> int:
     from .bias import (BiasMemory, BiasNotifier, GoldBiasEngine, bias_apply_manual, format_bias_closing, format_bias_message, format_bias_morning,
                        render_bias_stats)
 
+    if args.mode == "checkup":                    # "está 100 % fazendo a sua função?" — confere peça por peça
+        from .bias_check import run_checkup
+        report = run_checkup(_bias_source(args), args.db or None, args.manual, send=args.send, port=args.port, mt5=args.source == "mt5")
+        text = report.render()
+        print(text)
+        try:
+            os.makedirs("logs", exist_ok=True)
+            with open(os.path.join("logs", "checkup.txt"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            print("\n(cópia salva em logs\\checkup.txt)")
+        except OSError:
+            pass
+        return 1 if report.errors else 0
+
     mem = BiasMemory(args.db) if args.db else None
     if args.mode == "stats":
         if mem is None:
@@ -2155,8 +2169,10 @@ def _main(argv: list[str]) -> int:
     pn.set_defaults(func=cmd_painel)
 
     bi = sub.add_parser("bias", help="GOLD BIAS ENGINE: viés ALTA/BAIXA/NEUTRO do ouro (score, confiança, 3 horizontes, contradições) → Telegram")
-    bi.add_argument("--mode", choices=["monitor", "relatorio", "manha", "fechamento", "stats"], default="monitor",
-                    help="monitor = loop com atualizações/alertas só quando algo muda; manha/fechamento = relatórios do dia; stats = previsão × resultado")
+    bi.add_argument("--mode", choices=["monitor", "relatorio", "manha", "fechamento", "stats", "checkup"], default="monitor",
+                    help="monitor = loop com atualizações/alertas só quando algo muda; manha/fechamento = relatórios do dia; stats = previsão × resultado; "
+                         "checkup = confere se tudo está funcionando (MT5, internet, IA, memória, painel, Telegram)")
+    bi.add_argument("--port", type=int, default=8765, help="porta do painel conferida no checkup")
     bi.add_argument("--source", choices=["mt5", "web", "sample"], default="mt5", help="mt5 = preço da corretora + macro web (padrão)")
     bi.add_argument("--scenario", default="premove_alta", help="cenário do --source sample")
     bi.add_argument("--symbol", default="GC=F", help="símbolo Yahoo do ouro para o DataEngine")

@@ -237,3 +237,24 @@ class NewsReadingAudit(unittest.TestCase):
     def test_gold_struggles_with_strong_dollar_is_negative(self):
         self.assertLess(self.impact("Gold struggles as dovish Fed repricing meets stronger US Dollar, elevated yields"), 0)
         self.assertGreater(self.impact("Gold rallies to record as Fed signals rate cut"), 0)
+
+
+class RealScreenAudit(unittest.TestCase):
+    """Problemas vistos no painel real (05/10/2026)."""
+
+    def test_other_currency_dollar_is_not_usd(self):
+        from gold_ai.bias import bias_score_news
+        from gold_ai.data.news import RuleInterpreter
+        from gold_ai.models import NewsItem
+        now = datetime.now(timezone.utc)
+        n = bias_score_news(RuleInterpreter().interpret(NewsItem("New Zealand Dollar slides toward one-year low as US Dollar regains strength",
+                                                                 "www.fxstreet.com", now)), now)
+        self.assertLess(n.impact, 0)
+        self.assertEqual(n.factor, "dolar")
+
+    def test_brain_dominant_and_contrary_differ(self):
+        s = SampleSource("neutro").snapshot()
+        s.geopolitical_risk, s.geopolitical_risk_change = 15, 15
+        b = DashState().update(s, GoldBiasEngine().analyze(s))["brain"]
+        if b["dominant"] and b["contrary"]:
+            self.assertNotEqual(b["dominant"].split(" — ")[0], b["contrary"].split(" — ")[0])
