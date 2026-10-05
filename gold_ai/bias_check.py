@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -134,7 +135,7 @@ def check_mt5(rep: CheckReport, env: dict[str, str], client_factory: Optional[An
     if missing or not counts:
         rep.add(g, "Candles M1…W1", "❌", "sem " + ", ".join(missing or list(TF_TO_MT5)), "abra o gráfico do ouro no MT5 uma vez para baixar o histórico")
     else:
-        few = [tf for tf, n in counts.items() if n < 200]
+        few = [tf for tf, n in counts.items() if n < (100 if tf == "W1" else 200)]   # W1 usa 160 de propósito (> 3 anos)
         rep.add(g, "Candles M1…W1", "⚠️" if few else "✅", " · ".join(f"{tf} {n}" for tf, n in counts.items()),
                 ("pouco histórico em " + ", ".join(few) + " (EMA 200 precisa de 200 candles)") if few else "")
     try:
@@ -171,6 +172,9 @@ def check_web_and_analysis(rep: CheckReport, snapshot: Any, status: dict[str, st
             continue
         if st == "ok":
             rep.add(g, label, "✅")
+        elif key == "news" and re.search(r"\b([1-9]\d*) notícias", st):
+            got = re.search(r"\b(\d+) notícias", st).group(1)
+            rep.add(g, label, "✅", f"{got} notícias (uma fonte fora do ar agora; as outras cobrem)")
         elif key in CHECK_OPTIONAL_WEB or "usando último" in st:
             rep.add(g, label, "⚠️", st.replace("erro: ", ""), "opcional — a IA segue sem isso" if key != "calendar" else "")
         else:
