@@ -2012,7 +2012,7 @@ def cmd_painel(args: argparse.Namespace) -> int:
     notifier = BiasNotifier(None if sample else args.state)
     sender = TelegramSender() if args.send else None
     service = DashService(_bias_source(args), GoldBiasEngine(), mem, notifier, sender, interval=args.interval, manual_path=args.manual,
-                          contract_oz=args.contract)
+                          contract_oz=args.contract, live_interval=args.live_interval)
     srv = dash_serve(service, args.host, args.port, open_browser=not args.no_browser)
     try:
         srv.serve_forever()
@@ -2146,6 +2146,7 @@ def _main(argv: list[str]) -> int:
     pn.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (histórico × resultado; vazio desliga)")
     pn.add_argument("--state", default="dados/painel_state.json", help="estado anti-repetição dos alertas do painel (separado do comando bias)")
     pn.add_argument("--interval", type=int, default=60, help="segundos entre leituras")
+    pn.add_argument("--live-interval", type=float, default=2.0, help="segundos entre leituras do MT5 para preço/gráfico em tempo real (0 desliga)")
     pn.add_argument("--host", default="127.0.0.1", help="127.0.0.1 = só este computador (0.0.0.0 abre na rede local)")
     pn.add_argument("--port", type=int, default=8765)
     pn.add_argument("--contract", type=float, default=100.0, help="onças por lote (XAUUSD padrão = 100)")

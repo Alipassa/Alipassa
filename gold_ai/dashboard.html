@@ -295,14 +295,9 @@ function renderState(s) {
   const st = s.status || {};
   const mt5 = st.mt5 === "ok";
   $("srcdot").style.background = cssVar(mt5 ? "--good" : "--warn");
-  $("srctxt").textContent = mt5 ? "MT5 conectado" : (st.mt5 ? "MT5: " + st.mt5 : "dados web/sample");
+  if (!LIVE_OK) $("srctxt").textContent = mt5 ? "MT5 conectado" : (st.mt5 ? "MT5: " + st.mt5 : "dados web/sample");
   $("upd").textContent = "atualizado " + new Date(s.updated).toLocaleTimeString("pt-BR") + (s.service && s.service.error ? " · ⚠ " + s.service.error : "");
-  const p = s.price;
-  $("price").textContent = "$" + fmt(p.price);
-  $("chg").innerHTML = p.change_pct == null ? "—" : `<span class="${cls(p.change_pct)}">${p.change_pct > 0 ? "▲" : p.change_pct < 0 ? "▼" : "■"} ${sgn(p.change_pct, 2)}% (${sgn(p.change_abs, 2)}) no dia</span>`;
-  $("hi").textContent = fmt(p.high); $("lo").textContent = fmt(p.low);
-  $("wchg").innerHTML = `<span class="${cls(p.window_change_pct)}">${sgn(p.window_change_pct, 2)}%</span>`;
-  $("psrc").textContent = p.source;
+  if (!LIVE_OK) renderPrice(s.price);                   // com MT5 ao vivo o preço vem de /api/live (a cada 2 s)
   const b = s.bias;
   $("biasLabel").textContent = b.emoji + " " + b.label;
   $("biasLabel").className = "bias-label " + (b.direction > 0 ? "up" : b.direction < 0 ? "down" : "flat");
@@ -351,6 +346,33 @@ function renderState(s) {
   $("alerts").innerHTML = s.alerts.length ? s.alerts.map((a) => `<div class="alert"><span class="muted">${new Date(a.time).toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"})} · ${esc(a.kind)}</span>\n${esc(a.text)}</div>`).join("") : '<div class="muted">Nenhum alerta ainda — a IA só avisa quando algo muda.</div>';
   $("disc").textContent = s.disclaimer;
 }
+
+function renderPrice(p) {
+  if (!p || p.price == null) return;
+  $("price").textContent = "$" + fmt(p.price);
+  $("chg").innerHTML = p.change_pct == null ? "—" : `<span class="${cls(p.change_pct)}">${p.change_pct > 0 ? "▲" : p.change_pct < 0 ? "▼" : "■"} ${sgn(p.change_pct, 2)}% (${sgn(p.change_abs, 2)}) no dia</span>`;
+  $("hi").textContent = fmt(p.high); $("lo").textContent = fmt(p.low);
+  $("wchg").innerHTML = `<span class="${cls(p.window_change_pct)}">${sgn(p.window_change_pct, 2)}%</span>`;
+  $("psrc").textContent = p.source + (p.live && p.bid != null ? ` · bid ${fmt(p.bid)} / ask ${fmt(p.ask)}` : "");
+}
+
+let LIVE_OK = false, LIVE_BUSY = false;
+async function liveTick() {                              // TEMPO REAL: preço a cada 2 s, gráfico a cada 3 s (só com MT5)
+  if (LIVE_BUSY || document.hidden) return;
+  LIVE_BUSY = true;
+  try {
+    const l = await getJSON("/api/live");
+    LIVE_OK = !!(l.price && l.price.live);
+    if (LIVE_OK) {
+      renderPrice(l.price);
+      const st = l.status || {};
+      $("srcdot").style.background = cssVar(st.mt5 === "ok" ? "--good" : "--warn");
+      $("srctxt").textContent = st.mt5 === "ok" ? "MT5 ao vivo · " + new Date(l.price.time).toLocaleTimeString("pt-BR") : "MT5: " + st.mt5;
+    }
+  } catch (e) { LIVE_OK = false; } finally { LIVE_BUSY = false; }
+}
+let LAST_CHART = 0;
+async function liveChart() { if (LIVE_OK && !document.hidden && !BUSY && Date.now() - LAST_CHART > 2500) { LAST_CHART = Date.now(); await loadChart(); } }
 
 async function loadHistory() {
   try {
@@ -576,6 +598,7 @@ async function tick() {
   try { await loadState(); await loadChart(); await loadHistory(); } finally { BUSY = false; }
 }
 buildToolbar(); tick(); setInterval(tick, 15000);
+liveTick(); setInterval(liveTick, 2000); setInterval(liveChart, 3000);
 </script>
 </body>
 </html>

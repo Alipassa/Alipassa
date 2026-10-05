@@ -161,3 +161,38 @@ class DashboardMT5Tests(unittest.TestCase):
         self.assertEqual(p["status"].get("mt5"), "ok")
         self.assertAlmostEqual(p["price"]["price"], 2700.0)
         self.assertTrue(svc.state.chart("H1")["candles"])
+
+
+class DashboardLiveTests(unittest.TestCase):
+    def test_chart_and_price_follow_mt5_without_full_cycle(self):
+        """TEMPO REAL: o preço/gráfico seguem o MT5 a cada leitura rápida, sem esperar a análise completa."""
+        import time as _time
+        from types import SimpleNamespace
+        from gold_ai.data.mt5 import MT5Config, MT5Source
+        from tests.test_mt5 import FakeMT5
+
+        class Moving(FakeMT5):
+            bump = 0.0
+
+            def symbol_info_tick(self, symbol):
+                return SimpleNamespace(bid=2699.8 + self.bump, ask=2700.2 + self.bump)
+
+        fake = Moving()
+        svc = DashService(MT5Source(MT5Config(), mt5=fake), GoldBiasEngine(), None, None, None, interval=3600, live_interval=0.2)
+        self.assertTrue(svc.live_mode)
+        svc.start()
+        try:
+            end = _time.time() + 10
+            while svc.cycles == 0 and _time.time() < end:
+                _time.sleep(0.1)
+            p1 = svc.live_json()["price"]["price"]
+            fake.bump = 25.0
+            _time.sleep(0.8)
+            p2 = svc.live_json()["price"]["price"]
+            self.assertAlmostEqual(p2 - p1, 25.0, places=2)
+            with svc.lock:
+                self.assertAlmostEqual(svc.state.chart("H1", svc.live)["price"], p2, places=2)
+            self.assertEqual(svc.cycles, 1, "a análise completa não rodou de novo")
+        finally:
+            svc.shutdown()
+        self.assertTrue(fake.shutdown_called, "MT5 fechado pela thread de tempo real")

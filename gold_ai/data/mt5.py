@@ -240,30 +240,42 @@ class MT5Source:
         self.data_engine = data_engine
         self.status: dict[str, str] = {}
 
+    def fetch_broker(self) -> tuple[dict, float, float]:
+        """Lê candles (M1…W1) e o tick da corretora. Única parte que fala com o MT5 — chame sempre da mesma thread."""
+        if not self.client.connected:
+            self.client.connect()
+        candles = {tf: self.client.candles(tf) for tf in TF_TO_MT5}
+        candles = {k: v for k, v in candles.items() if v}
+        if not candles.get("H1"):
+            raise MT5Error("sem candles H1")
+        bid, ask = self.client.tick()
+        return candles, bid, ask
+
+    def apply_broker(self, s: MarketSnapshot, candles: dict, bid: float, ask: float, now: Optional[datetime] = None) -> MarketSnapshot:
+        """Preenche o snapshot com o preço da corretora (cálculo puro, sem chamar o MT5)."""
+        now = now or datetime.now(timezone.utc)
+        s.candles = candles  # o broker é a fonte primária do preço
+        s.price = (bid + ask) / 2
+        s.price_source = "mt5"
+        s.atr = _atr(candles["H1"]) or s.atr
+        m5 = candles.get("M5") or candles["H1"]
+        w = self.cfg.window_minutes
+        ref = next((c for c in reversed(m5[:-1]) if (m5[-1].time - c.time).total_seconds() >= w * 60), m5[0])
+        s.price_change_pct = (m5[-1].close / ref.close - 1) * 100 if ref.close else 0.0
+        recent = [c for c in m5 if (now - c.time).total_seconds() <= w * 60]
+        vol = sum(c.volume for c in recent)
+        if vol > 0:
+            s.order_flow_imbalance = round((sum(c.volume for c in recent if c.close > c.open) - sum(c.volume for c in recent if c.close < c.open)) / vol, 3)
+        return s
+
     def snapshot(self) -> MarketSnapshot:
         now = datetime.now(timezone.utc)
         s = self.data_engine.collect(now) if self.data_engine is not None else MarketSnapshot(time=now)
         if self.data_engine is not None:
             self.status.update(self.data_engine.status)
         try:
-            if not self.client.connected:
-                self.client.connect()
-            candles = {tf: self.client.candles(tf) for tf in TF_TO_MT5}
-            candles = {k: v for k, v in candles.items() if v}
-            if not candles.get("H1"):
-                raise MT5Error("sem candles H1")
-            s.candles = candles  # o broker é a fonte primária do preço
-            bid, ask = self.client.tick()
-            s.price = (bid + ask) / 2
-            s.atr = _atr(candles["H1"]) or s.atr
-            m5 = candles.get("M5") or candles["H1"]
-            w = self.cfg.window_minutes
-            ref = next((c for c in reversed(m5[:-1]) if (m5[-1].time - c.time).total_seconds() >= w * 60), m5[0])
-            s.price_change_pct = (m5[-1].close / ref.close - 1) * 100 if ref.close else 0.0
-            recent = [c for c in m5 if (now - c.time).total_seconds() <= w * 60]
-            vol = sum(c.volume for c in recent)
-            if vol > 0:
-                s.order_flow_imbalance = round((sum(c.volume for c in recent if c.close > c.open) - sum(c.volume for c in recent if c.close < c.open)) / vol, 3)
+            candles, bid, ask = self.fetch_broker()
+            self.apply_broker(s, candles, bid, ask, now)
             self.status["mt5"] = "ok"
         except MT5Error as e:
             self.status["mt5"] = f"erro: {e}"

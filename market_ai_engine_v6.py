@@ -89,7 +89,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 __version__ = "6.0.0"
-__build__ = "2026-10-05 13:40 UTC · bb28313"
+__build__ = "2026-10-05 13:48 UTC · 840dcb6+"
 
 
 # ============================================================================
@@ -4601,30 +4601,42 @@ class MT5Source:
         self.data_engine = data_engine
         self.status: dict[str, str] = {}
 
+    def fetch_broker(self) -> tuple[dict, float, float]:
+        """Lê candles (M1…W1) e o tick da corretora. Única parte que fala com o MT5 — chame sempre da mesma thread."""
+        if not self.client.connected:
+            self.client.connect()
+        candles = {tf: self.client.candles(tf) for tf in TF_TO_MT5}
+        candles = {k: v for k, v in candles.items() if v}
+        if not candles.get("H1"):
+            raise MT5Error("sem candles H1")
+        bid, ask = self.client.tick()
+        return candles, bid, ask
+
+    def apply_broker(self, s: MarketSnapshot, candles: dict, bid: float, ask: float, now: Optional[datetime] = None) -> MarketSnapshot:
+        """Preenche o snapshot com o preço da corretora (cálculo puro, sem chamar o MT5)."""
+        now = now or datetime.now(timezone.utc)
+        s.candles = candles  # o broker é a fonte primária do preço
+        s.price = (bid + ask) / 2
+        s.price_source = "mt5"
+        s.atr = _atr(candles["H1"]) or s.atr
+        m5 = candles.get("M5") or candles["H1"]
+        w = self.cfg.window_minutes
+        ref = next((c for c in reversed(m5[:-1]) if (m5[-1].time - c.time).total_seconds() >= w * 60), m5[0])
+        s.price_change_pct = (m5[-1].close / ref.close - 1) * 100 if ref.close else 0.0
+        recent = [c for c in m5 if (now - c.time).total_seconds() <= w * 60]
+        vol = sum(c.volume for c in recent)
+        if vol > 0:
+            s.order_flow_imbalance = round((sum(c.volume for c in recent if c.close > c.open) - sum(c.volume for c in recent if c.close < c.open)) / vol, 3)
+        return s
+
     def snapshot(self) -> MarketSnapshot:
         now = datetime.now(timezone.utc)
         s = self.data_engine.collect(now) if self.data_engine is not None else MarketSnapshot(time=now)
         if self.data_engine is not None:
             self.status.update(self.data_engine.status)
         try:
-            if not self.client.connected:
-                self.client.connect()
-            candles = {tf: self.client.candles(tf) for tf in TF_TO_MT5}
-            candles = {k: v for k, v in candles.items() if v}
-            if not candles.get("H1"):
-                raise MT5Error("sem candles H1")
-            s.candles = candles  # o broker é a fonte primária do preço
-            bid, ask = self.client.tick()
-            s.price = (bid + ask) / 2
-            s.atr = _atr(candles["H1"]) or s.atr
-            m5 = candles.get("M5") or candles["H1"]
-            w = self.cfg.window_minutes
-            ref = next((c for c in reversed(m5[:-1]) if (m5[-1].time - c.time).total_seconds() >= w * 60), m5[0])
-            s.price_change_pct = (m5[-1].close / ref.close - 1) * 100 if ref.close else 0.0
-            recent = [c for c in m5 if (now - c.time).total_seconds() <= w * 60]
-            vol = sum(c.volume for c in recent)
-            if vol > 0:
-                s.order_flow_imbalance = round((sum(c.volume for c in recent if c.close > c.open) - sum(c.volume for c in recent if c.close < c.open)) / vol, 3)
+            candles, bid, ask = self.fetch_broker()
+            self.apply_broker(s, candles, bid, ask, now)
             self.status["mt5"] = "ok"
         except MT5Error as e:
             self.status["mt5"] = f"erro: {e}"
@@ -16103,6 +16115,7 @@ zona de risco, eventos) em M1…D1 · alertas · histórico "o que a IA disse ×
 """
 
 
+import copy
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -16615,10 +16628,14 @@ class DashState:
                 "note": "Apoio à decisão: o painel não envia ordens. Confirme preço, spread e risco na corretora antes de executar."}
 
     # ---- gráfico
-    def chart(self, tf: str, risk_usd: Optional[float] = None) -> dict:
+    def chart(self, tf: str, live: Optional[dict] = None) -> dict:
         s, r = self.snapshot, self.reading
         if s is None or r is None:
             return {"tf": tf, "candles": []}
+        if live and live.get("candles"):             # tempo real: candles e preço da corretora lidos há ≤ 2 s
+            s = copy.copy(s)
+            s.candles = live["candles"]
+            s.price = live["price"]
         full = s.candles.get(tf) or []
         if not full:
             return {"tf": tf, "candles": [], "available": [k for k in DASH_TFS if s.candles.get(k)]}
@@ -16658,7 +16675,20 @@ class DashState:
                 prev = label
         entry = self.payload.get("entry", {}).get("plan") if self.payload else None
         return {"tf": tf, "candles": candles, "levels": levels, "fib": fib, "events": events, "signals": signals[-30:], "entry": entry,
-                "price": s.price, "available": [k for k in DASH_TFS if s.candles.get(k)]}
+                "price": s.price, "available": [k for k in DASH_TFS if s.candles.get(k)], "live": bool(live and live.get("candles")),
+                "updated": (live or {}).get("time") or (self.updated.isoformat() if self.updated else None)}
+
+    def live_price(self, live: Optional[dict]) -> dict:
+        """Bloco de preço com o tick ao vivo (o resto do painel segue a última análise)."""
+        if self.snapshot is None:
+            return {}
+        s = self.snapshot
+        if live and live.get("candles"):
+            s = copy.copy(s)
+            s.candles, s.price = live["candles"], live["price"]
+        out = self.price_block(s)
+        out.update({"bid": (live or {}).get("bid"), "ask": (live or {}).get("ask"), "time": (live or {}).get("time"), "live": bool(live)})
+        return out
 
     # ---- alertas
     def buy_sell_alert(self, light: dict, s: MarketSnapshot, r: BiasReading, macro: list[dict], tech: dict) -> Optional[str]:
@@ -16760,7 +16790,7 @@ class DashService:
 
     def __init__(self, source: Any, engine: Optional[GoldBiasEngine] = None, memory: Optional[BiasMemory] = None,
                  notifier: Optional[BiasNotifier] = None, sender: Any = None, interval: int = 60, manual_path: Optional[str] = None,
-                 contract_oz: float = DASH_CONTRACT_OZ, record_every: int = 300) -> None:
+                 contract_oz: float = DASH_CONTRACT_OZ, record_every: int = 300, live_interval: float = 2.0) -> None:
         self.source = source
         self.engine = engine or GoldBiasEngine()
         self.memory = memory
@@ -16780,11 +16810,60 @@ class DashService:
         self.cycles_failed = 0
         self.thread: Optional[threading.Thread] = None
         self.allow_any_host = False                  # True só com --host 0.0.0.0 (rede local)
+        # TEMPO REAL: com MT5, uma thread só lê candles + tick a cada `live_interval` s (única thread que fala com o MT5);
+        # a análise completa (macro/notícias da internet, mais lenta) reaproveita esses candles sem chamar o MT5.
+        self.live_mode = live_interval > 0 and hasattr(source, "fetch_broker") and hasattr(source, "apply_broker")
+        self.live_interval = live_interval
+        self.live: Optional[dict] = None
+        self.live_thread: Optional[threading.Thread] = None
         if notifier is not None and isinstance(notifier.state.get("painel_alerta"), dict):
             self.state.last_entry_alert = notifier.state["painel_alerta"]
 
     def snapshot(self) -> MarketSnapshot:
-        return self.source.snapshot() if hasattr(self.source, "snapshot") else self.source.collect()
+        if not self.live_mode:
+            return self.source.snapshot() if hasattr(self.source, "snapshot") else self.source.collect()
+        now = datetime.now(timezone.utc)
+        de = getattr(self.source, "data_engine", None)
+        s = de.collect(now) if de is not None else MarketSnapshot(time=now)
+        if de is not None:
+            self.source.status.update(de.status)
+        if self.live_thread is None:                 # sem a thread de tempo real (ex.: ciclo chamado direto): lê o MT5 aqui mesmo
+            self.live_once()
+        end = time.time() + 15
+        while self.live is None and time.time() < end and not self.stop_event.is_set():   # 1ª leitura do MT5 ainda chegando
+            time.sleep(0.2)
+        live = self.live
+        if live is not None:
+            self.source.apply_broker(s, live["candles"], live["bid"], live["ask"], now)
+        return s
+
+    def live_once(self) -> None:
+        """Uma leitura rápida do MT5 (candles + tick). Só a thread de tempo real chama isto."""
+        try:
+            candles, bid, ask = self.source.fetch_broker()
+            live = {"candles": candles, "bid": bid, "ask": ask, "price": (bid + ask) / 2, "time": datetime.now(timezone.utc).isoformat()}
+            with self.lock:
+                self.live = live
+            self.source.status["mt5"] = "ok"
+        except Exception as e:  # noqa: BLE001 — MT5 fechado/desconectado: tenta de novo no próximo giro
+            self.source.status["mt5"] = f"erro: {e}"
+            try:
+                self.source.client.connected = False
+            except Exception:  # noqa: BLE001
+                pass
+
+    def run_live(self) -> None:
+        while not self.stop_event.is_set():
+            self.live_once()
+            self.stop_event.wait(self.live_interval)
+        try:
+            self.source.client.close()                 # fecha o MT5 na mesma thread que o abriu
+        except Exception:  # noqa: BLE001
+            pass
+
+    def live_json(self) -> dict:
+        with self.lock:
+            return {"price": self.state.live_price(self.live), "status": dict(getattr(self.source, "status", {}) or {})}
 
     def cycle(self) -> dict:
         self.cycles_started += 1
@@ -16849,6 +16928,9 @@ class DashService:
         return p
 
     def start(self) -> threading.Thread:
+        if self.live_mode:
+            self.live_thread = threading.Thread(target=self.run_live, name="gold-painel-mt5", daemon=True)
+            self.live_thread.start()
         self.thread = threading.Thread(target=self.run_loop, name="gold-painel-coleta", daemon=True)
         self.thread.start()
         return self.thread
@@ -16859,6 +16941,8 @@ class DashService:
         self.wake_event.set()
         if self.thread is not None:
             self.thread.join(timeout=30)
+        if self.live_thread is not None:
+            self.live_thread.join(timeout=10)          # a thread de tempo real fecha o MT5 ao sair
         with self.lock:
             if self.memory is not None:
                 try:
@@ -16866,7 +16950,7 @@ class DashService:
                 except Exception:  # noqa: BLE001
                     pass
             client = getattr(self.source, "client", None)
-            if client is not None and hasattr(client, "close"):
+            if client is not None and hasattr(client, "close") and self.live_thread is None:
                 try:
                     client.close()
                 except Exception:  # noqa: BLE001
@@ -16934,8 +17018,10 @@ def dash_handler(service: DashService) -> type:
             elif u.path == "/api/chart":
                 tf = (q.get("tf") or ["H1"])[0].upper()
                 with service.lock:
-                    data = service.state.chart(tf if tf in DASH_TFS else "H1")
+                    data = service.state.chart(tf if tf in DASH_TFS else "H1", service.live)
                 self._json(data)
+            elif u.path == "/api/live":
+                self._json(service.live_json())
             elif u.path == "/api/entry":
                 with service.lock:
                     data = service.state.entry_for(num("risk"))
@@ -17271,14 +17357,9 @@ function renderState(s) {
   const st = s.status || {};
   const mt5 = st.mt5 === "ok";
   $("srcdot").style.background = cssVar(mt5 ? "--good" : "--warn");
-  $("srctxt").textContent = mt5 ? "MT5 conectado" : (st.mt5 ? "MT5: " + st.mt5 : "dados web/sample");
+  if (!LIVE_OK) $("srctxt").textContent = mt5 ? "MT5 conectado" : (st.mt5 ? "MT5: " + st.mt5 : "dados web/sample");
   $("upd").textContent = "atualizado " + new Date(s.updated).toLocaleTimeString("pt-BR") + (s.service && s.service.error ? " · ⚠ " + s.service.error : "");
-  const p = s.price;
-  $("price").textContent = "$" + fmt(p.price);
-  $("chg").innerHTML = p.change_pct == null ? "—" : `<span class="${cls(p.change_pct)}">${p.change_pct > 0 ? "▲" : p.change_pct < 0 ? "▼" : "■"} ${sgn(p.change_pct, 2)}% (${sgn(p.change_abs, 2)}) no dia</span>`;
-  $("hi").textContent = fmt(p.high); $("lo").textContent = fmt(p.low);
-  $("wchg").innerHTML = `<span class="${cls(p.window_change_pct)}">${sgn(p.window_change_pct, 2)}%</span>`;
-  $("psrc").textContent = p.source;
+  if (!LIVE_OK) renderPrice(s.price);                   // com MT5 ao vivo o preço vem de /api/live (a cada 2 s)
   const b = s.bias;
   $("biasLabel").textContent = b.emoji + " " + b.label;
   $("biasLabel").className = "bias-label " + (b.direction > 0 ? "up" : b.direction < 0 ? "down" : "flat");
@@ -17327,6 +17408,33 @@ function renderState(s) {
   $("alerts").innerHTML = s.alerts.length ? s.alerts.map((a) => `<div class="alert"><span class="muted">${new Date(a.time).toLocaleTimeString("pt-BR", {hour: "2-digit", minute: "2-digit"})} · ${esc(a.kind)}</span>\n${esc(a.text)}</div>`).join("") : '<div class="muted">Nenhum alerta ainda — a IA só avisa quando algo muda.</div>';
   $("disc").textContent = s.disclaimer;
 }
+
+function renderPrice(p) {
+  if (!p || p.price == null) return;
+  $("price").textContent = "$" + fmt(p.price);
+  $("chg").innerHTML = p.change_pct == null ? "—" : `<span class="${cls(p.change_pct)}">${p.change_pct > 0 ? "▲" : p.change_pct < 0 ? "▼" : "■"} ${sgn(p.change_pct, 2)}% (${sgn(p.change_abs, 2)}) no dia</span>`;
+  $("hi").textContent = fmt(p.high); $("lo").textContent = fmt(p.low);
+  $("wchg").innerHTML = `<span class="${cls(p.window_change_pct)}">${sgn(p.window_change_pct, 2)}%</span>`;
+  $("psrc").textContent = p.source + (p.live && p.bid != null ? ` · bid ${fmt(p.bid)} / ask ${fmt(p.ask)}` : "");
+}
+
+let LIVE_OK = false, LIVE_BUSY = false;
+async function liveTick() {                              // TEMPO REAL: preço a cada 2 s, gráfico a cada 3 s (só com MT5)
+  if (LIVE_BUSY || document.hidden) return;
+  LIVE_BUSY = true;
+  try {
+    const l = await getJSON("/api/live");
+    LIVE_OK = !!(l.price && l.price.live);
+    if (LIVE_OK) {
+      renderPrice(l.price);
+      const st = l.status || {};
+      $("srcdot").style.background = cssVar(st.mt5 === "ok" ? "--good" : "--warn");
+      $("srctxt").textContent = st.mt5 === "ok" ? "MT5 ao vivo · " + new Date(l.price.time).toLocaleTimeString("pt-BR") : "MT5: " + st.mt5;
+    }
+  } catch (e) { LIVE_OK = false; } finally { LIVE_BUSY = false; }
+}
+let LAST_CHART = 0;
+async function liveChart() { if (LIVE_OK && !document.hidden && !BUSY && Date.now() - LAST_CHART > 2500) { LAST_CHART = Date.now(); await loadChart(); } }
 
 async function loadHistory() {
   try {
@@ -17552,6 +17660,7 @@ async function tick() {
   try { await loadState(); await loadChart(); await loadHistory(); } finally { BUSY = false; }
 }
 buildToolbar(); tick(); setInterval(tick, 15000);
+liveTick(); setInterval(liveTick, 2000); setInterval(liveChart, 3000);
 </script>
 </body>
 </html>
@@ -19407,7 +19516,7 @@ def cmd_painel(args: argparse.Namespace) -> int:
     notifier = BiasNotifier(None if sample else args.state)
     sender = TelegramSender() if args.send else None
     service = DashService(_bias_source(args), GoldBiasEngine(), mem, notifier, sender, interval=args.interval, manual_path=args.manual,
-                          contract_oz=args.contract)
+                          contract_oz=args.contract, live_interval=args.live_interval)
     srv = dash_serve(service, args.host, args.port, open_browser=not args.no_browser)
     try:
         srv.serve_forever()
@@ -19541,6 +19650,7 @@ def _main(argv: list[str]) -> int:
     pn.add_argument("--db", default="dados/gold_bias.db", help="SQLite de previsões (histórico × resultado; vazio desliga)")
     pn.add_argument("--state", default="dados/painel_state.json", help="estado anti-repetição dos alertas do painel (separado do comando bias)")
     pn.add_argument("--interval", type=int, default=60, help="segundos entre leituras")
+    pn.add_argument("--live-interval", type=float, default=2.0, help="segundos entre leituras do MT5 para preço/gráfico em tempo real (0 desliga)")
     pn.add_argument("--host", default="127.0.0.1", help="127.0.0.1 = só este computador (0.0.0.0 abre na rede local)")
     pn.add_argument("--port", type=int, default=8765)
     pn.add_argument("--contract", type=float, default=100.0, help="onças por lote (XAUUSD padrão = 100)")
