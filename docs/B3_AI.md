@@ -56,6 +56,11 @@ pip install MetaTrader5
 python -m b3_ai --fonte mt5 painel      # ou scripts\rodar_b3_ai_mt5.bat
 ```
 
+Ibovespa e DI futuro também passam a vir do MetaTrader quando existem no terminal. Qualquer outra série do painel pode
+vir de lá se a corretora tiver o símbolo: defina `MT5_<ATIVO>` no `.env` (ex.: `MT5_IRON=<símbolo do minério>`,
+`MT5_ES=WSP$N`). A biblioteca do MetaTrader para Python não dá acesso às notícias do terminal; as notícias seguem dos
+feeds públicos.
+
 `MT5_PATH` aponta o `terminal64.exe` (ex.: `C:\Program Files\Mt5xp\terminal64.exe`); `MT5_WIN`/`MT5_WDO` só são
 necessários se o painel não achar o símbolo sozinho (tenta `WIN$N`, `WIN$`, `WIN@`... e depois o contrato com tick mais
 recente). Somente leitura: nenhuma ordem é enviada. Mercados internacionais e a tabela de ações continuam no feed público.

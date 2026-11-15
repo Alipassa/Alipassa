@@ -400,10 +400,13 @@ class Engine:
         self.rt = {}
         if self.mt5 is not None:
             try:
-                self.rt = self.mt5.snapshot()
+                self.rt = self.mt5.snapshot([a.key for a in ASSETS])
                 for k, a in TARGETS.items():
                     for tf in ("1D", "5", "15"):
                         h[(a.tv, tf)] = self.rt[(k, tf)]
+                for k, bars in self.rt["extras"].items():      # Ibovespa, DI e o que mais a corretora tiver (MT5_<ATIVO>)
+                    h[(BY_KEY[k].tv, "1D")] = bars
+                    self.delays[BY_KEY[k].tv] = 0
             except Exception as e:  # noqa: BLE001 — sem MetaTrader o painel segue com o dado público
                 self.rt = {}
                 notes.append(f"MetaTrader 5 indisponível ({e}) — usando cotações públicas com ~15 min de atraso")

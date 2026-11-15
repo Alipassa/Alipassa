@@ -350,3 +350,22 @@ class AuditTest(unittest.TestCase):
         self.assertIn("comprovada", audit.verdict(0.54, 825))
         self.assertIn("não distinguível", audit.verdict(0.52, 800))
         self.assertIn("pior", audit.verdict(0.45, 2000))
+
+
+class MT5ExtrasTest(unittest.TestCase):
+    def test_extra_series_only_when_symbol_exists_with_enough_history(self):
+        from b3_ai.data.mt5 import MT5Feed
+
+        class Deep(FakeMT5):
+            def copy_rates_from_pos(self, sym, tf, start, n):
+                if sym not in self.names:
+                    return None
+                k = 400 if sym in ("IBOV", "FERRO") else 3
+                return [{"time": 1_700_000_000 + i * 86400, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "tick_volume": 1, "real_volume": 5}
+                        for i in range(k)]
+
+        f = MT5Feed(Deep(names=("WIN$N", "WDO$N", "IBOV", "FERRO", "DI1$N")), env={"MT5_UTC_OFFSET_HOURS": "-3", "MT5_IRON": "FERRO"})
+        snap = f.snapshot(["IBOV", "DI", "IRON", "BRENT"])
+        self.assertEqual(sorted(snap["extras"]), ["IBOV", "IRON"])     # DI tem histórico curto; BRENT não existe no terminal
+        self.assertEqual(snap["simbolos"]["IRON"], "FERRO")
+        self.assertNotIn("DI", snap["simbolos"])

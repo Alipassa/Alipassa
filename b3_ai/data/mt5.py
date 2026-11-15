@@ -8,6 +8,12 @@ Ative com `python -m b3_ai painel --fonte mt5` (ou B3AI_FONTE=mt5 no .env). Vari
     MT5_WIN    símbolo do mini índice na corretora (padrão: descobre sozinho — WIN$N, WIN$, WIN@...)
     MT5_WDO    símbolo do mini dólar
     MT5_UTC_OFFSET_HOURS   fuso do servidor (B3: -3, detectado pelo último tick quando o pregão está aberto)
+    MT5_<ATIVO>            qualquer outra série do painel pelo MetaTrader, se a corretora tiver o símbolo. Ex.:
+                           MT5_IRON=<símbolo do minério de ferro>, MT5_BRENT=..., MT5_ES=WSP$N. Ibovespa (IBOV) e
+                           DI futuro (DI1$N) são procurados sozinhos.
+
+A biblioteca oficial do MetaTrader para Python entrega preços, barras e ticks; ela NÃO dá acesso às notícias do
+terminal, por isso as notícias do painel continuam vindo dos feeds públicos.
 
 O ProfitChart/XPTrader (Nelogica) NÃO é MetaTrader e não oferece esta interface: é preciso o terminal MetaTrader 5.
 """
@@ -26,6 +32,7 @@ except Exception:  # noqa: BLE001
     _mt5 = None
 
 CANDIDATES = {"WIN": ["WIN$N", "WIN$", "WIN@N", "WIN@", "WIN$D", "WINFUT"], "WDO": ["WDO$N", "WDO$", "WDO@N", "WDO@", "WDO$D", "WDOFUT"]}
+EXTRAS = {"IBOV": ["IBOV"], "DI": ["DI1$N", "DI1$", "DI1@N", "DI1@"]}      # procurados sozinhos; os demais só por MT5_<ATIVO>
 TF = {"1D": "TIMEFRAME_D1", "5": "TIMEFRAME_M5", "15": "TIMEFRAME_M15"}
 BARS = {"1D": 1800, "5": 20000, "15": 12000}       # o terminal entrega muito mais histórico intraday que o feed público
 
@@ -106,13 +113,33 @@ class MT5Feed:
         return {"ultimo": last, "bid": float(getattr(t, "bid", 0) or 0), "ask": float(getattr(t, "ask", 0) or 0),
                 "ts": float(getattr(t, "time", 0) or 0) - self.offset_h * 3600} if last else None
 
-    def snapshot(self) -> dict:
+    def extras(self, keys: list[str]) -> dict[str, list[tuple]]:
+        """Séries diárias de outros ativos do painel que existam no terminal: {chave: barras}. Falhas são ignoradas."""
+        out: dict[str, list[tuple]] = {}
+        for key in keys:
+            forced = self.env.get(f"MT5_{key}")
+            for sym in ([forced] if forced else []) + EXTRAS.get(key, []):
+                try:
+                    if not sym or not self.mt5.symbol_select(sym, True):
+                        continue
+                    self.symbols[key] = sym
+                    bars = self.bars(key, "1D")
+                    if len(bars) >= 300:            # histórico curto demais não serve para a regressão
+                        out[key] = bars
+                        break
+                except Exception:  # noqa: BLE001
+                    pass
+                self.symbols.pop(key, None)
+        return out
+
+    def snapshot(self, extra_keys: Optional[list[str]] = None) -> dict:
         """{("WIN","1D"): barras, ("WIN","5"): ..., "ticks": {...}, "simbolos": {...}} — reconecta se o terminal caiu."""
         if not self.connected:
             self.connect()
         try:
             out: dict = {(k, tf): self.bars(k, tf) for k in ("WIN", "WDO") for tf in TF}
             out["ticks"] = {k: self.last_price(k) for k in ("WIN", "WDO")}
+            out["extras"] = self.extras(extra_keys or [])
         except Exception:
             self.close()
             raise
