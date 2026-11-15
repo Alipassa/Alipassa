@@ -5,7 +5,7 @@ Requer Windows, o MetaTrader 5 da corretora aberto e logado, e o pacote oficial:
 
 Ative com `python -m b3_ai painel --fonte mt5` (ou B3AI_FONTE=mt5 no .env). Variáveis opcionais:
     MT5_PATH   caminho do terminal64.exe (só se houver mais de um MetaTrader instalado)
-    MT5_WIN    símbolo do mini índice na corretora (padrão: descobre sozinho — WIN$N, WIN$, WIN@...)
+    MT5_WIN    símbolo do mini índice na corretora (padrão: descobre sozinho — WIN@, WIN$N, WIN$...)
     MT5_WDO    símbolo do mini dólar
     MT5_UTC_OFFSET_HOURS   fuso do servidor (B3: -3, detectado pelo último tick quando o pregão está aberto)
     MT5_<ATIVO>            qualquer outra série do painel pelo MetaTrader, se a corretora tiver o símbolo. Ex.:
@@ -31,8 +31,9 @@ try:  # pragma: no cover — só existe no Windows com o terminal instalado
 except Exception:  # noqa: BLE001
     _mt5 = None
 
-CANDIDATES = {"WIN": ["WIN$N", "WIN$", "WIN@N", "WIN@", "WIN$D", "WINFUT"], "WDO": ["WDO$N", "WDO$", "WDO@N", "WDO@", "WDO$D", "WDOFUT"]}
-EXTRAS = {"IBOV": ["IBOV"], "DI": ["DI1$N", "DI1$", "DI1@N", "DI1@"]}      # procurados sozinhos; os demais só por MT5_<ATIVO>
+# XP: "WIN@" (série contínua por vencimento, ajuste proporcional). Outras corretoras: "WIN$N", "WIN$"...
+CANDIDATES = {"WIN": ["WIN@", "WIN$N", "WIN$", "WIN@N", "WIN$D", "WINFUT"], "WDO": ["WDO@", "WDO$N", "WDO$", "WDO@N", "WDO$D", "WDOFUT"]}
+EXTRAS = {"IBOV": ["IBOV"], "DI": ["DI1@", "DI1$N", "DI1$", "DI1@N"]}      # procurados sozinhos; os demais só por MT5_<ATIVO>
 TF = {"1D": "TIMEFRAME_D1", "5": "TIMEFRAME_M5", "15": "TIMEFRAME_M15"}
 BARS = {"1D": 1800, "5": 20000, "15": 12000}       # o terminal entrega muito mais histórico intraday que o feed público
 

@@ -289,7 +289,7 @@ class FakeMT5:
     """Imitação mínima do módulo MetaTrader5 para testar a leitura sem o terminal."""
     TIMEFRAME_D1, TIMEFRAME_M5, TIMEFRAME_M15 = "D1", "M5", "M15"
 
-    def __init__(self, names=("WIN$N", "WDO$N"), ok=True):
+    def __init__(self, names=("WIN@", "WDO@", "WINZ26", "IBOV"), ok=True):
         self.names, self.ok, self.shut = set(names), ok, False
 
     def initialize(self, **kw):
@@ -322,7 +322,7 @@ class MT5Test(unittest.TestCase):
         from b3_ai.data.mt5 import MT5Feed
         f = MT5Feed(FakeMT5(), env={"MT5_UTC_OFFSET_HOURS": "-3"})
         snap = f.snapshot()
-        self.assertEqual(snap["simbolos"], {"WIN": "WIN$N", "WDO": "WDO$N"})
+        self.assertEqual(snap["simbolos"], {"WIN": "WIN@", "WDO": "WDO@"})     # nomes do MetaTrader da XP
         self.assertEqual(snap[("WIN", "5")][0], (1_700_000_000.0, 100.0, 101.0, 99.0, 100.5, 7.0))   # servidor (Brasília) → UTC
         self.assertEqual(snap["ticks"]["WIN"]["ultimo"], 174500.0)
 
