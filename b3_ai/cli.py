@@ -18,7 +18,7 @@ from .model import BRT
 
 
 def load_env(path: str = ".env") -> None:
-    """Lê CHAVE=valor do .env (sem sobrescrever o que já está no ambiente): ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN..."""
+    """Lê CHAVE=valor do .env (sem sobrescrever o que já está no ambiente): TELEGRAM_BOT_TOKEN, B3AI_ALERTA..."""
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8") as f:
@@ -70,11 +70,11 @@ def cmd_analise(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_analise_ia(args: argparse.Namespace) -> int:
+def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
     r = e.run_ai()
-    print(r.get("texto") or f"analista com IA indisponível: {r.get('erro')}")
+    print(r.get("texto") or f"opinião indisponível: {r.get('erro')}")
     return 0 if r.get("ok") else 1
 
 
@@ -94,8 +94,8 @@ def main(argv: list[str] | None = None) -> int:
     rl.set_defaults(func=cmd_relatorio)
     an = sub.add_parser("analise", help="quadro de probabilidades no terminal")
     an.set_defaults(func=cmd_analise)
-    ia = sub.add_parser("analise-ia", help="análise escrita pelo Claude a partir dos dados (precisa de ANTHROPIC_API_KEY)")
-    ia.set_defaults(func=cmd_analise_ia)
+    op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
+    op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)
     load_env()
     if not getattr(args, "func", None):

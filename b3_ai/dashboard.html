@@ -149,7 +149,7 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
 <section class="grid g2">
   <div class="card"><h2>Síntese para decisão — mini índice</h2><div id="synth"></div></div>
   <div class="card">
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Análise do analista com IA (Claude)</h2><span class="sp"></span><button id="btnAI">Pedir análise agora</button></div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Opinião sobre os dados do painel</h2><span class="sp"></span><button id="btnAI" class="on">Analisar agora</button><button id="btnClaude" title="Copia os dados do painel e abre o claude.ai: é só colar na conversa">Levar os dados para o Claude</button></div>
     <div id="aiBody" class="md small" style="margin-top:8px"></div>
   </div>
 </section>
@@ -394,11 +394,10 @@ function mdLite(t){let h="",ul=false;const inl=x=>esc(x).replace(/\*\*(.+?)\*\*/
     if(/^#{1,3}\s/.test(ln))h+="<h2>"+inl(ln.replace(/^#+\s*/,""))+"</h2>";else if(ln.trim())h+="<p>"+inl(ln)+"</p>"}
   return h+(ul?"</ul>":"")}
 function renderAI(){
-  const I=S.ia||{},off=S.ia_indisponivel;
-  $("btnAI").disabled=!!off;
-  $("aiBody").innerHTML=I.ok?mdLite(I.texto)+`<p class="muted">Escrito por ${esc(I.modelo||"Claude")} em ${hhmm(I.ts)} a partir dos dados deste painel. Opinião de apoio: não altera as probabilidades calculadas e não é recomendação de investimento.</p>`
-    :off?`<span class="muted">Desativado: ${esc(off)}. Com a chave configurada, o Claude lê todos os dados deste painel (estatística, exterior, notícias, analistas) e escreve a análise completa do mini índice e do mini dólar.</span>`
-    :I.erro?`<span class="down">Não foi possível gerar: ${esc(I.erro)}</span>`:'<span class="muted">Clique em “Pedir análise agora” para o Claude ler os dados e escrever a análise (leva até 1 minuto).</span>';
+  const I=S.ia||{};
+  $("aiBody").innerHTML=I.ok?mdLite(I.texto)+`<p class="muted">${esc(I.modelo||"")} · gerada ${hhmm(I.ts)}. Aperte “Analisar agora” para refazer com os dados mais recentes.</p>`
+    :I.erro?`<span class="down">Não foi possível gerar: ${esc(I.erro)}</span>`
+    :'<span class="muted"><b>Analisar agora</b>: o painel lê tudo o que está na tela (probabilidades, tendência, exterior, notícias, analistas, agenda, níveis) e escreve a opinião na hora, sem custo.<br><br><b>Levar os dados para o Claude</b>: copia os mesmos dados e abre o claude.ai — cole na conversa (Ctrl+V) para o Claude dar a opinião dele, usando a sua conta, sem cobrança por uso.</span>';
 }
 function renderAnalysts(){
   const F=S.focus||{},rv=(x,inv)=>x==null||Math.abs(x)<.005?'<span class="faint">estável</span>':`<span class="${(x>0)!==inv?"up":"down"}">${x>0?"▲ +":"▼ "}${nf(x,2)} em 4 sem.</span>`;
@@ -515,7 +514,11 @@ async function loadB3(){
 $("prev").onclick=()=>{page--;renderB3Table()};$("next").onclick=()=>{page++;renderB3Table()};
 $("btnRefresh").onclick=async()=>{$("btnRefresh").textContent="Atualizando…";try{await fetch("/api/refresh",{method:"POST"})}catch(e){}setTimeout(()=>{load();loadB3();$("btnRefresh").textContent="Atualizar agora"},6000)};
 $("btnNotif").onclick=async()=>{notifOn=true;beep();try{if("Notification" in window&&Notification.permission!=="granted")await Notification.requestPermission()}catch(e){}$("btnNotif").textContent="Alertas sonoros ativos";$("btnNotif").classList.add("on")};
-$("btnAI").onclick=async()=>{$("btnAI").disabled=true;$("btnAI").textContent="Analisando…";try{const r=await fetch("/api/analise",{method:"POST"});S.ia=await r.json()}catch(e){S.ia={ok:false,erro:"sem resposta do servidor"}}$("btnAI").textContent="Pedir análise agora";renderAI()};
+$("btnAI").onclick=async()=>{$("btnAI").textContent="Analisando…";try{const r=await fetch("/api/analise",{method:"POST"});S.ia=await r.json()}catch(e){S.ia={ok:false,erro:"sem resposta do servidor"}}$("btnAI").textContent="Analisar agora";renderAI()};
+$("btnClaude").onclick=async()=>{const b=$("btnClaude");let t="";try{t=await (await fetch("/api/prompt")).text()}catch(e){}
+  if(!t){b.textContent="Sem dados ainda";return}
+  let ok=false;try{await navigator.clipboard.writeText(t);ok=true}catch(e){try{const a=document.createElement("textarea");a.value=t;document.body.appendChild(a);a.select();ok=document.execCommand("copy");a.remove()}catch(e2){}}
+  b.textContent=ok?"Copiado — cole no Claude (Ctrl+V)":"Não consegui copiar";if(ok)window.open("https://claude.ai/new","_blank","noopener");setTimeout(()=>b.textContent="Levar os dados para o Claude",8000)};
 load();loadB3();setInterval(load,15000);setInterval(loadB3,60000);
 </script>
 </body>

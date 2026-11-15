@@ -53,7 +53,7 @@ def markdown(s: dict) -> str:
         L.append("")
     ia = s.get("ia") or {}
     if ia.get("ok"):
-        L += ["## Análise do analista com IA (Claude)", "", ia["texto"].replace("\n## ", "\n### "), ""]
+        L += ["## Opinião do painel", "", ia["texto"].replace("\n## ", "\n### "), ""]
     L += ["## Leitura da IA", ""] + [f"- {x}" for x in s.get("leitura", [])] + [""]
     for k in ("WIN", "WDO"):
         a = s["ativos"].get(k)

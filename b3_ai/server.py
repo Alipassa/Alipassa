@@ -9,7 +9,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import report
+from . import opinion, report
 from .engine import Engine
 
 HTML_PATH = os.path.join(os.path.dirname(__file__), "dashboard.html")
@@ -73,6 +73,13 @@ def make_handler(svc: Service):
                 self._json(_clean(st))
             elif path == "/api/b3":
                 self._json(_clean({"papeis": eng.b3.get("papeis", [])}))
+            elif path == "/api/prompt":
+                with eng.lock:
+                    st = eng.state
+                if st.get("ok"):
+                    self._send(opinion.prompt(st).encode(), "text/plain; charset=utf-8")
+                else:
+                    self._send("Ainda sem dados.".encode(), "text/plain; charset=utf-8", 503)
             elif path in ("/relatorio", "/relatorio.md"):
                 with eng.lock:
                     st = eng.state
@@ -90,7 +97,7 @@ def make_handler(svc: Service):
                 svc.wake.set()
                 self._json({"ok": True})
             elif self.path == "/api/analise":
-                self._json(_clean(svc.engine.run_ai()))   # síncrono: a análise leva de alguns segundos a ~1 min
+                self._json(_clean(svc.engine.run_ai()))   # opinião local, instantânea
             else:
                 self._send(b"nao encontrado", "text/plain", 404)
 

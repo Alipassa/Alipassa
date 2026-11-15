@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from . import alerts, analyst_llm, market_b3, model as M, news_ai, stats as st, technical as T
+from . import alerts, market_b3, model as M, news_ai, opinion, stats as st, technical as T
 from .data import bcb, calendar as cal, focus, news, tradingview as tv, yahoo
 from .data.http import DataError
 from .memory import Memory
@@ -155,13 +155,10 @@ class Engine:
         return cached
 
     def run_ai(self) -> dict:
-        """Pede ao analista com IA a leitura do estado atual (chamado pelo botão do painel ou pelo comando analise-ia)."""
+        """Opinião do painel sobre os dados atuais (botão "Analisar agora"). Local e gratuita: não chama serviço externo."""
         with self.lock:
             st_now = self.state
-        if not st_now.get("ok"):
-            self.ai = {"ok": False, "erro": "ainda sem dados de mercado", "ts": time.time()}
-        else:
-            self.ai = {**analyst_llm.analyze(st_now), "ts": time.time()}
+        self.ai = {**opinion.build(st_now), "ts": time.time()}
         with self.lock:
             self.state["ia"] = self.ai
         return self.ai
@@ -222,9 +219,10 @@ class Engine:
                 add(f"Estatística — {hz.lower()}", 1 if r["p_alta"] >= 0.55 else -1 if r["p_alta"] <= 0.45 else 0,
                     f"{r['p_alta'] * 100:.0f}% alta × {r['p_queda'] * 100:.0f}% queda" + ("" if r["validado"] else " (não validado)"))
         c = w["confronto"]
-        ext = c["pos_fechamento_total"] if c["pos_fechamento"] else c["implicito"]
+        novo = bool(c["pos_fechamento"]) and abs(c["pos_fechamento_total"]) >= 0.05
+        ext = c["pos_fechamento_total"] if novo else c["implicito"]
         add("Exterior", 1 if ext > 0.15 else -1 if ext < -0.15 else 0,
-            f"implica {ext:+.2f}% " + ("desde o fechamento da B3" if c["pos_fechamento"] else "no último pregão"))
+            f"implica {ext:+.2f}% " + ("desde o fechamento da B3" if novo else "no último pregão"))
         n = s.get("noticias")
         if n:
             sc = n["diario"]["score_ibov"]
@@ -512,7 +510,7 @@ class Engine:
             "ok": True, "atualizado": now, "duracao": round(time.time() - t0, 2), "mercado_aberto": is_open,
             "pregao": win_last, "pregao_fechado": complete, "ativos": ativos, "cotacoes": quotes, "brasil_ny": ny,
             "b3": self.b3["resumo"], "noticias": news_state, "bcb": self._bcb(), "focus": self._focus(),
-            "ia": self.ai, "ia_indisponivel": analyst_llm.available(), "placar": self.mem.scoreboard(),
+            "ia": self.ai, "placar": self.mem.scoreboard(),
             "historico": self.mem.recent(), "avisos": notes,
             "atraso": "Cotações públicas com ~15 min de atraso (B3 e bolsas dos EUA).",
             "aviso_legal": "Probabilidades estatísticas calculadas sobre histórico real e validadas fora da amostra. "
@@ -617,7 +615,7 @@ class Engine:
             out.append("Maiores pesos do exterior: " + "; ".join(
                 (f"{x['nome']} {x['var']:+.1f} pb" if x["tipo"] == "yield" else f"{x['nome']} {x['var']:+.2f}%")
                 + f" → {x['contrib']:+.2f} p.p." for x in c["fatores"][:3]) + ".")
-        if c["pos_fechamento"]:
+        if c["pos_fechamento"] and abs(c["pos_fechamento_total"]) >= 0.05:
             out.append(f"Depois do fechamento da B3 o exterior já andou e implica {c['pos_fechamento_total']:+.2f}% na abertura "
                        "— esse ajuste já está nas probabilidades diária e semanal.")
         if d:

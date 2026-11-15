@@ -262,3 +262,24 @@ class NewFeaturesTest(unittest.TestCase):
         self.assertEqual(x["state"][-2], 1)
         self.assertEqual(x["signal"][-1], -1)
         self.assertIn("PARA BAIXO", T.reversal_read(bars)["rotulo"])
+
+
+class OpinionTest(unittest.TestCase):
+    def test_opinion_is_local_and_reads_trend(self):
+        from b3_ai import opinion
+        lv = {k: 100.0 for k in ("pivot", "r1", "r2", "s1", "s2", "max_ant", "min_ant", "fech_ant", "atr14", "rsi14", "mm20", "mm50", "mm200", "max20", "min20")}
+        row = {"horizonte": "Diário", "alvo": "seg", "p_alta": 0.5, "p_queda": 0.5, "sinal": "NEUTRO", "validado": True,
+               "f80_min": 90.0, "f80_max": 110.0, "f80_cobertura": 0.82}
+        conf = {"leitura": "em linha.", "pos_fechamento": [], "pos_fechamento_total": 0.0, "implicito": 0, "realizado": 0,
+                "descolamento": 0, "descolamento_sigma": 0, "r2": 0.1, "fatores": []}
+        s = {"ok": True, "atualizado": 1794756548.0, "cotacoes": [], "sintese": {"rotulo": "SINAIS DIVIDIDOS", "alta": 1, "queda": 3, "neutro": 1, "lado": 0},
+             "ativos": {"WIN": {"nome": "Mini Índice", "preco": 100.0, "var": 0.5, "max": 1, "min": 1, "sigma_dia_pct": 1, "niveis": lv,
+                                "prob": [row], "confronto": conf,
+                                "tendencias": [{"prazo": "Semana", "tendencia": "ALTA"}, {"prazo": "Mês", "tendencia": "BAIXA"}]}}}
+        r = opinion.build(s)
+        self.assertTrue(r["ok"])
+        self.assertIn("repique dentro de tendência de baixa", r["texto"])
+        self.assertIn("cara-ou-coroa", r["texto"])
+        self.assertIn("lado vendedor", r["texto"])
+        self.assertIn("DADOS DO PAINEL", opinion.prompt(s))
+        self.assertFalse(opinion.build({"ok": False})["ok"])

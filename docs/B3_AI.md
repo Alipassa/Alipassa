@@ -18,7 +18,7 @@ python -m b3_ai analise       # quadro de probabilidades no terminal
 | Destaque | número verde grande = probabilidade de ALTA; vermelho grande = probabilidade de QUEDA, para o ativo (WIN ou WDO) e o horizonte escolhidos; faixa de preço de 80 % |
 | Tendência e extremos | tendência do dia, da semana e do mês; extremo de compra/venda em 5 min (RSI, bandas, VWAP) e sinal de reversão com o acerto medido |
 | Síntese para decisão | quantas frentes independentes (estatística, exterior, notícias, analistas, Focus, amplitude, técnica) apontam para cada lado |
-| Analista com IA | o Claude lê todos os dados do painel e escreve a análise do mini índice e do mini dólar (opcional, sob demanda) |
+| Opinião sobre os dados | botão que analisa tudo o que está na tela e escreve a opinião na hora, sem custo; outro botão leva os dados prontos para o Claude |
 | Quadro de probabilidades | 5 min · 10 min · 30 min · 1 hora · fecho de hoje (com pregão aberto) · diário · semanal, com sinal, validação e acerto fora da amostra |
 | Confronto exterior × Brasil | quanto os mercados internacionais implicavam para o ativo, quanto ele fez, o descolamento e a contribuição de cada fator |
 | Notícias e deduções | tema, cadeia de causa e efeito, setores e ações atingidos com a variação real do dia (o mercado confirmou a notícia?) e o efeito medido no histórico do mini índice |
@@ -81,16 +81,15 @@ Prever a DIREÇÃO do preço a partir de agora com 80 % de acerto não é alcan�
 por outro; quem mostra esse número em backtest ajustou o modelo ao passado. O que o painel faz é separar o que é confiável
 (faixas, choques, contexto) do que é quase cara-ou-coroa, e avisar quando algo raro e forte acontece.
 
-## Analista com IA (opcional)
+## Opinião sobre os dados (sem custo)
 
-```bash
-pip install anthropic
-# no .env:  ANTHROPIC_API_KEY=sua-chave
-python -m b3_ai analise-ia        # ou o botão "Pedir análise agora" no painel
-```
+Dois botões no painel, os dois usando só o que já está na tela:
 
-O Claude recebe o estado completo do painel e escreve cenário, notícias que importam, viés do mini índice e do mini dólar
-e riscos. É texto de apoio: não altera as probabilidades. Cada análise consome créditos da sua conta da API.
+- **Analisar agora** — o painel lê probabilidades, tendência, exterior, notícias, analistas, agenda e níveis e escreve a
+  opinião na hora (`opinion.py`, regras de leitura de mercado; local, sem chave e sem serviço pago). No terminal:
+  `python -m b3_ai opiniao`.
+- **Levar os dados para o Claude** — copia os mesmos dados, com as instruções, e abre o claude.ai; basta colar na conversa
+  para o Claude dar a opinião dele usando a sua conta. Nada é enviado automaticamente.
 
 ## Limites
 

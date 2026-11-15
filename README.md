@@ -3,7 +3,7 @@
 Painel local com **todas as empresas da B3**, mercados internacionais, confronto exterior × Brasil, notícias com deduções,
 visão de analistas, agenda de eventos (Fed, Copom), tendência dia/semana/mês, sinal de reversão, **alertas de 90 %** e
 **quadro de probabilidades do mini índice (WIN) e do mini dólar (WDO)** para 5 min · 10 min · 30 min · 1 h · diário · semanal,
-além do relatório e de um analista com IA opcional. Dados reais, Python puro, somente leitura. Documentação: [docs/B3_AI.md](docs/B3_AI.md).
+além do relatório e de um botão que analisa os dados da tela e dá a opinião (sem custo). Dados reais, Python puro, somente leitura. Documentação: [docs/B3_AI.md](docs/B3_AI.md).
 
 ```bash
 python -m b3_ai painel        # http://127.0.0.1:8766  (Windows: scripts\rodar_b3_ai.bat)
