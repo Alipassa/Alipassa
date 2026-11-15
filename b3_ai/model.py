@@ -129,6 +129,74 @@ def bands(p_up: float, sigma: float) -> dict:
             "queda_forte": down_strong, "sigma_pct": sigma * 100}
 
 
+def band80(abs_z: list[float]) -> Optional[dict]:
+    """Faixa de 80 %: multiplicador de σ que contém 80 % dos movimentos. Estimado na 1ª metade do histórico e
+    conferido na 2ª (cobertura fora da amostra) — é a previsão que de fato acerta ~80 % das vezes."""
+    n = len(abs_z)
+    if n < 100:
+        return None
+    half = n // 2
+    q = sorted(abs_z[:half])[int(0.8 * half)]
+    test = abs_z[half:]
+    return {"mult": sorted(abs_z)[int(0.8 * n)], "cobertura": sum(1 for z in test if z <= q) / len(test), "n": len(test)}
+
+
+def sessions(bars: list[tuple]) -> list[list[tuple]]:
+    out: list[list[tuple]] = []
+    for i, b in enumerate(bars):
+        if i == 0 or b[0] - bars[i - 1][0] > 3600:
+            out.append([])
+        out[-1].append(b)
+    return out
+
+
+PERSIST_BINS = [0.0, 0.25, 0.5, 1.0, 1.5, 99.0]
+
+
+def close_persistence(bars15: list[tuple]) -> Optional[dict]:
+    """"O dia já andou X: com que frequência fecha do mesmo lado do fechamento anterior?" — tabela empírica.
+
+    z = variação do dia até agora ÷ (volatilidade diária × √fração restante do pregão). ATENÇÃO: a referência é o
+    fechamento ANTERIOR, não o preço atual; acerto alto aqui não é vantagem para quem entra agora.
+    """
+    ss = [x for x in sessions(bars15) if len(x) >= 30]
+    if len(ss) < 40:
+        return None
+    closes = [x[-1][4] for x in ss]
+    bins = [[0, 0] for _ in PERSIST_BINS[:-1]]
+    for k in range(21, len(ss)):
+        sd = st.std([closes[j] / closes[j - 1] - 1 for j in range(k - 20, k)]) or 1e-9
+        prev, sx, fin = closes[k - 1], ss[k], closes[k]
+        if fin == prev:
+            continue
+        for i in range(2, len(sx) - 2):
+            z = (sx[i][4] / prev - 1) / (sd * math.sqrt((len(sx) - 1 - i) / len(sx)))
+            if z == 0:
+                continue
+            b = next(j for j in range(len(bins)) if abs(z) < PERSIST_BINS[j + 1])
+            bins[b][0] += 1
+            bins[b][1] += 1 if (z > 0) == (fin > prev) else 0
+    sd_now = st.std([closes[j] / closes[j - 1] - 1 for j in range(len(closes) - 20, len(closes))]) or 1e-9
+    return {"bins": [{"de": PERSIST_BINS[j], "ate": PERSIST_BINS[j + 1], "n": n, "acerto": h / n if n else None}
+                     for j, (n, h) in enumerate(bins)], "sd": sd_now, "sessoes": len(ss) - 21}
+
+
+def event_study(target: "DailyData", series: list[float], direction: int, thr: float = 1.5) -> Optional[dict]:
+    """Quando `series` (retornos diários alinhados ao alvo) teve um movimento forte na `direction` (> thr σ):
+    o que o alvo fez no mesmo pregão e no seguinte. É a medida histórica de "como esse tipo de notícia pesa"."""
+    n = len(target.ret)
+    same, nxt = [], []
+    for t in range(260, n - 1):
+        sd = st.std(series[t - 250:t])
+        if sd and series[t] * direction > thr * sd:
+            same.append(target.ret[t])
+            nxt.append(target.ret[t + 1])
+    if len(same) < 15:
+        return None
+    return {"n": len(same), "dia_media": st.mean(same) * 100, "dia_pct_alta": sum(1 for r in same if r > 0) / len(same),
+            "seguinte_media": st.mean(nxt) * 100, "seguinte_pct_alta": sum(1 for r in nxt if r > 0) / len(nxt)}
+
+
 # ============================================================================= modelo diário (confronto + 1d/5d)
 class DailyData:
     """Séries diárias alinhadas às datas de pregão do alvo."""
@@ -242,15 +310,17 @@ def build_daily(d: DailyData, vix_bars: list[tuple], cross: DailyData, last_comp
     feats, sig = daily_features(d, implied, vix, cross_ret)
     n = len(d.close)
     end = n if last_complete else n - 1          # índice (exclusivo) do último pregão fechado
-    models = {}
+    models, b80 = {}, {}
     for h, lam in ((1, 20.0), (5, 40.0)):
-        xs, ys = [], []
+        xs, ys, az = [], [], []
         for t in range(300, end - h):
             if feats[t] is None:
                 continue
             xs.append(feats[t])
             ys.append(1 if d.close[t + h] > d.close[t] else 0)
+            az.append(abs(d.close[t + h] / d.close[t] - 1) / (sig[t] * math.sqrt(h)))
         models[h] = fit_calibrated(xs, ys, FEATURES_D, lam, start_frac=0.45, folds=8, embargo=h - 1)
+        b80[h] = band80(az)
     # análogos: mesmo sinal de exterior e de descolamento → o que aconteceu no pregão seguinte
     analog = None
     now = feats[n - 1]
@@ -263,7 +333,7 @@ def build_daily(d: DailyData, vix_bars: list[tuple], cross: DailyData, last_comp
                 hits += 1 if d.close[t + 1] > d.close[t] else 0
         if tot >= 30:
             analog = {"n": tot, "p_up": hits / tot}
-    return {"implied": implied, "betas": betas, "r2": r2, "feats": feats, "sigma": sig, "models": models, "analog": analog,
+    return {"implied": implied, "betas": betas, "r2": r2, "feats": feats, "sigma": sig, "models": models, "analog": analog, "band80": b80,
             "resid_sd": st.std([d.ret[i] - implied[i] for i in range(max(301, n - 250), end)]) or 1e-9}
 
 
@@ -350,13 +420,17 @@ def build_intraday(win: list[tuple], es: list[tuple], wdo: list[tuple], tf_min: 
     feats, ts, close = f["feats"], f["ts"], f["close"]
     n = len(win)
     sec = tf_min * 60
-    models = {}
+    models, b80 = {}, {}
     for name, h in horizons.items():
-        xs, ys = [], []
+        xs, ys, az = [], [], []
         for i in range(n - h):
-            if feats[i] is None or ts[i + h] - ts[i] > h * sec + 900 or close[i + h] == close[i]:
+            if feats[i] is None or ts[i + h] - ts[i] > h * sec + 900:
+                continue
+            az.append(abs(close[i + h] / close[i] - 1) / (f["sigma"][i] * math.sqrt(h)))
+            if close[i + h] == close[i]:
                 continue
             xs.append(feats[i])
             ys.append(1 if close[i + h] > close[i] else 0)
         models[name] = fit_calibrated(xs, ys, FEATURES_I, lam=30.0, start_frac=0.5, folds=4, embargo=h - 1)
-    return {"models": models, "f": f, "tf": tf_min}
+        b80[name] = band80(az)
+    return {"models": models, "f": f, "tf": tf_min, "band80": b80}

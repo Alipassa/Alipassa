@@ -32,6 +32,28 @@ def markdown(s: dict) -> str:
     L: list[str] = [f"# Relatório — Mini Índice (WIN) e Mini Dólar (WDO)", "",
                     f"Gerado em {when} (Brasília) · pregão de referência {s['pregao']} · mercado "
                     f"{'ABERTO' if s['mercado_aberto'] else 'FECHADO'}", "", f"> {s['atraso']}", ""]
+    for a in s.get("alertas") or []:
+        L += [f"> **{a['nivel']}** {'▲' if a['lado'] > 0 else '▼'} {a['titulo']}. {a['texto']}", ""]
+    sy = s.get("sintese")
+    if sy:
+        L += ["## Síntese para decisão — mini índice", "",
+              f"**{sy['rotulo']}**: {sy['alta']} frentes a favor da alta, {sy['queda']} a favor da queda, {sy['neutro']} neutras "
+              "(contagem do que concorda — não é probabilidade).", ""]
+        L += [f"- {'▲' if x['lado'] > 0 else '▼' if x['lado'] < 0 else '■'} **{x['pilar']}** — {x['detalhe']}" for x in sy["pilares"]] + [""]
+    ag = s.get("agenda") or {}
+    if ag.get("eventos"):
+        L += ["## Agenda: dias que podem mexer com o mercado", "", "| Quando | Data | Hora (Brasília) | Evento | Impacto |", "| --- | --- | --- | --- | --- |"]
+        L += [f"| {e['quando']} | {e['dia_semana']} | {e['hora']} | {e['pais']}: {e['evento']}{' (data estimada)' if e['estimada'] else ''} | {e['impacto']} |"
+              for e in ag["eventos"][:12]]
+        h = ag.get("fomc_historico")
+        if h:
+            L += ["", f"Medido em {h['n']} decisões do Fed desde 2021: o mini índice oscilou em média {_n(h['abs_dia'], 2)}% no dia e "
+                      f"{_n(h['abs_seguinte'], 2)}% no seguinte, contra {_n(h['abs_normal'], 2)}% num dia comum; fechou em alta em "
+                      f"{_p(h['pct_alta_dia'])} dos dias de decisão. Extremos: {_pct(h['maior_queda'])} e {_pct(h['maior_alta'])}."]
+        L.append("")
+    ia = s.get("ia") or {}
+    if ia.get("ok"):
+        L += ["## Análise do analista com IA (Claude)", "", ia["texto"].replace("\n## ", "\n### "), ""]
     L += ["## Leitura da IA", ""] + [f"- {x}" for x in s.get("leitura", [])] + [""]
     for k in ("WIN", "WDO"):
         a = s["ativos"].get(k)
@@ -42,12 +64,13 @@ def markdown(s: dict) -> str:
               f"Último {_n(a['preco'], dec)} ({_pct(a['var'])}) · máx. {_n(a['max'], dec)} · mín. {_n(a['min'], dec)} · "
               f"volatilidade diária típica {_n(a['sigma_dia_pct'], 2)}%", "",
               "### Quadro de probabilidades", "",
-              "| Horizonte | Alvo | ALTA | QUEDA | Sinal | Acerto fora da amostra | Faixa provável (±1σ) |",
+              "| Horizonte | Alvo | ALTA | QUEDA | Sinal | Acerto da direção (fora da amostra) | Faixa de 80% (cobertura medida) |",
               "| --- | --- | ---: | ---: | --- | --- | --- |"]
         for r in a["prob"]:
             oos = f"{r['oos_acerto'] * 100:.1f}% em {r['oos_n']}" if r.get("oos_acerto") is not None else "—"
             L.append(f"| {r['horizonte']} | {r['alvo']} | **{_p(r['p_alta'])}** | **{_p(r['p_queda'])}** | {r['sinal']}"
-                     f"{'' if r['validado'] else ' ⚪'} | {oos} | {_n(r['faixa_min'], dec)} – {_n(r['faixa_max'], dec)} |")
+                     f"{'' if r['validado'] else ' ⚪'} | {oos} | """ + (f"{_n(r['f80_min'], dec)} – {_n(r['f80_max'], dec)} ({r['f80_cobertura'] * 100:.0f}%)" if r.get("f80_min") is not None
+                                    else f"{_n(r['faixa_min'], dec)} – {_n(r['faixa_max'], dec)} (±1σ)") + " |")
         L += ["", "⚪ = o modelo desse horizonte não provou vantagem fora da amostra; a probabilidade fica perto da taxa-base.", ""]
         d = next((r for r in a["prob"] if r["horizonte"] == "Diário"), None)
         if d:
@@ -67,6 +90,15 @@ def markdown(s: dict) -> str:
         for x in c["fatores"]:
             v = f"{x['var']:+.1f} pb".replace(".", ",") if x["tipo"] == "yield" else _pct(x["var"])
             L.append(f"| {x['nome']} | {v} | {_pct(x['contrib'])} | {_n(x['corr60'], 2)} |")
+        if a.get("tendencias"):
+            L += ["", "### Tendência", ""] + [f"- **{t['prazo']}**: {t['tendencia']} ({_pct(t['var'])}; "
+                                             f"{sum(1 for c in t['criterios'] if c['alta'])} de {len(t['criterios'])} critérios de alta)" for t in a["tendencias"]]
+        rv = a.get("reversao")
+        if rv:
+            h = rv["historico"]["30 min"]
+            L += ["", "### Extremos de compra e venda (5 min)", "",
+                  f"{rv['rotulo']} · RSI {_n(rv['rsi'], 0)} · {rv['vwap_z']:+.1f} desvios do VWAP. Sinal medido: em {h['n']} reversões, o preço foi na "
+                  f"direção do sinal em {_p(h['acerto'])} das vezes em 30 min."]
         lv = a["niveis"]
         L += ["", "### Níveis técnicos", "",
               f"- Pivô {_n(lv['pivot'], dec)} · R1 {_n(lv['r1'], dec)} · R2 {_n(lv['r2'], dec)} · S1 {_n(lv['s1'], dec)} · S2 {_n(lv['s2'], dec)}",
@@ -114,8 +146,40 @@ def markdown(s: dict) -> str:
             for t in w["temas"][:6]:
                 seta = "▲ bolsa" if t["ibov"] > 0 else "▼ bolsa" if t["ibov"] < 0 else "■ bolsa"
                 L.append(f"- **{t['tema']}** ({t['n']} manchetes, {seta}) — {t['deducao']}.")
+                imp, hist = t.get("impacto"), t.get("historico")
+                for g in (imp or {}).get("grupos", []):
+                    if g["papeis"]:
+                        L.append(f"  - {'Tende a ajudar' if g['lado'] == 'ganha' else 'Tende a pesar em'} {g['setor']}: "
+                                 + ", ".join(f"{x['t']} {_pct(x['c'], 1)}" for x in g["papeis"]))
+                if imp and imp.get("total"):
+                    L.append(f"  - Hoje {imp['confirmam']} de {imp['total']} papéis andaram na direção esperada; efeito típico: {imp['prazo']}.")
+                if hist:
+                    lado = "alta" if hist["dia_pct_alta"] >= 0.5 else "queda"
+                    L.append(f"  - Histórico: em {hist['n']} pregões em que {hist['evento']}, o mini índice fechou em {lado} em "
+                             f"{max(hist['dia_pct_alta'], 1 - hist['dia_pct_alta']) * 100:.0f}% (média {_pct(hist['dia_media'])}); "
+                             f"no seguinte subiu em {hist['seguinte_pct_alta'] * 100:.0f}%.")
                 if t["manchetes"]:
                     L.append(f"  - “{t['manchetes'][0]['titulo']}” ({t['manchetes'][0]['fonte']})")
+        an = n.get("analistas") or {}
+        if an.get("itens"):
+            L += ["", "## O que as casas de análise disseram (7 dias)", "", f"{an['positivas']} positivas × {an['negativas']} negativas.", ""]
+            L += [f"- {'▲' if v['tom'] > 0 else '▼' if v['tom'] < 0 else '■'} **{v['casa']}**: {v['titulo']} ({v['fonte']})" for v in an["itens"][:10]]
+    fo = s.get("focus") or {}
+    if fo:
+        L += ["", "## Boletim Focus — consenso dos economistas", "", "| Projeção | Ano | Mediana | Revisão em 4 semanas |", "| --- | --- | ---: | ---: |"]
+        for v in fo.values():
+            L += [f"| {v['nome']} | {i['ano']} | {_n(i['mediana'], 2)} | {'—' if i['revisao'] is None else f'{i['revisao']:+.2f}'.replace('.', ',')} |" for i in v["itens"]]
+    ra = (s.get("b3") or {}).get("analistas")
+    if ra:
+        L += ["", "## Recomendações das casas para ações da B3", "",
+              f"{ra['recomendacoes']} recomendações para {ra['cobertas']} ações: {_p(ra['pct_compra'])} compra · {_p(ra['pct_neutro'])} neutro · {_p(ra['pct_venda'])} venda.",
+              "- Mais recomendadas: " + ", ".join(f"{x['t']} ({x['ab']}/{x['at']})" for x in ra["preferidas"][:6]),
+              "- Menos recomendadas: " + ", ".join(f"{x['t']} ({x['ab']}/{x['at']})" for x in ra["evitadas"][:6])]
+    if False:
+        for _ in ():
+            if True:
+                if True:
+                    pass
     pl = [x for x in s.get("placar", []) if x["n"]]
     if pl:
         L += ["", "## Placar ao vivo (previsões gravadas × resultado)", "", "| Ativo | Horizonte | Previsões | Acerto |", "| --- | --- | ---: | ---: |"]

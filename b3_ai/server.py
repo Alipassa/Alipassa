@@ -89,6 +89,8 @@ def make_handler(svc: Service):
             if self.path == "/api/refresh":
                 svc.wake.set()
                 self._json({"ok": True})
+            elif self.path == "/api/analise":
+                self._json(_clean(svc.engine.run_ai()))   # síncrono: a análise leva de alguns segundos a ~1 min
             else:
                 self._send(b"nao encontrado", "text/plain", 404)
 

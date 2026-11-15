@@ -8,8 +8,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from . import market_b3, model as M, news_ai, stats as st
-from .data import bcb, news, tradingview as tv, yahoo
+from . import alerts, analyst_llm, market_b3, model as M, news_ai, stats as st, technical as T
+from .data import bcb, calendar as cal, focus, news, tradingview as tv, yahoo
 from .data.http import DataError
 from .memory import Memory
 from .universe import ASSETS, BY_KEY, FACTORS, TARGETS
@@ -41,6 +41,8 @@ def fmt_date(iso: str) -> str:
 
 class Engine:
     def __init__(self, data_dir: str = "dados", with_news: bool = True) -> None:
+        self.data_dir = data_dir
+        self._agenda_cache: tuple[float, dict] = (0.0, {})
         self.mem = Memory(f"{data_dir}/b3_ai.db")
         self.with_news = with_news
         self.lock = threading.Lock()
@@ -51,6 +53,9 @@ class Engine:
         self._news_cache: tuple[float, Optional[dict], list[str]] = (0.0, None, [])
         self._bcb_cache: tuple[float, dict] = (0.0, {})
         self._b3_ts = 0.0
+        self._focus_cache: tuple[float, dict] = (0.0, {})
+        self._alerts_sent: set[str] = set()
+        self.ai: dict = {}           # última análise escrita pelo analista com IA (sob demanda)
 
     # ------------------------------------------------------------------ coleta
     def _history(self) -> tuple[dict, list[str]]:
@@ -106,6 +111,155 @@ class Engine:
         except Exception:  # noqa: BLE001
             pass
         return cached
+
+    def _agenda(self, d: "M.DailyData") -> dict:
+        """Próximos eventos de alto impacto + o que o mini índice fez nos dias de decisão do Fed (medido)."""
+        ts, cached = self._agenda_cache
+        if not cached or time.time() - ts > 6 * 3600:
+            try:
+                cached = cal.build(self.data_dir)
+                self._agenda_cache = (time.time(), cached)
+            except Exception as e:  # noqa: BLE001 — agenda nunca derruba o ciclo
+                cached = cached or {"eventos": [], "fomc_passados": [], "erros": [f"agenda: {e}"]}
+        idx = {dt: i for i, dt in enumerate(d.dates)}
+        ev = [idx[x] for x in cached.get("fomc_passados", []) if x in idx and 60 < idx[x] < len(d.dates) - 1]
+        estudo = None
+        if len(ev) >= 12:
+            evset = set(ev)
+            normal = [abs(d.ret[i]) for i in range(min(ev), len(d.ret)) if i not in evset]
+            dia, seg = [d.ret[i] for i in ev], [d.ret[i + 1] for i in ev]
+            estudo = {"n": len(ev), "abs_dia": st.mean([abs(x) for x in dia]) * 100, "abs_seguinte": st.mean([abs(x) for x in seg]) * 100,
+                      "abs_normal": st.mean(normal) * 100, "pct_alta_dia": sum(1 for x in dia if x > 0) / len(dia),
+                      "pct_alta_seguinte": sum(1 for x in seg if x > 0) / len(seg),
+                      "maior_queda": min(dia + seg) * 100, "maior_alta": max(dia + seg) * 100}
+        today = brt(time.time()).date()
+        eventos = []
+        for e in cached.get("eventos", []):
+            dias = (datetime.strptime(e["data"], "%Y-%m-%d").date() - today).days
+            if dias >= 0:
+                eventos.append({**e, "dias": dias, "quando": "HOJE" if dias == 0 else "amanhã" if dias == 1 else f"em {dias} dias",
+                                "dia_semana": fmt_date(e["data"])})
+        return {"eventos": eventos, "fomc_historico": estudo, "erros": cached.get("erros", [])}
+
+    def _focus(self) -> dict:
+        ts, cached = self._focus_cache
+        if cached and time.time() - ts < 6 * 3600:
+            return cached
+        try:
+            f = focus.fetch_focus()
+            if f:
+                self._focus_cache = (time.time(), f)
+                return f
+        except Exception:  # noqa: BLE001
+            pass
+        return cached
+
+    def run_ai(self) -> dict:
+        """Pede ao analista com IA a leitura do estado atual (chamado pelo botão do painel ou pelo comando analise-ia)."""
+        with self.lock:
+            st_now = self.state
+        if not st_now.get("ok"):
+            self.ai = {"ok": False, "erro": "ainda sem dados de mercado", "ts": time.time()}
+        else:
+            self.ai = {**analyst_llm.analyze(st_now), "ts": time.time()}
+        with self.lock:
+            self.state["ia"] = self.ai
+        return self.ai
+
+    # ------------------------------------------------------------------ notícias × mercado
+    def _enrich_news(self, n: Optional[dict], dd: dict, dres: dict) -> None:
+        """Liga cada tema ao mercado: ações atingidas com a variação real do dia e o efeito histórico medido no mini índice."""
+        if not n or "WIN" not in dd:
+            return
+        papeis = {p["t"]: p for p in self.b3.get("papeis", [])}
+        d = dd["WIN"]
+        cache = self._daily_cache.setdefault("events", {})
+        cross = dict(zip(dd["WDO"].dates, dd["WDO"].ret)) if "WDO" in dd else {}
+        for w in ("diario", "semanal"):
+            for t in n[w]["temas"]:
+                imp = news_ai.IMPACT.get(t.get("key", ""))
+                if not imp:
+                    continue
+                ok = tot = 0
+                grupos = []
+                for lado, sinal in (("ganha", 1), ("perde", -1)):
+                    for nome, tickers in imp.get(lado, []):
+                        live = [{"t": tk, "c": papeis[tk]["c"]} for tk in tickers if tk in papeis and papeis[tk]["c"] is not None]
+                        for x in live:
+                            tot += 1
+                            ok += 1 if x["c"] * sinal > 0 else 0
+                        grupos.append({"lado": lado, "setor": nome, "papeis": live})
+                t["impacto"] = {"grupos": grupos, "prazo": imp.get("prazo"), "confirmam": ok, "total": tot}
+                px = imp.get("proxy")
+                if px:
+                    if px not in cache:
+                        key, direction = px
+                        series = d.ret if key == "SELF" else [cross.get(x, 0.0) for x in d.dates] if key == "CROSS" else d.x.get(key)
+                        cache[px] = M.event_study(d, series, direction) if series else None
+                    if cache[px]:
+                        t["historico"] = {**cache[px], "evento": imp["proxy_nome"]}
+        for v in (n.get("analistas") or {}).get("itens", []):
+            v["var"] = (papeis.get(v["ticker"]) or {}).get("c") if v.get("ticker") else None
+        for c in n.get("empresas", []):
+            c["var"] = (papeis.get(c["ticker"]) or {}).get("c")
+
+    @staticmethod
+    def _synthesis(s: dict) -> Optional[dict]:
+        """Quadro de convergência: quantas frentes independentes apontam para o mesmo lado no mini índice.
+        Não é probabilidade — é a contagem do que concorda e do que diverge, para pesar junto com os números."""
+        w = s["ativos"].get("WIN")
+        if not w:
+            return None
+        prob = {r["horizonte"]: r for r in w["prob"]}
+        P: list[dict] = []
+
+        def add(nome: str, lado: int, detalhe: str) -> None:
+            P.append({"pilar": nome, "lado": lado, "detalhe": detalhe})
+
+        for hz in ("Diário", "Semanal"):
+            r = prob.get(hz)
+            if r:
+                add(f"Estatística — {hz.lower()}", 1 if r["p_alta"] >= 0.55 else -1 if r["p_alta"] <= 0.45 else 0,
+                    f"{r['p_alta'] * 100:.0f}% alta × {r['p_queda'] * 100:.0f}% queda" + ("" if r["validado"] else " (não validado)"))
+        c = w["confronto"]
+        ext = c["pos_fechamento_total"] if c["pos_fechamento"] else c["implicito"]
+        add("Exterior", 1 if ext > 0.15 else -1 if ext < -0.15 else 0,
+            f"implica {ext:+.2f}% " + ("desde o fechamento da B3" if c["pos_fechamento"] else "no último pregão"))
+        n = s.get("noticias")
+        if n:
+            sc = n["diario"]["score_ibov"]
+            add("Notícias (36 h)", 1 if sc >= 12 else -1 if sc <= -12 else 0, f"score {sc:+d} — {n['diario']['leitura_ibov']}")
+            a = n.get("analistas") or {}
+            if a.get("total"):
+                diff = a["positivas"] - a["negativas"]
+                add("Opinião de analistas (manchetes)", 1 if diff >= 3 else -1 if diff <= -3 else 0,
+                    f"{a['positivas']} positivas × {a['negativas']} negativas na semana")
+        f = s.get("focus") or {}
+        rev = {k: (f[k]["itens"][-1].get("revisao") if k in f else None) for k in ("IPCA", "Selic")}
+        if rev["IPCA"] is not None and rev["Selic"] is not None:
+            lado = -1 if rev["IPCA"] > 0.03 or rev["Selic"] > 0.01 else 1 if rev["IPCA"] < -0.03 and rev["Selic"] <= 0 else 0
+            add("Economistas (Focus)", lado, f"em 4 semanas: IPCA {rev['IPCA']:+.2f} p.p., Selic {rev['Selic']:+.2f} p.p. para {f['IPCA']['itens'][-1]['ano']}")
+        b = s.get("b3")
+        if b and b.get("pct_altas") is not None:
+            add("Amplitude da B3", 1 if b["pct_altas"] >= 0.6 else -1 if b["pct_altas"] <= 0.4 else 0,
+                f"{b['pct_altas'] * 100:.0f}% das ações em alta; {(b['acima_mm200'] or 0) * 100:.0f}% acima da média de 200")
+        lv = w["niveis"]
+        if lv["mm20"] and lv["mm200"]:
+            up20, up200 = w["preco"] > lv["mm20"], w["preco"] > lv["mm200"]
+            add("Tendência técnica", 1 if up20 and up200 else -1 if not up20 and not up200 else 0,
+                f"preço {'acima' if up20 else 'abaixo'} da média de 20 e {'acima' if up200 else 'abaixo'} da de 200")
+        up, down = sum(1 for x in P if x["lado"] > 0), sum(1 for x in P if x["lado"] < 0)
+        if up >= down + 3:
+            label, lado = "MAIORIA APONTA ALTA", 1
+        elif down >= up + 3:
+            label, lado = "MAIORIA APONTA QUEDA", -1
+        elif up > down:
+            label, lado = "LEVE INCLINAÇÃO DE ALTA", 0
+        elif down > up:
+            label, lado = "LEVE INCLINAÇÃO DE QUEDA", 0
+        else:
+            label, lado = "SINAIS DIVIDIDOS", 0
+        return {"pilares": P, "alta": up, "queda": down, "neutro": len(P) - up - down, "rotulo": label, "lado": lado}
 
     def refresh_b3(self) -> list[str]:
         try:
@@ -196,7 +350,7 @@ class Engine:
                 "pos_fechamento_total": sum(f["contrib"] for f in fresh), "leitura": leitura, "data": d.dates[-1]}
 
     def _prob_row(self, name: str, kind: str, model: Optional[dict], row: Optional[list[float]], sigma: float, price: float,
-                  alvo: str, shift: float = 0.0, nota: str = "") -> Optional[dict]:
+                  alvo: str, shift: float = 0.0, nota: str = "", b80: Optional[dict] = None) -> Optional[dict]:
         if model is None or row is None:
             return None
         ap = M.apply_model(model, row)
@@ -211,6 +365,9 @@ class Engine:
                "faixa_min": price * (1 - sigma), "faixa_max": price * (1 + sigma), "ref": price, "nota": nota,
                "ajuste_exterior": shift * 100}
         out.update(M.classify(p, ev))
+        if b80:
+            w = b80["mult"] * sigma
+            out.update({"f80_min": price * (1 - w), "f80_max": price * (1 + w), "f80_cobertura": b80["cobertura"], "f80_n": b80["n"]})
         if shift and abs(shift) > 0.25 * sigma:
             out["confianca"] += " · ajustada pelo exterior pós-fechamento"
         return out
@@ -307,25 +464,31 @@ class Engine:
                     sg = (f["sigma"][-1] or 0.0005) * math.sqrt(hb)
                     alvo = brt(f["ts"][-1] + tfm * 60 * (hb + 1)).strftime("%H:%M") if is_open else "próxima sessão"
                     rows.append(self._prob_row(name, "intraday", ir["models"][name], f["feats"][-1], sg, price, alvo,
-                                               nota="" if is_open else "mercado fechado: leitura da última barra negociada"))
+                                               nota="" if is_open else "mercado fechado: leitura da última barra negociada",
+                                               b80=ir["band80"].get(name)))
             if not complete:
-                # fechamento de hoje: combina o que já andou com o que o exterior implica para o resto do pregão
+                # fecho de hoje × fechamento ANTERIOR: tabela empírica "o dia já andou z → fecha do mesmo lado em x %"
                 t = brt(now)
                 frac = st.clamp(1 - ((t.hour * 60 + t.minute) - 540) / 565.0, 0.03, 1.0)
                 r_now = price / prev - 1
-                mu = r_now + 0.5 * frac * (conf["implicito"] / 100 - r_now)
-                p_close = st.clamp(st.phi(mu / (sig_d * math.sqrt(frac))), 0.03, 0.97)
-                rows.append({"horizonte": "Fecho de hoje", "tipo": "sessao", "alvo": "18:25 vs. fechamento anterior", "p_alta": p_close,
-                             "p_queda": 1 - p_close, "base": 0.5, "k": None, "oos_n": None, "oos_acerto": None, "amostra": None,
-                             "motivos": [], "faixas": M.bands(p_close, sig_d * math.sqrt(frac)), "sigma_pct": sig_d * math.sqrt(frac) * 100,
-                             "faixa_min": price * (1 - sig_d * math.sqrt(frac)), "faixa_max": price * (1 + sig_d * math.sqrt(frac)),
-                             "ref": prev, "sinal": M.classify(p_close, {})["sinal"], "validado": False,
-                             "confianca": "cálculo direto: variação do dia + exterior + volatilidade restante (não validado em walk-forward)",
-                             "nota": "", "ajuste_exterior": 0.0})
+                per = M.close_persistence(intr[(k, "15")])
+                z = r_now / ((per["sd"] if per else sig_d) * math.sqrt(frac))
+                b = next((x for x in per["bins"] if abs(z) < x["ate"]), None) if per else None
+                hit = b["acerto"] if b and b["n"] >= 30 and b["acerto"] is not None else st.phi(abs(z))
+                p_close = st.clamp(hit if z >= 0 else 1 - hit, 0.02, 0.98)
+                sg = sig_d * math.sqrt(frac)
+                rows.append({"horizonte": "Fecho de hoje", "tipo": "sessao", "alvo": "fechar acima/abaixo do fechamento anterior",
+                             "p_alta": p_close, "p_queda": 1 - p_close, "base": 0.5, "k": None, "oos_n": b["n"] if b else None,
+                             "oos_acerto": b["acerto"] if b else None, "amostra": None, "motivos": [], "faixas": M.bands(p_close, sg),
+                             "sigma_pct": sg * 100, "faixa_min": price * (1 - sg), "faixa_max": price * (1 + sg), "ref": prev,
+                             "sinal": M.classify(p_close, {})["sinal"], "validado": bool(b and b["n"] >= 30),
+                             "confianca": "frequência histórica: quando o dia já andou isso, fechou do mesmo lado nessa proporção",
+                             "nota": "referência é o fechamento ANTERIOR, não o preço atual — não indica para onde vai a partir de agora",
+                             "ajuste_exterior": 0.0})
             rows.append(self._prob_row("Diário", "diario", r["models"][1], r["feats"][-1], sig_d, bars[-1][4],
-                                       fmt_date(nd if complete else next_sessions(today, 1)), shift))
+                                       fmt_date(nd if complete else next_sessions(today, 1)), shift, b80=r["band80"].get(1)))
             rows.append(self._prob_row("Semanal", "semanal", r["models"][5], r["feats"][-1], sig_d * math.sqrt(5), bars[-1][4],
-                                       "até " + fmt_date(nw), shift))
+                                       "até " + fmt_date(nw), shift, b80=r["band80"].get(5)))
             rows = [x for x in rows if x]
             # memória: grava previsões e resolve as vencidas
             self._remember(k, rows, d, intr[(k, "5")], base_ts, is_open, complete)
@@ -336,22 +499,62 @@ class Engine:
                 "max": bars[-1][2], "min": bars[-1][3], "abertura": bars[-1][1], "data": d.dates[-1],
                 "prob": rows, "confronto": conf, "niveis": lv, "intraday": self._intraday_read(intr[(k, "5")]),
                 "analogo": r["analog"], "sigma_dia_pct": sig_d * 100,
+                "tendencias": T.trends(bars, intr[(k, "5")]), "reversao": T.reversal_read(intr[(k, "5")]),
                 "candles": {"D1": [list(b[:5]) for b in bars[-180:]],
                             "M15": [list(b[:5]) for b in intr[(k, "15")][-160:]],
                             "M5": [list(b[:5]) for b in intr[(k, "5")][-160:]]},
             }
 
+        self._enrich_news(news_state, dd, dres)
         quotes = [q for q in (self._quote(a, daily[a.key]) for a in ASSETS) if q]
         ny = self._brasil_ny(quotes)
         state = {
             "ok": True, "atualizado": now, "duracao": round(time.time() - t0, 2), "mercado_aberto": is_open,
             "pregao": win_last, "pregao_fechado": complete, "ativos": ativos, "cotacoes": quotes, "brasil_ny": ny,
-            "b3": self.b3["resumo"], "noticias": news_state, "bcb": self._bcb(), "placar": self.mem.scoreboard(),
+            "b3": self.b3["resumo"], "noticias": news_state, "bcb": self._bcb(), "focus": self._focus(),
+            "ia": self.ai, "ia_indisponivel": analyst_llm.available(), "placar": self.mem.scoreboard(),
             "historico": self.mem.recent(), "avisos": notes,
             "atraso": "Cotações públicas com ~15 min de atraso (B3 e bolsas dos EUA).",
             "aviso_legal": "Probabilidades estatísticas calculadas sobre histórico real e validadas fora da amostra. "
                            "Não são garantia de movimento nem recomendação de investimento. O painel não envia ordens.",
         }
+        if "WDO" in dd:      # dólar local como "choque" para o mini índice (não entra na regressão do exterior)
+            cm = dict(zip(dd["WDO"].dates, dd["WDO"].ret))
+            dd["WIN"].x["CROSS"] = [cm.get(x, 0.0) for x in dd["WIN"].dates]
+        al = alerts.from_rows(ativos)
+        ev_cache = self._daily_cache.setdefault("shocks", {})
+        for k, d in dd.items():
+            al += alerts.from_shocks(k, TARGETS[k].name, d, is_open or bool(d.fresh), ev_cache)
+        for k, a in ativos.items():
+            rv = a.get("reversao")
+            if rv and rv["sinal"] and is_open:
+                h = rv["historico"]["30 min"]
+                al.append({"nivel": "REVERSÃO", "lado": rv["sinal"], "ativo": k, "prob": h["acerto"] or 0.0, "horizonte": "reversão intraday",
+                           "titulo": f"{a['nome']}: {rv['rotulo']}",
+                           "texto": f"RSI {rv['rsi']:.0f}, {rv['vwap_z']:+.1f} desvios do VWAP. Nos últimos {h['n']} sinais iguais, o preço foi na "
+                                    f"direção do sinal em {(h['acerto'] or 0) * 100:.0f}% das vezes em 30 min.",
+                           "chave": f"{k}|rev|{int(rv['ultimo_ts']) // 1800}"})
+        agenda = self._agenda(dd["WIN"])
+        notes += agenda["erros"][:2]
+        for e in agenda["eventos"]:
+            if e["dias"] <= 1 and e["impacto"] == "muito alto":
+                h = agenda["fomc_historico"] if e["tipo"] == "fomc" else None
+                extra = (f" Nos {h['n']} dias de decisão do Fed desde 2021, o mini índice oscilou em média {h['abs_dia']:.2f}% "
+                         f"(contra {h['abs_normal']:.2f}% num dia comum).") if h else ""
+                al.append({"nivel": "AGENDA", "lado": 0, "ativo": "WIN", "prob": 0.0, "horizonte": "evento",
+                           "titulo": f"{e['quando'].upper()} ({e['dia_semana']}, {e['hora']}): {e['evento']}",
+                           "texto": "Evento de impacto muito alto: a direção só se define depois do anúncio e as faixas de preço "
+                                    "do quadro tendem a ser estreitas demais nesse dia." + extra,
+                           "chave": f"agenda|{e['tipo']}|{e['data']}"})
+        state["agenda"] = agenda
+        al.sort(key=lambda x: (x["nivel"] != "ALERTA", x["nivel"] != "AGENDA", -x["prob"]))
+        for x in al:
+            if x["nivel"] == "ALERTA" and x["chave"] not in self._alerts_sent:
+                self._alerts_sent.add(x["chave"])
+                alerts.send_telegram(f"🚨 B3 AI — {x['titulo']}\n{x['texto']}\nProbabilidade histórica, não garantia.")
+        state["alertas"] = al
+        state["limiares"] = {"alerta": alerts.ALERTA, "atencao": alerts.ATENCAO, "telegram": all(alerts.telegram_config())}
+        state["sintese"] = self._synthesis(state)
         state["leitura"] = self._narrative(state)
         with self.lock:
             self.state = state

@@ -38,6 +38,9 @@ def process(rows: list[dict]) -> dict:
             "a50": (r["close"] > r["SMA50"]) if r.get("SMA50") else None,
             "a200": (r["close"] > r["SMA200"]) if r.get("SMA200") else None,
             "rec": r.get("Recommend.All"), "rv": r.get("relative_volume_10d_calc"),
+            # consenso de analistas (casas que cobrem o papel): compra · neutro · venda
+            "ab": (r.get("recommendation_buy") or 0) + (r.get("recommendation_over") or 0), "ah": r.get("recommendation_hold") or 0,
+            "av": (r.get("recommendation_under") or 0) + (r.get("recommendation_sell") or 0), "at": r.get("recommendation_total") or 0,
         })
     stocks = [x for x in out if x["k"] == "Ação"]
     liquid = [x for x in stocks if x["v"] >= MIN_LIQ and x["c"] is not None]
@@ -64,7 +67,20 @@ def process(rows: list[dict]) -> dict:
     counts: dict[str, int] = {}
     for x in out:
         counts[x["k"]] = counts.get(x["k"], 0) + 1
+    cov = [x for x in stocks if x["at"] >= 3]
+    tot_rec = sum(x["at"] for x in cov) or 1
+    share = lambda x: x["ab"] / x["at"]  # noqa: E731
+    apick = lambda xs: [{"t": x["t"], "n": x["n"], "c": x["c"], "ab": x["ab"], "ah": x["ah"], "av": x["av"], "at": x["at"]} for x in xs]  # noqa: E731
+    deep = [x for x in cov if x["at"] >= 5]
+    analysts = {
+        "cobertas": len(cov), "recomendacoes": sum(x["at"] for x in cov),
+        "pct_compra": sum(x["ab"] for x in cov) / tot_rec, "pct_neutro": sum(x["ah"] for x in cov) / tot_rec,
+        "pct_venda": sum(x["av"] for x in cov) / tot_rec,
+        "preferidas": apick(sorted(deep, key=lambda x: (-share(x), -x["at"]))[:8]),
+        "evitadas": apick(sorted(deep, key=lambda x: (share(x) - x["av"] / x["at"], -x["at"]))[:8]),
+    } if cov else None
     summary = {
+        "analistas": analysts,
         "total": len(out), "por_tipo": counts, "acoes": len(stocks), "liquidas": len(liquid),
         "altas": up, "quedas": down, "estaveis": len(liquid) - up - down,
         "pct_altas": up / len(liquid) if liquid else None,

@@ -54,10 +54,10 @@ THEMES: list[tuple] = [
      r"(slowdown|slows?|weak|weaker|contracts?|deflation|property crisis|misses|desacelera|fraco|fraca|crise|defla[çc][ãa]o|contra[çc][ãa]o)",
      -0.8, +0.5, "China: atividade fraca",
      "China fraca → menos demanda por commodities → minério e petróleo caem → Vale e siderúrgicas pesam no Ibovespa; real perde suporte"),
-    ("petroleo_alta", "INT", r"(oil|crude|brent|wti|opec|opep|petr[óo]leo)", UP,
+    ("petroleo_alta", "INT", r"(\b(oil|crude|brent|wti|opec|opep)\b|petr[óo]leo)", UP,
      +0.4, -0.2, "Petróleo em alta",
      "petróleo em alta → Petrobras sobe e ajuda o Ibovespa; em excesso, pressiona a inflação global e os juros"),
-    ("petroleo_queda", "INT", r"(oil|crude|brent|wti|opec|opep|petr[óo]leo)", DOWN,
+    ("petroleo_queda", "INT", r"(\b(oil|crude|brent|wti|opec|opep)\b|petr[óo]leo)", DOWN,
      -0.4, +0.2, "Petróleo em queda",
      "petróleo em queda → Petrobras pesa no índice; por outro lado, alivia a inflação"),
     ("minerio_alta", "INT", r"(iron ore|min[ée]rio)", UP, +0.5, -0.3, "Minério de ferro em alta",
@@ -119,6 +119,115 @@ _COMPILED = [(k, sc, re.compile(subj, re.I), re.compile(pol, re.I) if pol else N
              for k, sc, subj, pol, ei, ed, title, ded in THEMES]
 
 
+# ---- efeito por setor/ação, prazo e "termômetro" de mercado de cada tema -------------------------------------
+VAREJO, CONSTR = ["MGLU3", "LREN3", "ASAI3", "AZZA3"], ["CYRE3", "MRVE3", "EZTC3", "DIRR3"]
+BANCOS, PETRO = ["ITUB4", "BBDC4", "BBAS3", "SANB11"], ["PETR4", "PRIO3", "BRAV3"]
+MINER, EXPORT = ["VALE3", "CSNA3", "GGBR4", "USIM5"], ["SUZB3", "KLBN11", "WEGE3", "EMBJ3"]
+ELETR, ESTATAIS, FRIGO = ["AXIA3", "EQTL3", "SBSP3", "CPLE3"], ["PETR4", "BBAS3"], ["JBSS32", "BEEF3", "MBRF3"]
+TECH = ["TOTS3", "LWSA3", "B3SA3"]
+JUROS_CAI = {"ganha": [("Varejo", VAREJO), ("Construção", CONSTR), ("Tecnologia e bolsa", TECH)], "perde": []}
+JUROS_SOBE = {"ganha": [("Exportadoras (dólar)", EXPORT)], "perde": [("Varejo", VAREJO), ("Construção", CONSTR), ("Tecnologia e bolsa", TECH)]}
+# proxy = (série de mercado, direção): usada para medir no histórico o que o mini índice fez quando isso aconteceu
+IMPACT: dict[str, dict] = {
+    "fed_duro": {**JUROS_SOBE, "prazo": "dias a semanas", "proxy": ("US10Y", +1), "proxy_nome": "juro americano de 10 anos subiu forte"},
+    "fed_brando": {**JUROS_CAI, "prazo": "dias a semanas", "proxy": ("US10Y", -1), "proxy_nome": "juro americano de 10 anos caiu forte"},
+    "inflacao_eua_alta": {**JUROS_SOBE, "prazo": "horas a dias", "proxy": ("US10Y", +1), "proxy_nome": "juro americano de 10 anos subiu forte"},
+    "inflacao_eua_baixa": {**JUROS_CAI, "prazo": "horas a dias", "proxy": ("US10Y", -1), "proxy_nome": "juro americano de 10 anos caiu forte"},
+    "risco_global": {"ganha": [("Exportadoras (dólar)", EXPORT)], "perde": [("Bancos", BANCOS), ("Varejo", VAREJO), ("Construção", CONSTR)],
+                     "prazo": "horas a dias", "proxy": ("VIX", +1), "proxy_nome": "VIX (índice do medo) disparou"},
+    "alivio_global": {"ganha": [("Bancos", BANCOS), ("Varejo", VAREJO)], "perde": [], "prazo": "horas a dias",
+                      "proxy": ("VIX", -1), "proxy_nome": "VIX (índice do medo) despencou"},
+    "wall_street_alta": {"ganha": [("Bancos", BANCOS), ("Tecnologia e bolsa", TECH)], "perde": [], "prazo": "mesmo dia",
+                         "proxy": ("ES", +1), "proxy_nome": "S&P 500 subiu forte"},
+    "wall_street_queda": {"ganha": [], "perde": [("Bancos", BANCOS), ("Tecnologia e bolsa", TECH), ("Varejo", VAREJO)], "prazo": "mesmo dia",
+                          "proxy": ("ES", -1), "proxy_nome": "S&P 500 caiu forte"},
+    "china_estimulo": {"ganha": [("Mineração e siderurgia", MINER), ("Papel e exportadoras", EXPORT)], "perde": [], "prazo": "dias",
+                       "proxy": ("IRON", +1), "proxy_nome": "minério de ferro subiu forte"},
+    "china_fraca": {"ganha": [], "perde": [("Mineração e siderurgia", MINER), ("Papel e exportadoras", EXPORT)], "prazo": "dias",
+                    "proxy": ("IRON", -1), "proxy_nome": "minério de ferro caiu forte"},
+    "petroleo_alta": {"ganha": [("Petróleo", PETRO)], "perde": [], "prazo": "mesmo dia", "proxy": ("BRENT", +1), "proxy_nome": "petróleo Brent subiu forte"},
+    "petroleo_queda": {"ganha": [], "perde": [("Petróleo", PETRO)], "prazo": "mesmo dia", "proxy": ("BRENT", -1), "proxy_nome": "petróleo Brent caiu forte"},
+    "minerio_alta": {"ganha": [("Mineração e siderurgia", MINER)], "perde": [], "prazo": "mesmo dia", "proxy": ("IRON", +1), "proxy_nome": "minério de ferro subiu forte"},
+    "minerio_queda": {"ganha": [], "perde": [("Mineração e siderurgia", MINER)], "prazo": "mesmo dia", "proxy": ("IRON", -1), "proxy_nome": "minério de ferro caiu forte"},
+    "emprego_eua_forte": {**JUROS_SOBE, "prazo": "horas a dias", "proxy": ("DXY", +1), "proxy_nome": "dólar global (DXY) subiu forte"},
+    "emprego_eua_fraco": {**JUROS_CAI, "prazo": "horas a dias", "proxy": ("DXY", -1), "proxy_nome": "dólar global (DXY) caiu forte"},
+    "copom_alta": {"ganha": [("Bancos e seguradoras", BANCOS)], "perde": [("Varejo", VAREJO), ("Construção", CONSTR)], "prazo": "dias a semanas"},
+    "copom_corte": {**JUROS_CAI, "prazo": "dias a semanas"},
+    "fiscal_ruim": {"ganha": [("Exportadoras (dólar)", EXPORT)], "perde": [("Estatais", ESTATAIS), ("Varejo", VAREJO), ("Construção", CONSTR), ("Elétricas (juro longo)", ELETR)],
+                    "prazo": "dias a semanas", "proxy": ("CROSS", +1), "proxy_nome": "dólar disparou contra o real"},
+    "fiscal_bom": {"ganha": [("Estatais", ESTATAIS), ("Varejo", VAREJO), ("Construção", CONSTR)], "perde": [], "prazo": "dias a semanas",
+                   "proxy": ("CROSS", -1), "proxy_nome": "dólar despencou contra o real"},
+    "ipca_alto": {"ganha": [], "perde": [("Varejo", VAREJO), ("Construção", CONSTR)], "prazo": "dias"},
+    "ipca_baixo": {**JUROS_CAI, "prazo": "dias"},
+    "fluxo_entrada": {"ganha": [("Blue chips / bancos", BANCOS), ("Petróleo e mineração", ["PETR4", "VALE3"])], "perde": [], "prazo": "dias"},
+    "fluxo_saida": {"ganha": [], "perde": [("Blue chips / bancos", BANCOS), ("Petróleo e mineração", ["PETR4", "VALE3"])], "prazo": "dias"},
+    "atividade_forte": {"ganha": [("Varejo", VAREJO), ("Bancos", BANCOS)], "perde": [], "prazo": "dias"},
+    "atividade_fraca": {"ganha": [], "perde": [("Varejo", VAREJO), ("Bancos", BANCOS)], "prazo": "dias"},
+    "politica_ruido": {"ganha": [("Exportadoras (dólar)", EXPORT)], "perde": [("Estatais", ESTATAIS), ("Bancos", BANCOS)], "prazo": "dias",
+                       "proxy": ("CROSS", +1), "proxy_nome": "dólar disparou contra o real"},
+    "ibov_queda": {"ganha": [], "perde": [], "prazo": "1 a 2 pregões", "proxy": ("SELF", -1), "proxy_nome": "o próprio mini índice caiu forte"},
+    "ibov_alta": {"ganha": [], "perde": [], "prazo": "1 a 2 pregões", "proxy": ("SELF", +1), "proxy_nome": "o próprio mini índice subiu forte"},
+}
+
+# ---- peso de cada manchete: credibilidade da fonte × tom (fato ou opinião) × intensidade ------------------------
+TIER1 = re.compile(r"(reuters|bloomberg|valor|estad[ãa]o|folha|financial times|wall street journal|wsj|cnbc|infomoney|"
+                   r"g1|o globo|ag[êe]ncia brasil|associated press|\bap\b|exame|cnn|bbc|barron|marketwatch|neofeed|brazil journal)", re.I)
+OPINION = re.compile(r"(warns?|predicts?|could|might|\bmay\b|here'?s what|should you|stocks? to (buy|watch)|opinion|"
+                     r"pode |poderia|deve[m]? |aposta|opini[ãa]o|coluna|entenda|o que esperar|vale a pena|como investir|\?)", re.I)
+SEVERE = re.compile(r"(crash|colapso|collapse|despenca|desaba|derrete|p[âa]nico|panic|plunge|tumble|recorde|record|dispara|"
+                    r"surge|soar|guerra|\bwar\b|emerg[êe]ncia|hist[óo]ric|maior (queda|alta)|biggest|worst|pior)", re.I)
+RUMOR = re.compile(r"(rumou?r|boato|fontes dizem|sources say|segundo fontes|especula|reportedly|estaria)", re.I)
+
+
+def headline_weight(title: str, source: str) -> float:
+    w = 1.0 if TIER1.search(source or "") else 0.6
+    if OPINION.search(title):
+        w *= 0.5          # opinião, previsão ou "clickbait" vale menos que fato
+    if RUMOR.search(title):
+        w *= 0.5
+    if SEVERE.search(title):
+        w *= 1.5          # linguagem de movimento extremo
+    return w
+
+
+# ---- analistas e empresas ----------------------------------------------------------------------------------------
+HOUSES = ["XP", "BTG", "Itaú BBA", "Bradesco BBI", "Santander", "Safra", "Genial", "Ágora", "Goldman Sachs", "Goldman",
+          "JPMorgan", "JP Morgan", "Morgan Stanley", "Citi", "UBS", "Bank of America", "BofA", "HSBC", "Barclays", "Jefferies",
+          "Empiricus", "Suno", "Guide", "Ativa", "Inter", "Nord", "BB Investimentos", "Scotiabank", "Deutsche"]
+_HOUSE_RE = re.compile(r"(?<![\w])(" + "|".join(re.escape(h) for h in HOUSES) + r")(?![\w])", re.I)
+ANALYST_UP = re.compile(r"(eleva|elevou|upgrade|raises?|compra\b|recomenda(m)? compra|outperform|overweight|\bbuy\b|prefer|top pick|"
+                        r"potencial de (alta|valoriza)|valoriza[çc][ãa]o de|aposta em|otimis|bullish|reitera compra)", re.I)
+ANALYST_DOWN = re.compile(r"(rebaixa|rebaixou|downgrade|cuts?|corta|cortou|venda\b|recomenda(m)? venda|underperform|underweight|\bsell\b|"
+                          r"cautela|preocupa|afasta|risco|pessimis|bearish|reduz pre[çc]o-alvo)", re.I)
+ANALYST_CTX = re.compile(r"(analist|recomenda|pre[çc]o-alvo|price target|rating|upgrade|downgrade|estrategist|strategist|carteira recomendada|overweight|underweight)", re.I)
+TICKER = re.compile(r"\b([A-Z]{4}(?:3|4|5|6|11|32|34))\b")
+CORP_UP = re.compile(r"(lucro (sobe|cresce|salta|dispara|avan[çc]a|recorde)|supera (expectativa|estimativa)|acima do esperado|dividendo|"
+                     r"recompra|sobe|salta|dispara|avan[çc]a|aplaude|foguete|surpreende|reverte preju[íi]zo|bate (novo )?recorde)", re.I)
+CORP_DOWN = re.compile(r"((?<!reverte )preju[íi]zo|caem|afunda|lucro (cai|recua|despenca|encolhe)|abaixo do esperado|decepciona|cai|desaba|despenca|tomba|"
+                       r"recua|perde|endividamento|rebaixa|investiga|multa|calote|recupera[çc][ãa]o judicial)", re.I)
+
+
+def analyst_view(it: dict) -> Optional[dict]:
+    """Manchete com opinião de casa de análise/banco → {casa, tom, ticker}. Atribuída à fonte, nunca reescrita."""
+    t = it["title"]
+    m = _HOUSE_RE.search(t)
+    if not m and not ANALYST_CTX.search(t):
+        return None
+    up, down = bool(ANALYST_UP.search(t)), bool(ANALYST_DOWN.search(t))
+    tk = TICKER.search(t)
+    return {"casa": m.group(1) if m else "analistas", "tom": 1 if up and not down else -1 if down and not up else 0,
+            "ticker": tk.group(1) if tk else None, "titulo": t, "fonte": it["source"], "link": it["link"], "ts": it["ts"]}
+
+
+def company_news(it: dict) -> Optional[dict]:
+    tk = TICKER.search(it["title"])
+    if not tk:
+        return None
+    up, down = bool(CORP_UP.search(it["title"])), bool(CORP_DOWN.search(it["title"]))
+    return {"ticker": tk.group(1), "tom": 1 if up and not down else -1 if down and not up else 0, "titulo": it["title"],
+            "fonte": it["source"], "link": it["link"], "ts": it["ts"]}
+
+
 def classify(title: str) -> list[tuple]:
     out = []
     for k, sc, subj, pol, ei, ed, ttl, ded in _COMPILED:
@@ -154,13 +263,13 @@ def _window(items: list[dict], now: float, max_age_h: float, half_life_h: float)
         if not cls:
             continue
         used += 1
-        w = 0.5 ** (max(age_h, 0) / half_life_h)
+        w = 0.5 ** (max(age_h, 0) / half_life_h) * headline_weight(it["title"], it["source"])
         for k, sc, ei, ed, ttl, ded in cls:
-            t = themes.setdefault(k, {"tema": ttl, "escopo": sc, "n": 0, "peso": 0.0, "ibov": ei, "dolar": ed,
+            t = themes.setdefault(k, {"key": k, "tema": ttl, "escopo": sc, "n": 0, "peso": 0.0, "ibov": ei, "dolar": ed,
                                       "deducao": ded, "manchetes": []})
             t["n"] += 1
             t["peso"] += w
-            if len(t["manchetes"]) < 3:
+            if len(t["manchetes"]) < 3 and not OPINION.search(it["title"]) or not t["manchetes"]:
                 t["manchetes"].append({"titulo": it["title"], "fonte": it["source"], "link": it["link"], "ts": it["ts"]})
             si += w * ei
             sd += w * ed
@@ -207,5 +316,18 @@ def analyze(items: list[dict], now: Optional[float] = None) -> dict:
     for w in (daily, weekly):
         w["leitura_ibov"] = label(w["score_ibov"])
         w["leitura_dolar"] = label(-w["score_dolar"])   # dólar em alta é "desfavorável" para o real
+    views, corp, seen = [], [], set()
+    for it in items:
+        if now - it["ts"] > 7 * 86400:
+            continue
+        v = analyst_view(it)
+        if v and len(views) < 40:
+            views.append(v)
+        c = company_news(it) if it["scope"] == "BR" else None
+        if c and (c["ticker"], c["titulo"][:40]) not in seen and len(corp) < 40:
+            seen.add((c["ticker"], c["titulo"][:40]))
+            corp.append(c)
+    pos, neg = sum(1 for v in views if v["tom"] > 0), sum(1 for v in views if v["tom"] < 0)
     return {"diario": daily, "semanal": weekly, "nacionais": top("BR"), "internacionais": top("INT"),
-            "total": len(items), "atualizado": now}
+            "analistas": {"itens": views[:16], "positivas": pos, "negativas": neg, "total": len(views)},
+            "empresas": corp[:20], "total": len(items), "atualizado": now}

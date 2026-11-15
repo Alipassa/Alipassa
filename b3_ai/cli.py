@@ -17,6 +17,18 @@ from .engine import Engine
 from .model import BRT
 
 
+def load_env(path: str = ".env") -> None:
+    """Lê CHAVE=valor do .env (sem sobrescrever o que já está no ambiente): ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN..."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
 def _engine(args: argparse.Namespace) -> Engine:
     return Engine(data_dir=args.dados, with_news=not args.sem_noticias)
 
@@ -58,6 +70,14 @@ def cmd_analise(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analise_ia(args: argparse.Namespace) -> int:
+    e = _engine(args)
+    e.cycle()
+    r = e.run_ai()
+    print(r.get("texto") or f"analista com IA indisponível: {r.get('erro')}")
+    return 0 if r.get("ok") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="b3_ai", description="B3 AI — mercado brasileiro × exterior, probabilidades do mini índice e do mini dólar")
     p.add_argument("--dados", default="dados", help="pasta do banco local (padrão: dados)")
@@ -74,7 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     rl.set_defaults(func=cmd_relatorio)
     an = sub.add_parser("analise", help="quadro de probabilidades no terminal")
     an.set_defaults(func=cmd_analise)
+    ia = sub.add_parser("analise-ia", help="análise escrita pelo Claude a partir dos dados (precisa de ANTHROPIC_API_KEY)")
+    ia.set_defaults(func=cmd_analise_ia)
     args = p.parse_args(argv)
+    load_env()
     if not getattr(args, "func", None):
         p.print_help()
         return 2

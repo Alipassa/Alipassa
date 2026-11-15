@@ -1,0 +1,6 @@
+[
+  {"data": "2026-12-10", "hora": "10:30", "pais": "EUA", "evento": "CPI — inflação ao consumidor dos EUA", "impacto": "muito alto",
+   "porque": "Inflação acima do esperado adia cortes do Fed: juros e dólar sobem, bolsa cai. Abaixo do esperado, o contrário."},
+  {"data": "2026-12-11", "hora": "09:00", "pais": "Brasil", "evento": "IPCA de novembro", "impacto": "alto",
+   "porque": "Inflação brasileira acima do esperado pressiona os juros futuros e pesa em varejo e construção."}
+]

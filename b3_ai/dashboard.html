@@ -88,6 +88,17 @@ canvas{width:100%;height:100%;display:block}
 #tip{position:fixed;pointer-events:none;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:12px;display:none;z-index:9;box-shadow:0 4px 14px rgba(0,0,0,.3)}
 input,select{font:inherit;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
 .warnbox{background:var(--surface);border:1px solid var(--warn);color:var(--warn);border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:13px}
+.alert{border-radius:12px;padding:12px 14px;margin-bottom:10px;border:2px solid;display:flex;gap:12px;align-items:center}
+.alert .ic{font-size:28px;line-height:1} .alert b{font-size:16px} .alert .small{opacity:.9}
+.alert.d{border-color:var(--down);background:var(--down-bg)} .alert.u{border-color:var(--up);background:var(--up-bg)}
+.alert.n{border-color:var(--warn);background:var(--surface)}
+.alert.hot{animation:pulse 1.2s ease-in-out infinite} @keyframes pulse{50%{box-shadow:0 0 0 6px var(--down-bg)}}
+@media (prefers-reduced-motion:reduce){.alert.n{border-color:var(--warn);background:var(--surface)}
+.alert.hot{animation:none}}
+.pillar{display:grid;grid-template-columns:26px minmax(120px,230px) 1fr;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px;align-items:baseline}
+.chip{display:inline-block;padding:1px 7px;border-radius:99px;background:var(--surface2);margin:2px 4px 2px 0;font-size:12px;white-space:nowrap}
+.md h2{font-size:14px;margin:14px 0 4px;text-transform:none;letter-spacing:0;color:var(--text)} .md p{margin:6px 0} .md ul{margin:4px 0;padding-left:18px}
+.stack{display:flex;height:12px;border-radius:99px;overflow:hidden;gap:2px;margin:8px 0}
 footer{margin-top:20px;color:var(--muted);font-size:12px}
 .secbar{display:grid;grid-template-columns:minmax(110px,170px) 1fr 86px;white-space:nowrap;gap:8px;align-items:center;font-size:12.5px;padding:2px 0}
 </style>
@@ -99,9 +110,11 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
   <span id="status" class="pill closed">carregando…</span>
   <span id="upd" class="small muted"></span>
   <span class="sp"></span>
+  <button id="btnNotif" title="Avisar com notificação e som quando surgir um ALERTA">Ativar alertas sonoros</button>
   <button id="btnRefresh">Atualizar agora</button>
   <a class="btn" href="/relatorio" target="_blank">Gerar relatório</a>
 </header>
+<div id="alerts"></div>
 <div id="warn"></div>
 
 <div class="grid g-hero">
@@ -125,10 +138,21 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
       <span id="px" class="num" style="font-size:34px;font-weight:800">—</span><span id="pxChg" class="num" style="font-size:16px;font-weight:700"></span>
     </div>
     <div class="kv" id="pxKv"></div>
-    <h3>Leitura intraday (5 min)</h3>
-    <div class="small" id="intraRead"></div>
+    <h3>Tendência — dia · semana · mês</h3>
+    <div id="trend"></div>
+    <h3>Extremos de compra e venda (5 min)</h3>
+    <div class="small" id="rev"></div>
+    <div class="small muted" id="intraRead" style="margin-top:6px"></div>
   </div>
 </div>
+
+<section class="grid g2">
+  <div class="card"><h2>Síntese para decisão — mini índice</h2><div id="synth"></div></div>
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Análise do analista com IA (Claude)</h2><span class="sp"></span><button id="btnAI">Pedir análise agora</button></div>
+    <div id="aiBody" class="md small" style="margin-top:8px"></div>
+  </div>
+</section>
 
 <section class="card">
   <h2>Quadro de probabilidades — <span id="boardName"></span></h2>
@@ -140,7 +164,7 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
   <div class="card">
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Gráfico</h2><span class="sp"></span><div class="seg" id="tfSeg"></div></div>
     <div class="chartbox" style="margin-top:8px"><canvas id="chart"></canvas></div>
-    <div class="small muted">Candles: ▲ alta em verde, ▼ queda em vermelho · linhas tracejadas: pivô (P), resistências (R1, R2) e suportes (S1, S2).</div>
+    <div class="small muted">Candles: ▲ alta em verde, ▼ queda em vermelho · linhas tracejadas: pivô (P), resistências (R1, R2) e suportes (S1, S2) · no gráfico de 5 min, ▲▼ soltos marcam os sinais de reversão.</div>
   </div>
   <div class="card">
     <h2>Confronto: exterior × Brasil</h2>
@@ -157,6 +181,21 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Notícias e deduções</h2><span class="sp"></span><div class="seg" id="newsSeg"></div></div>
     <div id="newsBody" style="margin-top:8px"></div>
   </div>
+</section>
+
+<section class="card">
+  <h2>Agenda — dias que podem mexer com o mercado mundial e com o Brasil</h2>
+  <div id="agenda"></div>
+</section>
+
+<section class="card">
+  <h2>Visão dos analistas e economistas</h2>
+  <div class="grid g3">
+    <div><h3 style="margin-top:0">Boletim Focus — consenso dos economistas</h3><div id="focus"></div></div>
+    <div><h3 style="margin-top:0">Recomendações das casas para ações da B3</h3><div id="recs"></div></div>
+    <div><h3 style="margin-top:0">O que as casas de análise disseram (7 dias)</h3><ul class="read news" id="views"></ul></div>
+  </div>
+  <h3>Notícias por empresa × reação da ação</h3><ul class="read news" id="corp" style="columns:2 420px"></ul>
 </section>
 
 <section class="grid g2">
@@ -245,7 +284,8 @@ function render(){
     [esc(R.alvo),"alvo da previsão"],
     [R.oos_acerto!=null?nf(R.oos_acerto*100,1)+"%":"—","acerto fora da amostra"+(R.oos_n?" ("+nf(R.oos_n)+" previsões)":"")],
     [R.oos_acerto_conv!=null?nf(R.oos_acerto_conv*100,1)+"%":"—","acerto quando a prob. passa de 55/45"+(R.oos_n_conv?" ("+R.oos_n_conv+")":"")],
-    [nf(R.faixa_min,d)+" – "+nf(R.faixa_max,d),"faixa provável (±1σ = "+nf(R.sigma_pct,2)+"%)"],
+    R.f80_min!=null?[nf(R.f80_min,d)+" – "+nf(R.f80_max,d),"faixa de 80%: o preço ficou dentro dela em "+nf(R.f80_cobertura*100,0)+"% de "+nf(R.f80_n)+" casos fora da amostra"]
+      :[nf(R.faixa_min,d)+" – "+nf(R.faixa_max,d),"faixa provável (±1σ = "+nf(R.sigma_pct,2)+"%)"],
     [`<span class="up">${Math.round(f.alta_forte*100)}%</span> · <span class="up">${Math.round(f.alta*100)}%</span> · <span class="down">${Math.round(f.queda*100)}%</span> · <span class="down">${Math.round(f.queda_forte*100)}%</span>`,"alta forte · alta · queda · queda forte"],
     [nf(R.base*100,0)+"%","taxa-base histórica de alta"],
   ].map(([b,s])=>`<div><b>${b}</b><span>${s}</span></div>`).join("");
@@ -264,6 +304,17 @@ function render(){
     .map(([b,s])=>`<div><b>${b}</b><span>${s}</span></div>`).join("");
   const I=A.intraday;
   $("intraRead").innerHTML=I?`Tendência <b class="${I.tendencia==="compradora"?"up":I.tendencia==="vendedora"?"down":""}">${I.tendencia==="compradora"?"▲ ":I.tendencia==="vendedora"?"▼ ":""}${esc(I.tendencia)}</b> · preço ${I.acima_vwap?"acima":"abaixo"} do VWAP (${nf(I.vwap,d)}) · EMA9 ${I.ema_alta?"acima":"abaixo"} da EMA21 · RSI ${nf(I.rsi,0)} · sessão ${nf(I.min,d)} – ${nf(I.max,d)}<br><span class="muted">Leitura técnica descritiva — não é a probabilidade estatística acima.</span>`:"sem barras intraday";
+  const tcls=t=>t==="ALTA"?"up":t==="BAIXA"?"down":"muted",tic=t=>t==="ALTA"?"▲ ":t==="BAIXA"?"▼ ":"■ ";
+  $("trend").innerHTML='<div class="tiles">'+(A.tendencias||[]).map(t=>`<div class="tile" title="${esc(t.criterios.map(c=>(c.alta?"▲ ":"▼ ")+c.nome).join("\n"))}"><b class="${tcls(t.tendencia)}">${tic(t.tendencia)}${esc(t.tendencia)}</b><span>${esc(t.prazo)} · ${pct(t.var)} · ${t.criterios.filter(c=>c.alta).length} de ${t.criterios.length} critérios de alta</span></div>`).join("")+"</div>";
+  const V=A.reversao;
+  if(V){const h30=V.historico["30 min"],h60=V.historico["60 min"],pos=Math.max(0,Math.min(100,V.bb_pos*100));
+    $("rev").innerHTML=`<b class="${V.sinal>0||V.estado<0?"up":V.sinal<0||V.estado>0?"down":"muted"}">${V.sinal>0?"▲ ":V.sinal<0?"▼ ":V.estado?"⚠ ":""}${esc(V.rotulo)}</b>
+      <div style="position:relative;height:14px;border-radius:99px;margin:8px 0 2px;background:linear-gradient(90deg,var(--up-bg),var(--surface2) 30%,var(--surface2) 70%,var(--down-bg))"><i style="position:absolute;top:-3px;bottom:-3px;width:4px;border-radius:2px;background:var(--text);left:calc(${pos}% - 2px)"></i></div>
+      <div style="display:flex;justify-content:space-between" class="faint"><span>sobrevendido (zona de compra)</span><span>sobrecomprado (zona de venda)</span></div>
+      RSI ${nf(V.rsi,0)} · ${V.vwap_z>0?"+":""}${nf(V.vwap_z,1)} desvios do VWAP · posição nas bandas ${nf(pos,0)}%<br>
+      <span class="muted">Sinal medido: em ${h30.n} reversões do histórico o preço foi na direção do sinal em <b>${h30.acerto==null?"—":nf(h30.acerto*100,0)+"%"}</b> das vezes em 30 min (média ${pct(h30.media_pct,3)}) e ${h60.acerto==null?"—":nf(h60.acerto*100,0)+"%"} em 1 h.</span>`+
+      (V.recentes.length?'<br><span class="muted">Últimos sinais: '+V.recentes.slice(-5).map(r=>`<span class="chip"><span class="${r.lado>0?"up":"down"}">${r.lado>0?"▲":"▼"}</span> ${hhmm(r.ts)} · ${nf(r.preco,d)}</span>`).join("")+"</span>":"");
+  }else $("rev").innerHTML='<span class="muted">sem barras intraday</span>';
   // ---- quadro
   $("boardName").textContent=A.nome;
   $("board").innerHTML=rows.map(r=>`<button class="hz ${r.horizonte===hz?"sel":""}" data-h="${esc(r.horizonte)}"><div class="t">${esc(r.horizonte)}</div><div class="a">${esc(r.alvo)}</div>
@@ -282,6 +333,7 @@ function render(){
     <span class="num ${cls(x.contrib)}" style="text-align:right">${x.contrib>0?"+":""}${nf(x.contrib,2)} pp</span></div>`}).join("");
   // ---- leitura
   $("read").innerHTML=(S.leitura||[]).map(x=>`<li>${esc(x)}</li>`).join("");
+  renderAlerts(); renderSynth(); renderAI(); renderAgenda(); renderAnalysts();
   renderNews(); renderIntl(); renderB3Summary();
   $("foot").textContent=S.aviso_legal;
 }
@@ -295,13 +347,73 @@ function renderNews(){
     <div class="tile"><b class="${cls(-W.score_dolar)}">${W.score_dolar>0?"▲ +":W.score_dolar<0?"▼ ":""}${W.score_dolar}</b><span>pressão no dólar · para o real: ${esc(W.leitura_dolar)}</span></div>
     <div class="tile"><b>${W.classificadas}</b><span>manchetes classificadas de ${N.total}</span></div></div>`+
     (W.temas.length?W.temas.slice(0,6).map(t=>`<div class="theme ${t.ibov>0?"u":t.ibov<0?"d":""}"><b>${esc(t.tema)}</b> <span class="small muted">· ${t.n} manchete${t.n>1?"s":""} · ${t.escopo==="BR"?"Brasil":"exterior"} · bolsa <span class="${cls(t.ibov)}">${t.ibov>0?"▲":"▼"}</span> · dólar <span class="${cls(-t.dolar)}">${t.dolar>0?"▲":t.dolar<0?"▼":"■"}</span></span>
-      <div class="small">${esc(t.deducao)}.</div>${t.manchetes.slice(0,2).map(m=>`<div class="small muted">“<a href="${esc(safeUrl(m.link))}" target="_blank" rel="noopener noreferrer" style="color:inherit">${esc(m.titulo)}</a>” — ${esc(m.fonte)}</div>`).join("")}</div>`).join("")
+      <div class="small">${esc(t.deducao)}.</div>${themeImpact(t)}${t.manchetes.slice(0,2).map(m=>`<div class="small muted">“<a href="${esc(safeUrl(m.link))}" target="_blank" rel="noopener noreferrer" style="color:inherit">${esc(m.titulo)}</a>” — ${esc(m.fonte)}</div>`).join("")}</div>`).join("")
      :'<div class="muted small" style="margin-top:8px">Nenhum tema de mercado identificado nas manchetes desta janela.</div>')+
     '<div class="small muted">Classificação por regras, mostrada ao lado da probabilidade estatística — não entra no cálculo dela.</div>';
   const li=x=>`<li><span class="${x.ibov>0?"up":x.ibov<0?"down":"faint"}">${x.ibov>0?"▲":x.ibov<0?"▼":"·"}</span> <a href="${esc(safeUrl(x.link))}" target="_blank" rel="noopener noreferrer">${esc(x.titulo)}</a> <span class="small muted">— ${esc(x.fonte)} · ${hhmm(x.ts)}${x.temas.length?" · "+esc(x.temas.join(", ")):""}</span></li>`;
   $("newsBR").innerHTML=N.nacionais.map(li).join(""); $("newsINT").innerHTML=N.internacionais.map(li).join("");
 }
 
+function themeImpact(t){
+  let h="";const I=t.impacto,H=t.historico;
+  if(I&&I.grupos.length){h+='<div class="small" style="margin:4px 0">'+I.grupos.filter(g=>g.papeis.length).map(g=>`<span class="${g.lado==="ganha"?"up":"down"}">${g.lado==="ganha"?"▲ tende a ajudar":"▼ tende a pesar"}</span> ${esc(g.setor)}: `+g.papeis.map(x=>`<span class="chip"><b>${esc(x.t)}</b> ${chg(x.c,1)}</span>`).join("")).join("<br>")+
+    (I.total?`<br><span class="muted">Hoje ${I.confirmam} de ${I.total} papéis andaram na direção esperada — ${I.confirmam/I.total>=.6?"o mercado está confirmando a notícia":I.confirmam/I.total<=.4?"o mercado NÃO está reagindo como a notícia sugere (já no preço, ou outro fator domina)":"reação mista"}. Efeito típico: ${esc(I.prazo||"")}.</span>`:"")+"</div>";}
+  if(H){h+=`<div class="small" style="margin:4px 0">📊 Medido no histórico: nos ${H.n} pregões em que ${esc(H.evento)}, o mini índice fechou em <b class="${H.dia_pct_alta>=.5?"up":"down"}">${H.dia_pct_alta>=.5?"alta":"queda"} em ${nf(Math.max(H.dia_pct_alta,1-H.dia_pct_alta)*100,0)}%</b> deles (média ${pct(H.dia_media)}); no pregão seguinte subiu em ${nf(H.seguinte_pct_alta*100,0)}% (média ${pct(H.seguinte_media)}).</div>`;}
+  return h;
+}
+let seenAlerts=new Set(),notifOn=false;
+function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=880;g.gain.value=.15;o.start();setTimeout(()=>{o.frequency.value=660},250);setTimeout(()=>{o.stop();c.close()},600)}catch(e){}}
+function renderAlerts(){
+  const A=S.alertas||[],L=S.limiares||{alerta:.9,atencao:.75};
+  $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${a.nivel==="ALERTA"?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":"⚠️"}</span><div><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></div></div>`).join("");
+  document.title=(A.some(a=>a.nivel==="ALERTA")?"🚨 ALERTA · ":"")+"B3 AI — Mini Índice";
+  A.filter(a=>(a.nivel==="ALERTA"||a.nivel==="REVERSÃO")&&!seenAlerts.has(a.chave)).forEach(a=>{seenAlerts.add(a.chave);if(notifOn){beep();try{if(Notification.permission==="granted")new Notification("B3 AI — "+a.nivel,{body:a.titulo})}catch(e){}}});
+  $("btnNotif").title=`Alerta a partir de ${Math.round(L.alerta*100)}% · atenção a partir de ${Math.round(L.atencao*100)}%`+(L.telegram?" · Telegram ativo":" · Telegram não configurado");
+}
+function renderAgenda(){
+  const G=S.agenda||{},E=G.eventos||[],H=G.fomc_historico;
+  $("agenda").innerHTML=(E.length?"<div class='scroll' style='max-height:none'><table><tr><th>Quando</th><th class='l'>Data</th><th class='l'>Hora (Brasília)</th><th class='l'>Evento</th><th class='l'>Impacto</th></tr>"+
+    E.slice(0,12).map(e=>`<tr><td><b class="${e.dias<=1?"down":""}">${esc(e.quando)}</b></td><td class="l">${esc(e.dia_semana)}</td><td class="l">${esc(e.hora||"—")}</td>
+      <td class="l" style="white-space:normal"><b>${esc(e.pais)}: ${esc(e.evento)}</b>${e.estimada?' <span class="chip">data estimada</span>':""}<div class="small muted">${esc(e.porque||"")} <span class="faint">Fonte: ${esc(e.fonte)}.</span></div></td>
+      <td class="l">${e.impacto==="muito alto"?"🔴 muito alto":"🟠 "+esc(e.impacto)}</td></tr>`).join("")+"</table></div>":'<span class="muted">Sem eventos de alto impacto nos próximos 60 dias (ou fontes indisponíveis).</span>')+
+    (H?`<div class="small" style="margin-top:8px">📊 Medido em ${H.n} decisões do Fed desde 2021: o mini índice oscilou em média <b>${nf(H.abs_dia,2)}%</b> no dia e <b>${nf(H.abs_seguinte,2)}%</b> no seguinte, contra ${nf(H.abs_normal,2)}% num dia comum; fechou em alta em ${nf(H.pct_alta_dia*100,0)}% dos dias de decisão. Extremos: ${pct(H.maior_queda)} e ${pct(H.maior_alta)}.</div>`:"")+
+    '<div class="small muted" style="margin-top:6px">Para acrescentar outros eventos (CPI, PCE, IPCA, balanços), copie <code>dados/agenda.exemplo.json</code> para <code>dados/agenda.json</code>.</div>';
+}
+function renderSynth(){
+  const Y=S.sintese; if(!Y){$("synth").innerHTML='<span class="muted">sem dados</span>';return}
+  const ic=l=>l>0?'<b class="up">▲</b>':l<0?'<b class="down">▼</b>':'<span class="faint">■</span>';
+  $("synth").innerHTML=`<div class="verdict" style="margin-top:0"><span class="tag ${Y.alta>Y.queda?"u":Y.queda>Y.alta?"d":""}">${esc(Y.rotulo)}</span><span class="muted"><b class="up">▲ ${Y.alta}</b> a favor da alta · <b class="down">▼ ${Y.queda}</b> a favor da queda · ■ ${Y.neutro} neutros</span></div>
+    <div class="stack"><i style="width:${Y.alta/Y.pilares.length*100}%;background:var(--up)"></i><i style="width:${Y.neutro/Y.pilares.length*100}%;background:var(--faint)"></i><i style="width:${Y.queda/Y.pilares.length*100}%;background:var(--down)"></i></div>`+
+    Y.pilares.map(p=>`<div class="pillar">${ic(p.lado)}<b>${esc(p.pilar)}</b><span class="muted">${esc(p.detalhe)}</span></div>`).join("")+
+    '<div class="small muted" style="margin-top:8px">Contagem de frentes independentes que concordam — ajuda a pesar a decisão, mas não é uma probabilidade.</div>';
+}
+function mdLite(t){let h="",ul=false;const inl=x=>esc(x).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>");
+  for(const ln of String(t||"").split("\n")){const m=ln.match(/^\s*[-*]\s+(.*)/);
+    if(m){if(!ul){h+="<ul>";ul=true}h+="<li>"+inl(m[1])+"</li>";continue}
+    if(ul){h+="</ul>";ul=false}
+    if(/^#{1,3}\s/.test(ln))h+="<h2>"+inl(ln.replace(/^#+\s*/,""))+"</h2>";else if(ln.trim())h+="<p>"+inl(ln)+"</p>"}
+  return h+(ul?"</ul>":"")}
+function renderAI(){
+  const I=S.ia||{},off=S.ia_indisponivel;
+  $("btnAI").disabled=!!off;
+  $("aiBody").innerHTML=I.ok?mdLite(I.texto)+`<p class="muted">Escrito por ${esc(I.modelo||"Claude")} em ${hhmm(I.ts)} a partir dos dados deste painel. Opinião de apoio: não altera as probabilidades calculadas e não é recomendação de investimento.</p>`
+    :off?`<span class="muted">Desativado: ${esc(off)}. Com a chave configurada, o Claude lê todos os dados deste painel (estatística, exterior, notícias, analistas) e escreve a análise completa do mini índice e do mini dólar.</span>`
+    :I.erro?`<span class="down">Não foi possível gerar: ${esc(I.erro)}</span>`:'<span class="muted">Clique em “Pedir análise agora” para o Claude ler os dados e escrever a análise (leva até 1 minuto).</span>';
+}
+function renderAnalysts(){
+  const F=S.focus||{},rv=(x,inv)=>x==null||Math.abs(x)<.005?'<span class="faint">estável</span>':`<span class="${(x>0)!==inv?"up":"down"}">${x>0?"▲ +":"▼ "}${nf(x,2)} em 4 sem.</span>`;
+  const bad={"IPCA":true,"Selic":true,"Câmbio":true};
+  $("focus").innerHTML=Object.keys(F).length?"<table><tr><th>Projeção</th><th>Ano</th><th>Mediana</th><th>Revisão</th></tr>"+Object.entries(F).map(([k,v])=>v.itens.map(i=>`<tr><td>${esc(v.nome)}</td><td>${esc(i.ano)}</td><td class="num">${nf(i.mediana,2)}</td><td>${rv(i.revisao,!!bad[k])}</td></tr>`).join("")).join("")+"</table><div class='small muted' style='margin-top:6px'>Verde = revisão que favorece a bolsa (menos inflação, juros e dólar; mais PIB). Fonte: Banco Central.</div>":'<span class="muted small">Focus indisponível neste ciclo.</span>';
+  const R=S.b3&&S.b3.analistas;
+  const tb=(xs)=>"<table><tr><th>Papel</th><th>Compra</th><th>Neutro</th><th>Venda</th><th>Dia</th></tr>"+xs.slice(0,6).map(x=>`<tr title="${esc(x.n)}"><td><b>${esc(x.t)}</b></td><td class="num up">${x.ab}</td><td class="num">${x.ah}</td><td class="num down">${x.av}</td><td>${chg(x.c,1)}</td></tr>`).join("")+"</table>";
+  $("recs").innerHTML=R?`<div class="small">${nf(R.recomendacoes)} recomendações para ${R.cobertas} ações: <b class="up">${nf(R.pct_compra*100,0)}% compra</b> · ${nf(R.pct_neutro*100,0)}% neutro · <b class="down">${nf(R.pct_venda*100,0)}% venda</b></div>
+    <div class="stack"><i style="width:${R.pct_compra*100}%;background:var(--up)"></i><i style="width:${R.pct_neutro*100}%;background:var(--faint)"></i><i style="width:${R.pct_venda*100}%;background:var(--down)"></i></div>
+    <div class="small muted">Mais recomendadas</div>${tb(R.preferidas)}<div class="small muted" style="margin-top:8px">Menos recomendadas</div>${tb(R.evitadas)}`:'<span class="muted small">Consenso indisponível.</span>';
+  const N=S.noticias||{},V=(N.analistas||{}).itens||[],ic=t=>t>0?'<span class="up">▲</span>':t<0?'<span class="down">▼</span>':'<span class="faint">·</span>';
+  $("views").innerHTML=V.length?V.slice(0,12).map(v=>`<li>${ic(v.tom)} <b>${esc(v.casa)}</b>${v.ticker?` · <span class="chip"><b>${esc(v.ticker)}</b> ${v.var!=null?chg(v.var,1):""}</span>`:""} <a href="${esc(safeUrl(v.link))}" target="_blank" rel="noopener noreferrer">${esc(v.titulo)}</a> <span class="small muted">— ${esc(v.fonte)}</span></li>`).join(""):'<li class="muted">Nenhuma opinião de casa de análise nas manchetes da semana.</li>';
+  const C=N.empresas||[];
+  $("corp").innerHTML=C.length?C.map(c=>`<li>${ic(c.tom)} <span class="chip"><b>${esc(c.ticker)}</b> ${c.var!=null?chg(c.var,1):""}</span> <a href="${esc(safeUrl(c.link))}" target="_blank" rel="noopener noreferrer">${esc(c.titulo)}</a> <span class="small muted">— ${esc(c.fonte)}${c.var!=null&&c.tom?(c.tom*c.var>0?" · ação confirmou":" · ação foi no sentido contrário"):""}</span></li>`).join(""):'<li class="muted">Sem notícias de empresas nesta janela.</li>';
+}
 function spark(v){if(!v||v.length<2)return"";const mn=Math.min(...v),mx=Math.max(...v),w=70,h=18;
   const p=v.map((y,i)=>(i/(v.length-1)*w).toFixed(1)+","+(h-1-(mx>mn?(y-mn)/(mx-mn):.5)*(h-2)).toFixed(1)).join(" ");
   return `<svg width="${w}" height="${h}" style="vertical-align:middle"><polyline points="${p}" fill="none" stroke="var(--muted)" stroke-width="1.5"/></svg>`;}
@@ -340,7 +452,7 @@ function renderB3Summary(){
   $("gain").innerHTML=tb(b.maiores_altas);$("loss").innerHTML=tb(b.maiores_quedas);$("most").innerHTML=tb(b.mais_negociadas.slice(0,6));
 }
 
-const COLS=[["t","Ticker",0],["n","Empresa",0],["k","Tipo",0],["s","Setor",0],["p","Preço",1],["c","Dia",1],["w","Semana",1],["m","Mês",1],["y","Ano",1],["v","Volume R$",1],["mc","Valor de mercado",1],["pe","P/L",1],["dy","DY",1],["rsi","RSI",1],["a200","Tendência",0]];
+const COLS=[["t","Ticker",0],["n","Empresa",0],["k","Tipo",0],["s","Setor",0],["p","Preço",1],["c","Dia",1],["w","Semana",1],["m","Mês",1],["y","Ano",1],["v","Volume R$",1],["mc","Valor de mercado",1],["pe","P/L",1],["dy","DY",1],["rsi","RSI",1],["ab","Analistas",1],["a200","Tendência",0]];
 function renderB3Table(){
   const q=$("q").value.trim().toUpperCase(),fk=$("fKind").value,fs=$("fSector").value;
   let rows=B3.filter(x=>(!fk||x.k===fk)&&(!fs||x.s===fs)&&(!q||x.t.includes(q)||(x.n||"").toUpperCase().includes(q)));
@@ -351,7 +463,7 @@ function renderB3Table(){
   $("b3Table").innerHTML="<tr>"+COLS.map(([k,l,r])=>`<th class="sort ${r?"":"l"}" data-k="${k}">${l}${sortKey===k?(sortDir>0?" ↑":" ↓"):""}</th>`).join("")+"</tr>"+
     rows.slice(page*PER,page*PER+PER).map(x=>`<tr><td><b>${esc(x.t)}</b></td><td class="l" style="max-width:240px;overflow:hidden;text-overflow:ellipsis">${esc(x.n)}</td><td class="l">${esc(x.k)}</td><td class="l">${esc(x.s)}</td>
       <td class="num">${nf(x.p,2)}</td><td>${chg(x.c)}</td><td>${chg(x.w,1)}</td><td>${chg(x.m,1)}</td><td>${chg(x.y,1)}</td><td class="num">${money(x.v)}</td><td class="num">${x.mc?money(x.mc):"—"}</td>
-      <td class="num">${x.pe==null?"—":nf(x.pe,1)}</td><td class="num">${x.dy==null?"—":nf(x.dy,1)+"%"}</td><td class="num">${x.rsi==null?"—":nf(x.rsi,0)}</td><td class="l">${trend(x)}</td></tr>`).join("");
+      <td class="num">${x.pe==null?"—":nf(x.pe,1)}</td><td class="num">${x.dy==null?"—":nf(x.dy,1)+"%"}</td><td class="num">${x.rsi==null?"—":nf(x.rsi,0)}</td><td class="num">${x.at?`<span class="up">${x.ab}</span>·${x.ah}·<span class="down">${x.av}</span>`:"—"}</td><td class="l">${trend(x)}</td></tr>`).join("");
   $("b3Table").querySelectorAll("th.sort").forEach(th=>th.onclick=()=>{const k=th.dataset.k;if(sortKey===k)sortDir=-sortDir;else{sortKey=k;sortDir=["t","n","k","s"].includes(k)?1:-1}page=0;renderB3Table()});
 }
 
@@ -379,6 +491,8 @@ function drawChart(){
   g.fillStyle=col("--muted");g.textBaseline="alphabetic";
   const lab=ts=>{const dt=new Date(ts*1000);return tf==="D1"?dt.toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"}):dt.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})};
   for(let i=0;i<bars.length;i+=Math.ceil(bars.length/6)){g.fillText(lab(bars[i][0]+(tf==="D1"?8*3600:0)),i*step,H-5)}
+  if(tf==="M5"&&A.reversao){const m=new Map(A.reversao.recentes.map(r=>[r.ts,r.lado]));g.font="13px system-ui,sans-serif";g.textAlign="center";
+    bars.forEach((b,i)=>{const l=m.get(b[0]);if(!l)return;const x=i*step+step/2;g.fillStyle=col(l>0?"--up":"--down");g.fillText(l>0?"▲":"▼",x,l>0?y(b[3])+14:y(b[2])-6)});g.textAlign="left"}
   chartGeo={bars,step,lab,d};
 }
 $("chart").addEventListener("mousemove",e=>{if(!chartGeo)return;const r=e.target.getBoundingClientRect(),i=Math.floor((e.clientX-r.left)/chartGeo.step),b=chartGeo.bars[i],t=$("tip");
@@ -400,6 +514,8 @@ async function loadB3(){
 ["q","fKind","fSector"].forEach(id=>$(id).addEventListener("input",()=>{page=0;renderB3Table()}));
 $("prev").onclick=()=>{page--;renderB3Table()};$("next").onclick=()=>{page++;renderB3Table()};
 $("btnRefresh").onclick=async()=>{$("btnRefresh").textContent="Atualizando…";try{await fetch("/api/refresh",{method:"POST"})}catch(e){}setTimeout(()=>{load();loadB3();$("btnRefresh").textContent="Atualizar agora"},6000)};
+$("btnNotif").onclick=async()=>{notifOn=true;beep();try{if("Notification" in window&&Notification.permission!=="granted")await Notification.requestPermission()}catch(e){}$("btnNotif").textContent="Alertas sonoros ativos";$("btnNotif").classList.add("on")};
+$("btnAI").onclick=async()=>{$("btnAI").disabled=true;$("btnAI").textContent="Analisando…";try{const r=await fetch("/api/analise",{method:"POST"});S.ia=await r.json()}catch(e){S.ia={ok:false,erro:"sem resposta do servidor"}}$("btnAI").textContent="Pedir análise agora";renderAI()};
 load();loadB3();setInterval(load,15000);setInterval(loadB3,60000);
 </script>
 </body>

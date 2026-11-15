@@ -201,3 +201,64 @@ class ReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewFeaturesTest(unittest.TestCase):
+    """Faixa de 80 %, persistência do dia, estudo de evento, alertas, agenda, tendência e reversão."""
+
+    def test_band80_covers_about_80_percent(self):
+        rnd = random.Random(41)
+        b = M.band80([abs(rnd.gauss(0, 1)) for _ in range(4000)])
+        self.assertAlmostEqual(b["mult"], 1.2816, delta=0.08)
+        self.assertAlmostEqual(b["cobertura"], 0.80, delta=0.04)
+
+    def test_event_study_measures_shock_days(self):
+        lead = synth_daily(seed=51)
+        tgt = synth_daily(seed=52, lead=lead, beta=1.5)
+        d = M.DailyData(tgt, {"ES": lead}, {"ES": "pct"})
+        ev = M.event_study(d, d.x["ES"], -1)
+        self.assertGreater(ev["n"], 15)
+        self.assertLess(ev["dia_pct_alta"], 0.25)       # exterior desaba → alvo cai no mesmo dia
+        self.assertLess(ev["dia_media"], 0)
+
+    def test_alert_fires_only_above_threshold(self):
+        from b3_ai import alerts
+        mk = lambda p: {"WIN": {"nome": "Mini Índice", "data": "2026-11-13", "prob": [  # noqa: E731
+            {"p_alta": 1 - p, "p_queda": p, "horizonte": "Fecho de hoje", "alvo": "a", "confianca": "c", "nota": ""}]}}
+        self.assertEqual(alerts.from_rows(mk(0.60)), [])
+        self.assertEqual(alerts.from_rows(mk(0.80))[0]["nivel"], "ATENÇÃO")
+        a = alerts.from_rows(mk(0.93))[0]
+        self.assertEqual((a["nivel"], a["lado"]), ("ALERTA", -1))
+
+    def test_fomc_calendar_parser(self):
+        from b3_ai.data import calendar as cal
+        html_text = ('<h4>2026 FOMC Meetings</h4><div class="fomc-meeting__month col"><strong>December</strong></div>'
+                     '<div class="fomc-meeting__date col">8-9*</div><div class="fomc-meeting__month"><strong>Apr/May</strong></div>'
+                     '<div class="fomc-meeting__date">30-1</div><h4>2027 FOMC Meetings</h4>')
+        self.assertEqual(cal.parse_fomc(html_text), [{"data": "2026-05-01", "projecoes": False}, {"data": "2026-12-09", "projecoes": True}])
+        self.assertEqual(cal.first_fridays(__import__("datetime").date(2026, 11, 15), 2), ["2026-12-04"])
+
+    def test_analyst_and_company_headlines(self):
+        v = news_ai.analyst_view({"title": "BTG eleva recomendação de Vale (VALE3) para compra", "source": "Valor", "link": "", "ts": 0})
+        self.assertEqual((v["casa"], v["tom"], v["ticker"]), ("BTG", 1, "VALE3"))
+        c = news_ai.company_news({"title": "CSN (CSNA3) despenca 12% após balanço", "source": "x", "link": "", "ts": 0})
+        self.assertEqual((c["ticker"], c["tom"]), ("CSNA3", -1))
+        self.assertEqual(news_ai.classify("AMD soars amid Nvidia turmoil"), [])       # "turmoil" não é petróleo
+        self.assertLess(news_ai.headline_weight("Guru warns stocks could crash?", "Blog"), news_ai.headline_weight("Fed raises rates", "Reuters"))
+
+    def test_trend_and_reversal(self):
+        from b3_ai import technical as T
+        up = [(1_600_000_000 + i * DAY, 100 + i, 101 + i, 99 + i, 100.5 + i, 1.0) for i in range(80)]
+        tr = {t["prazo"]: t["tendencia"] for t in T.trends(up, [])}
+        self.assertEqual((tr["Semana"], tr["Mês"]), ("ALTA", "ALTA"))
+        # esticada forte para cima e depois uma barra que fecha abaixo da mínima anterior → reversão para baixo
+        bars, c = [], 1000.0
+        for i in range(60):
+            o = c
+            c += 0.2 if i < 40 else 6.0
+            bars.append((1_700_000_000 + i * 300, o, c + 0.5, o - 0.5, c, 10.0))
+        bars.append((bars[-1][0] + 300, c, c + 0.5, c - 12, c - 10, 10.0))
+        x = T.extremes(bars)
+        self.assertEqual(x["state"][-2], 1)
+        self.assertEqual(x["signal"][-1], -1)
+        self.assertIn("PARA BAIXO", T.reversal_read(bars)["rotulo"])

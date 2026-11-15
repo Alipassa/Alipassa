@@ -22,7 +22,9 @@ WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 
 B3_COLUMNS = ["name", "description", "close", "change", "volume", "Value.Traded", "market_cap_basic", "sector",
               "type", "subtype", "RSI", "Perf.W", "Perf.1M", "Perf.YTD", "price_earnings_ttm", "dividend_yield_recent",
-              "SMA50", "SMA200", "Recommend.All", "relative_volume_10d_calc", "high", "low", "open"]
+              "SMA50", "SMA200", "Recommend.All", "relative_volume_10d_calc", "high", "low", "open",
+              "recommendation_mark", "recommendation_buy", "recommendation_over", "recommendation_hold",
+              "recommendation_under", "recommendation_sell", "recommendation_total"]
 
 Bar = tuple  # (ts, open, high, low, close, volume)
 

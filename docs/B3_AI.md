@@ -14,10 +14,16 @@ python -m b3_ai analise       # quadro de probabilidades no terminal
 
 | Bloco | Conteúdo |
 | --- | --- |
-| Destaque | número verde grande = probabilidade de ALTA; vermelho grande = probabilidade de QUEDA, para o ativo (WIN ou WDO) e o horizonte escolhidos |
+| Alertas | 🚨 ALERTA quando a chance de alta ou de queda passa de 90 % (⚠️ ATENÇÃO a partir de 75 %), 🔄 sinal de reversão, 📅 evento de alto impacto hoje/amanhã. Som, notificação do navegador e Telegram (opcional) |
+| Destaque | número verde grande = probabilidade de ALTA; vermelho grande = probabilidade de QUEDA, para o ativo (WIN ou WDO) e o horizonte escolhidos; faixa de preço de 80 % |
+| Tendência e extremos | tendência do dia, da semana e do mês; extremo de compra/venda em 5 min (RSI, bandas, VWAP) e sinal de reversão com o acerto medido |
+| Síntese para decisão | quantas frentes independentes (estatística, exterior, notícias, analistas, Focus, amplitude, técnica) apontam para cada lado |
+| Analista com IA | o Claude lê todos os dados do painel e escreve a análise do mini índice e do mini dólar (opcional, sob demanda) |
 | Quadro de probabilidades | 5 min · 10 min · 30 min · 1 hora · fecho de hoje (com pregão aberto) · diário · semanal, com sinal, validação e acerto fora da amostra |
 | Confronto exterior × Brasil | quanto os mercados internacionais implicavam para o ativo, quanto ele fez, o descolamento e a contribuição de cada fator |
-| Notícias e deduções | manchetes nacionais e internacionais (diário 36 h e semanal 7 dias), tema, direção para bolsa e dólar e a cadeia de dedução |
+| Notícias e deduções | tema, cadeia de causa e efeito, setores e ações atingidos com a variação real do dia (o mercado confirmou a notícia?) e o efeito medido no histórico do mini índice |
+| Agenda | decisões de juros dos EUA (calendário oficial do Fed) e do Copom (Banco Central), payroll e eventos do `dados/agenda.json`, com o efeito histórico dos dias de Fed |
+| Analistas e economistas | boletim Focus com revisões, consenso de recomendações das casas para as ações da B3, manchetes de casas de análise e notícias por empresa × reação da ação |
 | Mercados internacionais | S&P, Nasdaq, DXY, Treasuries, VIX, Brent, minério, cobre, emergentes, China, Europa, ouro, bitcoin; Brasil em NY (EWZ, ADRs) |
 | B3 — todas as empresas | ações, BDRs, FIIs e ETFs: amplitude, setores, maiores altas/quedas e tabela completa com busca, filtros e ordenação |
 | Placar ao vivo | cada previsão é gravada antes do resultado e conferida depois contra o preço real |
@@ -31,6 +37,8 @@ python -m b3_ai analise       # quadro de probabilidades no terminal
 | Histórico diário e intraday de WIN, WDO e fatores internacionais | feed público da TradingView (`data/ws.py`, WebSocket em Python puro); reserva: Yahoo (só diário) |
 | Selic, PTAX, IPCA | Banco Central — SGS (`data/bcb.py`) |
 | Notícias | RSS do Google Notícias (buscas temáticas BR e exterior), InfoMoney e G1 (`data/news.py`) |
+| Consenso dos economistas | boletim Focus — Banco Central, API Olinda (`data/focus.py`) |
+| Agenda | calendário de reuniões do Federal Reserve e próxima reunião do Copom (`data/calendar.py`) |
 
 Cotações públicas da B3 e das bolsas americanas chegam com **~15 minutos de atraso**. As fontes da TradingView são
 endpoints públicos não oficiais: podem mudar sem aviso; quando o histórico falha o motor cai para o Yahoo e avisa no painel.
@@ -55,6 +63,34 @@ modelos cresce enquanto o painel roda.
 
 As notícias são classificadas por regras (`news_ai.py`) e mostradas **ao lado** da probabilidade — não entram no cálculo,
 porque não há histórico de manchetes para validá-las fora da amostra.
+
+## O que acerta 80 % ou mais — e o que não acerta
+
+Medido no histórico real (15/11/2026). O painel mostra sempre o número medido, nunca um número prometido.
+
+| Previsão | Acerto medido | Observação |
+| --- | --- | --- |
+| Faixa de preço de 80 % (todos os horizontes) | 77–83 % fora da amostra | o preço ficou dentro da faixa nessa proporção; serve para alvo e stop |
+| Choque no exterior → pregão do mini índice | dólar disparando: queda em 94 % de 93 pregões; VIX disparando: queda em 81 % de 98 | relação no MESMO pregão; dispara ALERTA/ATENÇÃO quando o choque está acontecendo |
+| Fecho do dia × fechamento anterior | 95 %+ quando o dia já andou meio desvio | referência é o fechamento anterior, não o preço atual: não é vantagem para quem entra agora |
+| Direção do próximo pregão (WIN) | ~54 % em 825 pregões | vantagem pequena e real |
+| Direção em 5 min a 1 h | 47–53 % | sem vantagem comprovada com dado público atrasado em 15 min |
+| Sinal de reversão em extremos (WIN, 30 min) | ~60 % em 111 sinais (67 % na 1ª metade, 53 % na 2ª) | instável; no mini dólar ficou abaixo de 50 % |
+
+Prever a DIREÇÃO do preço a partir de agora com 80 % de acerto não é alcançável de forma honesta — nem por este sistema nem
+por outro; quem mostra esse número em backtest ajustou o modelo ao passado. O que o painel faz é separar o que é confiável
+(faixas, choques, contexto) do que é quase cara-ou-coroa, e avisar quando algo raro e forte acontece.
+
+## Analista com IA (opcional)
+
+```bash
+pip install anthropic
+# no .env:  ANTHROPIC_API_KEY=sua-chave
+python -m b3_ai analise-ia        # ou o botão "Pedir análise agora" no painel
+```
+
+O Claude recebe o estado completo do painel e escreve cenário, notícias que importam, viés do mini índice e do mini dólar
+e riscos. É texto de apoio: não altera as probabilidades. Cada análise consome créditos da sua conta da API.
 
 ## Limites
 

@@ -15,9 +15,11 @@ GN = "https://news.google.com/rss/search?q={q}&hl={hl}&gl={gl}&ceid={ceid}"
 
 # (escopo, consulta) — "when:7d" cobre a semana; a recência é ponderada depois
 QUERIES_BR = ["ibovespa", "dólar real câmbio", "copom selic banco central", "fiscal governo contas públicas economia",
-              "inflação IPCA", "petrobras vale mercado"]
+              "inflação IPCA", "petrobras vale mercado", "analistas recomendação preço-alvo ações",
+              "XP OR BTG OR \"Itaú BBA\" OR \"Bradesco BBI\" OR Safra OR Genial recomendação ações", "balanço lucro prejuízo ações B3"]
 QUERIES_INT = ["federal reserve interest rates", "wall street stocks", "china economy", "oil prices brent opec",
-               "iron ore prices", "us inflation jobs report", "geopolitical risk markets tariffs"]
+               "iron ore prices", "us inflation jobs report", "geopolitical risk markets tariffs",
+               "Goldman OR JPMorgan OR \"Morgan Stanley\" OR Citi OR UBS Brazil stocks emerging markets", "strategist outlook stocks emerging markets"]
 DIRECT = [("BR", "https://www.infomoney.com.br/mercados/feed/", "InfoMoney"),
           ("BR", "https://g1.globo.com/rss/g1/economia/", "G1 Economia")]
 
