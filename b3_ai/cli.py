@@ -70,6 +70,19 @@ def cmd_analise(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auditoria(args: argparse.Namespace) -> int:
+    from . import audit
+    e = _engine(args)
+    text = audit.run(e)
+    os.makedirs(args.saida, exist_ok=True)
+    path = os.path.join(args.saida, "auditoria_" + datetime.now(tz=BRT).strftime("%Y%m%d_%H%M") + ".md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text)
+    print(f"\nauditoria gravada em {path}")
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -96,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     rl.set_defaults(func=cmd_relatorio)
     an = sub.add_parser("analise", help="quadro de probabilidades no terminal")
     an.set_defaults(func=cmd_analise)
+    au = sub.add_parser("auditoria", help="testa as fontes e mede os acertos fora da amostra")
+    au.add_argument("--saida", default="relatorios")
+    au.set_defaults(func=cmd_auditoria)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)

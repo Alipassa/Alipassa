@@ -6,6 +6,7 @@ Painel local (somente leitura, **nunca envia ordens**) em Python puro, sem depen
 python -m b3_ai painel        # abre http://127.0.0.1:8766   (Windows: scripts\rodar_b3_ai.bat)
 python -m b3_ai relatorio     # grava relatorios/relatorio_AAAAMMDD_HHMM.md e .html
 python -m b3_ai analise       # quadro de probabilidades no terminal
+python -m b3_ai auditoria     # testa as fontes e mede os acertos fora da amostra (exemplo: docs/b3_ai_auditoria_exemplo.md)
 ```
 
 ![painel](b3_ai_painel.png)
@@ -40,7 +41,9 @@ python -m b3_ai analise       # quadro de probabilidades no terminal
 | Consenso dos economistas | boletim Focus — Banco Central, API Olinda (`data/focus.py`) |
 | Agenda | calendário de reuniões do Federal Reserve e próxima reunião do Copom (`data/calendar.py`) |
 
-Cotações públicas da B3 e das bolsas americanas chegam com **~15 minutos de atraso**. As fontes da TradingView são
+Os mercados internacionais usam séries que o feed entrega **sem atraso** (índices e commodities em contratos de 24 h,
+moedas, juros, VIX); o atraso de cada série é lido do próprio feed e marcado com ⏱ no painel (hoje só o minério de ferro,
+10 min). WIN, WDO e ações da B3 chegam com **~15 minutos de atraso** no feed público — use o MetaTrader 5 para tempo real. As fontes da TradingView são
 endpoints públicos não oficiais: podem mudar sem aviso; quando o histórico falha o motor cai para o Yahoo e avisa no painel.
 
 ## Tempo real pelo MetaTrader 5 (opcional, Windows)

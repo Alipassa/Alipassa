@@ -1,4 +1,8 @@
-"""Universo acompanhado: alvos nacionais (WIN, WDO) e os fatores internacionais confrontados com eles."""
+"""Universo acompanhado: alvos nacionais (WIN, WDO) e os fatores internacionais confrontados com eles.
+
+Os símbolos internacionais foram escolhidos entre os que o feed público entrega SEM atraso (índices e commodities em
+contratos contínuos de 24 h, moedas, juros, VIX). Futuros de bolsa (CME, SGX, B3) chegam atrasados nesse feed; o atraso
+de cada série é lido do próprio feed e mostrado no painel."""
 
 from __future__ import annotations
 
@@ -29,9 +33,9 @@ ASSETS: list[Asset] = [
     Asset("DI", "BMFBOVESPA:DI11!", "", "DI futuro (1º venc.)", "Brasil", "yield"),
     Asset("BR10Y", "TVC:BR10Y", "", "Juro Brasil 10 anos", "Brasil", "yield"),
     # ---- fatores internacionais (entram no confronto)
-    Asset("ES", "CME_MINI:ES1!", "ES=F", "S&P 500 futuro", "EUA — ações", factor=True,
+    Asset("ES", "OANDA:SPX500USD", "ES=F", "S&P 500 (24 h)", "EUA — ações", factor=True,
           why="apetite a risco global: bolsa americana puxa as emergentes"),
-    Asset("NQ", "CME_MINI:NQ1!", "NQ=F", "Nasdaq 100 futuro", "EUA — ações"),
+    Asset("NQ", "OANDA:NAS100USD", "NQ=F", "Nasdaq 100 (24 h)", "EUA — ações"),
     Asset("DXY", "TVC:DXY", "DX-Y.NYB", "Índice do dólar (DXY)", "Dólar e juros", factor=True,
           why="dólar forte no mundo tira fluxo de emergentes e pressiona o real"),
     Asset("US10Y", "TVC:US10Y", "^TNX", "Treasury 10 anos", "Dólar e juros", "yield", factor=True,
@@ -42,7 +46,7 @@ ASSETS: list[Asset] = [
           why="Petrobras pesa no Ibovespa; petróleo também entra na balança comercial"),
     Asset("IRON", "SGX:FEF1!", "", "Minério de ferro (SGX)", "Commodities", factor=True,
           why="Vale e siderúrgicas; termômetro da demanda chinesa"),
-    Asset("COPPER", "COMEX:HG1!", "HG=F", "Cobre", "Commodities", factor=True,
+    Asset("COPPER", "OANDA:XCUUSD", "HG=F", "Cobre", "Commodities", factor=True,
           why="ciclo industrial global e China"),
     Asset("EEM", "AMEX:EEM", "EEM", "Emergentes (EEM)", "Emergentes", factor=True,
           why="fluxo para mercados emergentes como classe"),
@@ -56,7 +60,7 @@ ASSETS: list[Asset] = [
     Asset("GOLD", "TVC:GOLD", "GC=F", "Ouro", "Commodities"),
     Asset("BTC", "BITSTAMP:BTCUSD", "BTC-USD", "Bitcoin", "Risco"),
     Asset("NI225", "TVC:NI225", "^N225", "Nikkei 225", "Ásia e Europa"),
-    Asset("DJI", "DJ:DJI", "^DJI", "Dow Jones", "EUA — ações"),
+    Asset("DJI", "OANDA:US30USD", "^DJI", "Dow Jones (24 h)", "EUA — ações"),
     Asset("US02Y", "TVC:US02Y", "", "Treasury 2 anos", "Dólar e juros", "yield"),
     # ---- Brasil negociado em Nova York
     Asset("EWZ", "AMEX:EWZ", "EWZ", "EWZ (Brasil em NY)", "Brasil em NY"),

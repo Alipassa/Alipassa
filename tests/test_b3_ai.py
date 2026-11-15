@@ -340,3 +340,13 @@ class MT5Test(unittest.TestCase):
         self.assertIn("abra o terminal", str(cm.exception))
         with self.assertRaises(DataError):
             MT5Feed(None, env={}).connect() if __import__("b3_ai.data.mt5", fromlist=["_mt5"])._mt5 is None else (_ for _ in ()).throw(DataError("x"))
+
+
+class AuditTest(unittest.TestCase):
+    def test_interval_and_verdict(self):
+        from b3_ai import audit
+        lo, hi = audit.interval(0.54, 825)
+        self.assertAlmostEqual(lo, 0.506, places=3)
+        self.assertIn("comprovada", audit.verdict(0.54, 825))
+        self.assertIn("não distinguível", audit.verdict(0.52, 800))
+        self.assertIn("pior", audit.verdict(0.45, 2000))

@@ -53,10 +53,12 @@ def _frame(m: str, p: list) -> str:
     return f"~m~{len(s)}~m~{s}"
 
 
-def fetch_history(requests: list[tuple[str, str, int]], timeout: float = 45.0) -> dict[tuple[str, str], list[Bar]]:
+def fetch_history(requests: list[tuple[str, str, int]], timeout: float = 45.0,
+                  delays: Optional[dict[str, int]] = None) -> dict[tuple[str, str], list[Bar]]:
     """requests = [(símbolo, timeframe, nº de barras)], timeframe "1D", "5", "15", "60"...
 
     Devolve {(símbolo, timeframe): [(ts, o, h, l, c, v), ...]} em ordem cronológica. Símbolos que falharem ficam fora.
+    `delays`, se passado, recebe {símbolo: atraso em segundos} informado pelo feed (0 = tempo real).
     """
     out: dict[tuple[str, str], list[Bar]] = {}
     if not requests:
@@ -98,6 +100,8 @@ def fetch_history(requests: list[tuple[str, str, int]], timeout: float = 45.0) -
                         if len(v) >= 5 and None not in v[:5]:
                             series.append((float(v[0]), float(v[1]), float(v[2]), float(v[3]), float(v[4]),
                                            float(v[5]) if len(v) > 5 and v[5] is not None else 0.0))
+                elif m == "symbol_resolved" and cs in keys and delays is not None and len(p) > 2 and isinstance(p[2], dict):
+                    delays[keys[cs][0]] = int(p[2].get("delay") or 0)
                 elif m == "series_completed" and cs in pending:
                     pending.discard(cs)
                 elif m in ("symbol_error", "series_error") and cs in pending:

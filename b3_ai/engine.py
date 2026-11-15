@@ -44,6 +44,7 @@ class Engine:
         import os
         self.fonte = (fonte or os.environ.get("B3AI_FONTE") or "web").lower()
         self.mt5 = mt5feed.MT5Feed() if self.fonte == "mt5" else None
+        self.delays: dict[str, int] = {}     # atraso (s) de cada série, informado pelo feed
         self.rt: dict = {}            # dados em tempo real do MetaTrader no ciclo atual (vazio = feed público)
         self.data_dir = data_dir
         self._agenda_cache: tuple[float, dict] = (0.0, {})
@@ -67,7 +68,8 @@ class Engine:
         reqs = [(a.tv, "1D", DAILY_BARS) for a in list(TARGETS.values()) + ASSETS]
         reqs += [(TARGETS[k].tv, tf, INTRA_BARS) for k in TARGETS for tf in ("5", "15")] + [(ES, "5", INTRA_BARS), (ES, "15", INTRA_BARS)]
         try:
-            h = tv.fetch_history(reqs)
+            self.delays = {}
+            h = tv.fetch_history(reqs, delays=self.delays)
             missing = [s for s, tf, _ in reqs if (s, tf) not in h]
             if (TARGETS["WIN"].tv, "1D") not in h:
                 raise DataError("histórico do WIN não veio")
@@ -144,6 +146,15 @@ class Engine:
                 eventos.append({**e, "dias": dias, "quando": "HOJE" if dias == 0 else "amanhã" if dias == 1 else f"em {dias} dias",
                                 "dia_semana": fmt_date(e["data"])})
         return {"eventos": eventos, "fomc_historico": estudo, "erros": cached.get("erros", [])}
+
+    def _delay_text(self) -> str:
+        late = sorted({f"{a.name} ({round(self.delays[a.tv] / 60)} min)" for a in ASSETS if self.delays.get(a.tv)})
+        intl = ("Mercados internacionais em tempo real" + (", exceto: " + ", ".join(late) if late else "") + ".") if self.delays \
+            else "Histórico pelo Yahoo (diário)."
+        if self.rt:
+            return "WIN e WDO em TEMPO REAL pelo MetaTrader 5 (" + ", ".join(self.rt["simbolos"].values()) + "). " + intl \
+                   + " Tabela de ações da B3 com ~15 min de atraso."
+        return "WIN, WDO e ações da B3 com ~15 min de atraso (use o MetaTrader 5 para tempo real). " + intl
 
     def _focus(self) -> dict:
         ts, cached = self._focus_cache
@@ -272,8 +283,7 @@ class Engine:
             return [f"scanner B3: {e}"]
 
     # ------------------------------------------------------------------ blocos do estado
-    @staticmethod
-    def _quote(a, bars: list[tuple]) -> Optional[dict]:
+    def _quote(self, a, bars: list[tuple]) -> Optional[dict]:
         if len(bars) < 30:
             return None
         c, pc = bars[-1][4], bars[-2][4]
@@ -287,6 +297,7 @@ class Engine:
 
         return {"key": a.key, "nome": a.name, "grupo": a.group, "tipo": a.kind, "ultimo": c, "var": chg, "var5": perf(5),
                 "var21": perf(21), "data": M.bar_date(bars[-1][0]), "fator": a.factor, "porque": a.why,
+                "atraso_min": round(self.delays.get(a.tv, 0) / 60),
                 "spark": [b[4] for b in bars[-30:]]}
 
     @staticmethod
@@ -330,7 +341,7 @@ class Engine:
             contrib = beta * x
             tot += contrib
             rows.append({"key": a.key, "nome": a.name, "grupo": a.group, "tipo": a.kind,
-                         "var": x * 10000 if a.kind == "yield" else x * 100, "beta": beta, "contrib": contrib * 100,
+                         "atraso_min": round(self.delays.get(a.tv, 0) / 60), "var": x * 10000 if a.kind == "yield" else x * 100, "beta": beta, "contrib": contrib * 100,
                          "corr60": st.corr(d.x[a.key][-60:], d.ret[-60:]), "porque": a.why})
         rows.sort(key=lambda r: -abs(r["contrib"]))
         actual = d.ret[-1]
@@ -531,13 +542,12 @@ class Engine:
             "b3": self.b3["resumo"], "noticias": news_state, "bcb": self._bcb(), "focus": self._focus(),
             "ia": self.ai, "placar": self.mem.scoreboard(),
             "historico": self.mem.recent(), "avisos": notes,
-            "tempo_real": bool(self.rt), "simbolos_mt5": self.rt.get("simbolos"),
-            "atraso": ("WIN e WDO em TEMPO REAL pelo MetaTrader 5 (" + ", ".join(self.rt["simbolos"].values()) + "). "
-                       "Exterior e tabela de ações seguem com ~15 min de atraso.") if self.rt
-                      else "Cotações públicas com ~15 min de atraso (B3 e bolsas dos EUA).",
+            "tempo_real": bool(self.rt), "simbolos_mt5": self.rt.get("simbolos"), "atraso": self._delay_text(),
             "aviso_legal": "Probabilidades estatísticas calculadas sobre histórico real e validadas fora da amostra. "
                            "Não são garantia de movimento nem recomendação de investimento. O painel não envia ordens.",
         }
+        self._audit_daily = (daily["WIN"], {**fb}, kinds)
+        self._audit_bars = {k: daily[k] for k in TARGETS}      # insumos para a auditoria refazer os estudos de choque
         if "WDO" in dd:      # dólar local como "choque" para o mini índice (não entra na regressão do exterior)
             cm = dict(zip(dd["WDO"].dates, dd["WDO"].ret))
             dd["WIN"].x["CROSS"] = [cm.get(x, 0.0) for x in dd["WIN"].dates]

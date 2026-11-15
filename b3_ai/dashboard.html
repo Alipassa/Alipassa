@@ -328,7 +328,7 @@ function render(){
     (C.pos_fechamento&&C.pos_fechamento.length?`<div class="tile"><b class="${cls(C.pos_fechamento_total)}">${arrow(C.pos_fechamento_total)}${pct(C.pos_fechamento_total)}</b><span>exterior depois do fechamento da B3</span></div>`:"");
   $("confRead").textContent=C.leitura;
   const mx=Math.max(.05,...C.fatores.map(x=>Math.abs(x.contrib)));
-  $("confBars").innerHTML=C.fatores.map(x=>{const w=Math.abs(x.contrib)/mx*50;return `<div class="cb" title="${esc(x.porque)}"><span>${esc(x.nome)}</span><span class="num" style="text-align:right">${x.tipo==="yield"?bp(x.var):chg(x.var)}</span>
+  $("confBars").innerHTML=C.fatores.map(x=>{const w=Math.abs(x.contrib)/mx*50;return `<div class="cb" title="${esc(x.porque)}"><span>${esc(x.nome)}${x.atraso_min?" ⏱":""}</span><span class="num" style="text-align:right">${x.tipo==="yield"?bp(x.var):chg(x.var)}</span>
     <div class="track"><div class="bar" style="${x.contrib>=0?"left:50%":"right:50%"};width:${w}%;background:var(--${x.contrib>=0?"up":"down"})"></div></div>
     <span class="num ${cls(x.contrib)}" style="text-align:right">${x.contrib>0?"+":""}${nf(x.contrib,2)} pp</span></div>`}).join("");
   // ---- leitura
@@ -421,7 +421,7 @@ function renderIntl(){
   let g="",h="<tr><th>Ativo</th><th>Último</th><th>Dia</th><th>5 pregões</th><th>21 pregões</th><th>30 pregões</th></tr>";
   for(const q of S.cotacoes){if(q.grupo!==g){g=q.grupo;h+=`<tr class="grp"><td colspan="6">${esc(g)}</td></tr>`}
     const v=x=>q.tipo==="yield"?bp(x,0):chg(x);
-    h+=`<tr title="${esc(q.porque||"")}"><td>${esc(q.nome)}</td><td class="num">${nf(q.ultimo,q.ultimo<100?3:q.ultimo<1000?2:0)}</td><td>${q.tipo==="yield"?bp(q.var):chg(q.var)}</td><td>${v(q.var5)}</td><td>${v(q.var21)}</td><td>${spark(q.spark)}</td></tr>`}
+    h+=`<tr title="${esc(q.porque||"")}"><td>${esc(q.nome)}${q.atraso_min?` <span class="chip" title="esta série chega atrasada na fonte pública">⏱ ${q.atraso_min} min</span>`:""}</td><td class="num">${nf(q.ultimo,q.ultimo<100?3:q.ultimo<1000?2:0)}</td><td>${q.tipo==="yield"?bp(q.var):chg(q.var)}</td><td>${v(q.var5)}</td><td>${v(q.var21)}</td><td>${spark(q.spark)}</td></tr>`}
   $("intl").innerHTML=h;
   $("ny").innerHTML="<tr><th>Em Nova York</th><th>Var. NY</th><th>Local</th><th>Local em US$</th><th>Diferença</th></tr>"+
     (S.brasil_ny||[]).map(x=>`<tr><td>${esc(x.ny)}</td><td>${chg(x.var_ny)}</td><td>${esc(x.local)} ${chg(x.var_local)}</td><td>${chg(x.local_em_usd)}</td><td>${chg(x.diferenca)}</td></tr>`).join("");
