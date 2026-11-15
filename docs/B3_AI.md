@@ -43,6 +43,22 @@ python -m b3_ai analise       # quadro de probabilidades no terminal
 Cotações públicas da B3 e das bolsas americanas chegam com **~15 minutos de atraso**. As fontes da TradingView são
 endpoints públicos não oficiais: podem mudar sem aviso; quando o histórico falha o motor cai para o Yahoo e avisa no painel.
 
+## Tempo real pelo MetaTrader 5 (opcional, Windows)
+
+O dado público tem ~15 min de atraso. Com o MetaTrader 5 da corretora aberto e logado, WIN e WDO passam a vir em tempo
+real (barras e último negócio), com mais histórico intraday para os modelos:
+
+```bash
+pip install MetaTrader5
+python -m b3_ai --fonte mt5 painel      # ou scripts\rodar_b3_ai_mt5.bat
+```
+
+`MT5_PATH` aponta o `terminal64.exe` (ex.: `C:\Program Files\Mt5xp\terminal64.exe`); `MT5_WIN`/`MT5_WDO` só são
+necessários se o painel não achar o símbolo sozinho (tenta `WIN$N`, `WIN$`, `WIN@`... e depois o contrato com tick mais
+recente). Somente leitura: nenhuma ordem é enviada. Mercados internacionais e a tabela de ações continuam no feed público.
+Se o terminal estiver fechado, o painel avisa e segue com o dado público. O ProfitChart/XPTrader (Nelogica) não é
+MetaTrader e não oferece essa interface.
+
 ## Como as probabilidades são calculadas (`model.py`)
 
 1. **Confronto (fair value)** — regressão ridge móvel (250 pregões, ponto-a-ponto) do retorno diário do alvo sobre os

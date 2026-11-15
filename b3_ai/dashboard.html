@@ -265,7 +265,7 @@ function render(){
   if(S.erro_ciclo)warn.push("Última atualização falhou ("+S.erro_ciclo+") — mostrando a leitura anterior.");
   (S.avisos||[]).forEach(a=>warn.push(a));
   $("warn").innerHTML=warn.map(w=>`<div class="warnbox">${esc(w)}</div>`).join("");
-  $("status").textContent=S.mercado_aberto?"● PREGÃO ABERTO":"○ PREGÃO FECHADO";
+  $("status").textContent=(S.mercado_aberto?"● PREGÃO ABERTO":"○ PREGÃO FECHADO")+(S.tempo_real?" · TEMPO REAL":"");
   $("status").className="pill "+(S.mercado_aberto?"open":"closed");
   $("upd").textContent="atualizado "+hhmm(S.atualizado)+" · a cada "+S.intervalo+" s · "+S.atraso;
   const keys=Object.keys(S.ativos); if(!S.ativos[asset])asset=keys[0];

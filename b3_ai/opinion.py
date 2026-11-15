@@ -32,6 +32,10 @@ def _n(v, d: int = 0) -> str:
     return f"{v:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def s_rt(s: dict) -> bool:
+    return bool(s.get("tempo_real"))
+
+
 def _row(a: dict, hz: str) -> dict:
     return next((r for r in a["prob"] if r["horizonte"] == hz), {})
 
@@ -171,7 +175,8 @@ def build(s: dict) -> dict:
     h = (s.get("agenda") or {}).get("fomc_historico")
     if h:
         risks.append(f"- Em dias de decisão do Fed o mini índice oscila em média {h['abs_dia']:.2f}%, contra {h['abs_normal']:.2f}% num dia comum.")
-    risks.append("- Os dados públicos têm cerca de 15 minutos de atraso: no intraday, confirme sempre o preço na corretora.")
+    if not s_rt(s):
+        risks.append("- Os dados públicos têm cerca de 15 minutos de atraso: no intraday, confirme sempre o preço na corretora.")
     T += risks
     # ---------------- conclusão
     T.append("## Conclusão")

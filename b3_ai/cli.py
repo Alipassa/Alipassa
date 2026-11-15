@@ -30,7 +30,7 @@ def load_env(path: str = ".env") -> None:
 
 
 def _engine(args: argparse.Namespace) -> Engine:
-    return Engine(data_dir=args.dados, with_news=not args.sem_noticias)
+    return Engine(data_dir=args.dados, with_news=not args.sem_noticias, fonte=args.fonte)
 
 
 def cmd_painel(args: argparse.Namespace) -> int:
@@ -82,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="b3_ai", description="B3 AI — mercado brasileiro × exterior, probabilidades do mini índice e do mini dólar")
     p.add_argument("--dados", default="dados", help="pasta do banco local (padrão: dados)")
     p.add_argument("--sem-noticias", action="store_true", help="não busca notícias")
+    p.add_argument("--fonte", default="", choices=["", "web", "mt5"],
+                   help="web = cotações públicas (~15 min de atraso) · mt5 = WIN/WDO em tempo real pelo MetaTrader 5 (Windows)")
     sub = p.add_subparsers(dest="cmd")
     pn = sub.add_parser("painel", help="painel no navegador")
     pn.add_argument("--host", default="127.0.0.1")

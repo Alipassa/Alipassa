@@ -283,3 +283,60 @@ class OpinionTest(unittest.TestCase):
         self.assertIn("lado vendedor", r["texto"])
         self.assertIn("DADOS DO PAINEL", opinion.prompt(s))
         self.assertFalse(opinion.build({"ok": False})["ok"])
+
+
+class FakeMT5:
+    """Imitação mínima do módulo MetaTrader5 para testar a leitura sem o terminal."""
+    TIMEFRAME_D1, TIMEFRAME_M5, TIMEFRAME_M15 = "D1", "M5", "M15"
+
+    def __init__(self, names=("WIN$N", "WDO$N"), ok=True):
+        self.names, self.ok, self.shut = set(names), ok, False
+
+    def initialize(self, **kw):
+        return self.ok
+
+    def last_error(self):
+        return (-6, "Authorization failed")
+
+    def symbol_select(self, sym, enable):
+        return sym in self.names
+
+    def symbols_get(self, group=""):
+        return [type("I", (), {"name": n})() for n in self.names if n.startswith(group.rstrip("*"))]
+
+    def symbol_info_tick(self, sym):
+        return type("T", (), {"time": 1_700_000_000 - 3 * 3600, "last": 174500.0, "bid": 174495.0, "ask": 174505.0})()
+
+    def copy_rates_from_pos(self, sym, tf, start, n):
+        if sym not in self.names:
+            return None
+        return [{"time": 1_700_000_000 - 3 * 3600 + i * 300, "open": 100.0 + i, "high": 101.0 + i, "low": 99.0 + i, "close": 100.5 + i,
+                 "tick_volume": 7, "real_volume": 0} for i in range(3)]
+
+    def shutdown(self):
+        self.shut = True
+
+
+class MT5Test(unittest.TestCase):
+    def test_reads_bars_in_utc_and_last_price(self):
+        from b3_ai.data.mt5 import MT5Feed
+        f = MT5Feed(FakeMT5(), env={"MT5_UTC_OFFSET_HOURS": "-3"})
+        snap = f.snapshot()
+        self.assertEqual(snap["simbolos"], {"WIN": "WIN$N", "WDO": "WDO$N"})
+        self.assertEqual(snap[("WIN", "5")][0], (1_700_000_000.0, 100.0, 101.0, 99.0, 100.5, 7.0))   # servidor (Brasília) → UTC
+        self.assertEqual(snap["ticks"]["WIN"]["ultimo"], 174500.0)
+
+    def test_discovers_contract_when_known_names_missing(self):
+        from b3_ai.data.mt5 import MT5Feed
+        f = MT5Feed(FakeMT5(names=("WINZ26", "WDOZ26")), env={"MT5_UTC_OFFSET_HOURS": "-3"})
+        f.connect()
+        self.assertEqual(f.symbols, {"WIN": "WINZ26", "WDO": "WDOZ26"})
+
+    def test_clear_error_when_terminal_is_closed(self):
+        from b3_ai.data.http import DataError
+        from b3_ai.data.mt5 import MT5Feed
+        with self.assertRaises(DataError) as cm:
+            MT5Feed(FakeMT5(ok=False), env={}).connect()
+        self.assertIn("abra o terminal", str(cm.exception))
+        with self.assertRaises(DataError):
+            MT5Feed(None, env={}).connect() if __import__("b3_ai.data.mt5", fromlist=["_mt5"])._mt5 is None else (_ for _ in ()).throw(DataError("x"))

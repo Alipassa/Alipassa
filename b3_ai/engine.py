@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from . import alerts, market_b3, model as M, news_ai, opinion, stats as st, technical as T
-from .data import bcb, calendar as cal, focus, news, tradingview as tv, yahoo
+from .data import bcb, calendar as cal, focus, mt5 as mt5feed, news, tradingview as tv, yahoo
 from .data.http import DataError
 from .memory import Memory
 from .universe import ASSETS, BY_KEY, FACTORS, TARGETS
@@ -40,7 +40,11 @@ def fmt_date(iso: str) -> str:
 
 
 class Engine:
-    def __init__(self, data_dir: str = "dados", with_news: bool = True) -> None:
+    def __init__(self, data_dir: str = "dados", with_news: bool = True, fonte: str = "") -> None:
+        import os
+        self.fonte = (fonte or os.environ.get("B3AI_FONTE") or "web").lower()
+        self.mt5 = mt5feed.MT5Feed() if self.fonte == "mt5" else None
+        self.rt: dict = {}            # dados em tempo real do MetaTrader no ciclo atual (vazio = feed público)
         self.data_dir = data_dir
         self._agenda_cache: tuple[float, dict] = (0.0, {})
         self.mem = Memory(f"{data_dir}/b3_ai.db")
@@ -381,20 +385,32 @@ class Engine:
         news_state, n2 = self._news()
         notes += n2[:2]
 
+        # MetaTrader 5: WIN e WDO em tempo real substituem as séries públicas (que continuam valendo para o exterior)
+        self.rt = {}
+        if self.mt5 is not None:
+            try:
+                self.rt = self.mt5.snapshot()
+                for k, a in TARGETS.items():
+                    for tf in ("1D", "5", "15"):
+                        h[(a.tv, tf)] = self.rt[(k, tf)]
+            except Exception as e:  # noqa: BLE001 — sem MetaTrader o painel segue com o dado público
+                self.rt = {}
+                notes.append(f"MetaTrader 5 indisponível ({e}) — usando cotações públicas com ~15 min de atraso")
+        bar_key = (lambda a: f"MT5:{a.key}") if self.rt else (lambda a: a.tv)   # históricos acumulados separados por fonte
         daily = {a.key: h.get((a.tv, "1D"), []) for a in list(TARGETS.values()) + ASSETS}
         intr = {}
         for k, a in TARGETS.items():
             for tf in ("5", "15"):
                 bars = h.get((a.tv, tf), [])
-                intr[(k, tf)] = self.mem.merge_bars(a.tv, tf, bars) if bars else []
+                intr[(k, tf)] = self.mem.merge_bars(bar_key(a), tf, bars) if bars else []
         for tf in ("5", "15"):
             bars = h.get((ES, tf), [])
             intr[("ES", tf)] = self.mem.merge_bars(ES, tf, bars) if bars else []
 
         now = time.time()
         last5 = intr[("WIN", "5")][-1][0] if intr[("WIN", "5")] else 0
-        # dado público tem ~15 min de atraso: barra de 5 min com menos de 30 min = pregão em andamento
-        is_open = bool(last5 and now - last5 < 30 * 60)
+        # dado público tem ~15 min de atraso: barra de 5 min com menos de 30 min = pregão em andamento (MT5: 12 min)
+        is_open = bool(last5 and now - last5 < (12 if self.rt else 30) * 60)
         today = brt(now).strftime("%Y-%m-%d")
         win_last = M.bar_date(daily["WIN"][-1][0])
         complete = not (is_open and win_last == today)
@@ -444,6 +460,9 @@ class Engine:
             d, r = dd[k], dres[k]
             bars = daily[k]
             price = intr[(k, "5")][-1][4] if intr[(k, "5")] else bars[-1][4]
+            tick = (self.rt.get("ticks") or {}).get(k)
+            if tick and tick["ultimo"]:
+                price = tick["ultimo"]
             prev = bars[-2][4]
             conf = self._confronto(k, d, r)
             sig_d = r["sigma"][-1] or st.std(d.ret[-60:])
@@ -512,7 +531,10 @@ class Engine:
             "b3": self.b3["resumo"], "noticias": news_state, "bcb": self._bcb(), "focus": self._focus(),
             "ia": self.ai, "placar": self.mem.scoreboard(),
             "historico": self.mem.recent(), "avisos": notes,
-            "atraso": "Cotações públicas com ~15 min de atraso (B3 e bolsas dos EUA).",
+            "tempo_real": bool(self.rt), "simbolos_mt5": self.rt.get("simbolos"),
+            "atraso": ("WIN e WDO em TEMPO REAL pelo MetaTrader 5 (" + ", ".join(self.rt["simbolos"].values()) + "). "
+                       "Exterior e tabela de ações seguem com ~15 min de atraso.") if self.rt
+                      else "Cotações públicas com ~15 min de atraso (B3 e bolsas dos EUA).",
             "aviso_legal": "Probabilidades estatísticas calculadas sobre histórico real e validadas fora da amostra. "
                            "Não são garantia de movimento nem recomendação de investimento. O painel não envia ordens.",
         }
