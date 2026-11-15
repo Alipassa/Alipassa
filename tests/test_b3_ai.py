@@ -369,3 +369,29 @@ class MT5ExtrasTest(unittest.TestCase):
         self.assertEqual(sorted(snap["extras"]), ["IBOV", "IRON"])     # DI tem histórico curto; BRENT não existe no terminal
         self.assertEqual(snap["simbolos"]["IRON"], "FERRO")
         self.assertNotIn("DI", snap["simbolos"])
+
+
+class MT5StocksTest(unittest.TestCase):
+    def test_stock_quotes_change_and_rotation(self):
+        from b3_ai.data.mt5 import MT5Feed
+
+        class Quotes(FakeMT5):
+            calls = 0
+
+            def copy_rates_from_pos(self, sym, tf, start, n):
+                Quotes.calls += 1
+                if sym in ("WIN@", "WDO@"):
+                    return FakeMT5.copy_rates_from_pos(self, sym, tf, start, n)
+                if sym == "XXXX3":
+                    return None                                   # papel que o terminal não tem
+                return [{"time": 1_700_000_000, "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.0, "tick_volume": 1, "real_volume": 100},
+                        {"time": 1_700_086_400, "open": 10.1, "high": 10.9, "low": 10.0, "close": 10.5, "tick_volume": 1, "real_volume": 2000}]
+
+        f = MT5Feed(Quotes(), env={"MT5_UTC_OFFSET_HOURS": "-3"})
+        live = f.stocks(["PETR4", "XXXX3", "VALE3"])
+        self.assertEqual(sorted(live), ["PETR4", "VALE3"])
+        self.assertAlmostEqual(live["PETR4"]["c"], 5.0)           # 10,00 → 10,50
+        self.assertEqual((live["PETR4"]["p"], live["PETR4"]["vol"]), (10.5, 2000.0))
+        self.assertEqual(f.stocks([], 1), live)                   # sem lista: devolve o que já tem
+        f.stocks(["PETR4", "VALE3"], budget_s=0)                  # orçamento zero: não trava nem perde o que já leu
+        self.assertEqual(sorted(f._stocks), ["PETR4", "VALE3"])

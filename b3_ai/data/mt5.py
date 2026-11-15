@@ -46,6 +46,8 @@ class MT5Feed:
         self.symbols: dict[str, str] = {}
         self.offset_h = -3.0
         self.note = ""
+        self._stocks: dict[str, dict] = {}     # ticker → última leitura (preço, variação, volume) em tempo real
+        self._stock_pos = 0
 
     # ------------------------------------------------------------------ conexão
     def connect(self) -> None:
@@ -132,6 +134,40 @@ class MT5Feed:
                     pass
                 self.symbols.pop(key, None)
         return out
+
+    def stocks(self, tickers: list[str], budget_s: float = 6.0) -> dict[str, dict]:
+        """Preço e variação do dia das ações da B3 direto do terminal (barra diária corrente × fechamento anterior).
+
+        Não mexe na "Observação do Mercado". Lê em rodízio dentro de `budget_s` segundos por chamada — o que não couber
+        fica para a próxima — e devolve tudo o que já foi lido, com a hora da leitura (`lido`). Passe os mais líquidos primeiro.
+        """
+        if not tickers:
+            return self._stocks
+        if not self.connected:
+            self.connect()
+        t0 = time.time()
+        n = len(tickers)
+        shift = self.offset_h * 3600
+        for step in range(n):
+            if time.time() - t0 > budget_s:
+                break
+            tk = tickers[(self._stock_pos + step) % n]
+            try:
+                r = self.mt5.copy_rates_from_pos(tk, self.mt5.TIMEFRAME_D1, 0, 2)
+            except Exception:  # noqa: BLE001
+                r = None
+            if r is None or len(r) < 2:
+                continue
+            last, prev = r[-1], r[-2]
+            c, pc = float(last["close"]), float(prev["close"])
+            if c <= 0 or pc <= 0:
+                continue
+            self._stocks[tk] = {"p": c, "c": (c / pc - 1) * 100, "o": float(last["open"]), "h": float(last["high"]), "l": float(last["low"]),
+                                "vol": float(last["real_volume"]) or 0.0, "ts": float(last["time"]) - shift, "lido": time.time()}
+        else:
+            step = n
+        self._stock_pos = (self._stock_pos + step) % n
+        return self._stocks
 
     def sp_intraday(self) -> dict[str, list[tuple]]:
         """Micro S&P 500 da B3 (WSP) em tempo real, 5 e 15 min: líder do exterior no intraday, no mesmo relógio do WIN."""

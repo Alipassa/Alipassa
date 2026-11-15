@@ -438,6 +438,7 @@ function renderIntl(){
 function renderB3Summary(){
   const b=S.b3; if(!b){$("b3Tiles").innerHTML='<span class="muted">Scanner da B3 indisponível neste ciclo.</span>';return;}
   $("b3Tiles").innerHTML=[[nf(b.total),"papéis ("+Object.entries(b.por_tipo).map(([k,v])=>v+" "+k).join(" · ")+")"],
+    [b.tempo_real?nf(b.tempo_real):"—",b.tempo_real?"papéis com preço em tempo real (MetaTrader)":"preços com ~15 min de atraso (fonte pública)"],
     [`<span class="up">▲${b.altas}</span> <span class="down">▼${b.quedas}</span>`,"altas × quedas (ações líquidas)"],
     [nf((b.pct_altas||0)*100,0)+"%","das ações subindo"],
     [`<span class="${cls(b.var_media_pond)}">${arrow(b.var_media_pond)}${pct(b.var_media_pond)}</span>`,"variação média ponderada"],

@@ -58,6 +58,7 @@ class Engine:
         self._news_cache: tuple[float, Optional[dict], list[str]] = (0.0, None, [])
         self._bcb_cache: tuple[float, dict] = (0.0, {})
         self._b3_ts = 0.0
+        self.b3_rt = 0               # quantos papéis da tabela vieram do MetaTrader no último ciclo
         self._focus_cache: tuple[float, dict] = (0.0, {})
         self._alerts_sent: set[str] = set()
         self.ai: dict = {}           # última análise escrita pelo analista com IA (sob demanda)
@@ -152,8 +153,10 @@ class Engine:
         intl = ("Mercados internacionais em tempo real" + (", exceto: " + ", ".join(late) if late else "") + ".") if self.delays \
             else "Histórico pelo Yahoo (diário)."
         if self.rt:
-            return "WIN e WDO em TEMPO REAL pelo MetaTrader 5 (" + ", ".join(self.rt["simbolos"].values()) + "). " + intl \
-                   + " Tabela de ações da B3 com ~15 min de atraso."
+            total = len(self.b3.get("papeis", []))
+            acoes = (f" Ações da B3 em tempo real pelo MetaTrader ({self.b3_rt} de {total} papéis; os demais com ~15 min de atraso)."
+                     if self.b3_rt else " Tabela de ações da B3 com ~15 min de atraso.")
+            return "WIN e WDO em TEMPO REAL pelo MetaTrader 5 (" + ", ".join(self.rt["simbolos"].values()) + "). " + intl + acoes
         return "WIN, WDO e ações da B3 com ~15 min de atraso (use o MetaTrader 5 para tempo real). " + intl
 
     def _focus(self) -> dict:
@@ -276,11 +279,33 @@ class Engine:
 
     def refresh_b3(self) -> list[str]:
         try:
-            self.b3 = market_b3.process(tv.scan_b3())
-            self._b3_ts = time.time()
-            return []
+            rows = tv.scan_b3()
         except DataError as e:
             return [f"scanner B3: {e}"]
+        notes: list[str] = []
+        self.b3_rt = 0
+        if self.mt5 is not None:
+            # preço em tempo real do MetaTrader por cima do cadastro público (setor, valor de mercado, indicadores)
+            try:
+                liquid = sorted((r for r in rows if r.get("close") is not None and r.get("name")),
+                                key=lambda r: -(r.get("Value.Traded") or 0))
+                tickers = [r["name"] for r in liquid if r.get("type") == "stock"] + [r["name"] for r in liquid if r.get("type") != "stock"]
+                live = self.mt5.stocks(tickers[:1500])
+                newest = max((v["ts"] for v in live.values()), default=0)
+                for r in rows:
+                    v = live.get(r.get("name"))
+                    if not v or newest - v["ts"] > 20 * 3600:      # papel que não negociou no pregão mais recente: mantém o público
+                        continue
+                    r["close"], r["change"], r["open"], r["high"], r["low"] = v["p"], v["c"], v["o"], v["h"], v["l"]
+                    if v["vol"] > 0:
+                        r["volume"], r["Value.Traded"] = v["vol"], v["vol"] * v["p"]
+                    self.b3_rt += 1
+            except Exception as e:  # noqa: BLE001 — sem MetaTrader a tabela segue com o dado público
+                notes.append(f"ações pelo MetaTrader: {e}")
+        self.b3 = market_b3.process(rows)
+        self.b3["resumo"]["tempo_real"] = self.b3_rt
+        self._b3_ts = time.time()
+        return notes
 
     # ------------------------------------------------------------------ blocos do estado
     def _quote(self, a, bars: list[tuple]) -> Optional[dict]:
