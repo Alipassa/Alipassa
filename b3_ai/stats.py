@@ -18,6 +18,24 @@ def std(xs: Sequence[float]) -> float:
     return math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
 
 
+def rolling_std(xs: Sequence[float], w: int) -> list[float]:
+    """out[i] = desvio-padrão amostral de xs[i-w:i] (0 enquanto i < w), em tempo linear por somas acumuladas."""
+    n = len(xs)
+    out = [0.0] * n
+    s1 = s2 = 0.0
+    for i in range(n):
+        if i >= w:
+            var = (s2 - s1 * s1 / w) / (w - 1)
+            out[i] = math.sqrt(var) if var > 0 else 0.0
+            old = xs[i - w]
+            s1 -= old
+            s2 -= old * old
+        v = xs[i]
+        s1 += v
+        s2 += v * v
+    return out
+
+
 def phi(z: float) -> float:
     """CDF da normal padrão."""
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))

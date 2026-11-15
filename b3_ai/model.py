@@ -377,6 +377,7 @@ def intraday_features(win: list[tuple], es: list[tuple], wdo: list[tuple]) -> di
     rsi = st.rsi(close, 14)
     feats: list[Optional[list[float]]] = [None] * n
     sig = [0.0] * n
+    rs, rse, rsd = st.rolling_std(r, 300), st.rolling_std(re_, 300), st.rolling_std(rd, 300)   # linear: aguenta 20 mil barras por ciclo
     pv = vv = 0.0
     k_open = 0
     for i in range(n):
@@ -388,9 +389,7 @@ def intraday_features(win: list[tuple], es: list[tuple], wdo: list[tuple]) -> di
         vv += vol
         if i < 320:
             continue
-        s = st.std(r[i - 300:i]) or 1e-9
-        se = st.std(re_[i - 300:i]) or 1e-9
-        sd = st.std(rd[i - 300:i]) or 1e-9
+        s, se, sd = rs[i] or 1e-9, rse[i] or 1e-9, rsd[i] or 1e-9
         sig[i] = s
         vwap = pv / vv
         feats[i] = [

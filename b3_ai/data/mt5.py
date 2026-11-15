@@ -133,6 +133,21 @@ class MT5Feed:
                 self.symbols.pop(key, None)
         return out
 
+    def sp_intraday(self) -> dict[str, list[tuple]]:
+        """Micro S&P 500 da B3 (WSP) em tempo real, 5 e 15 min: líder do exterior no intraday, no mesmo relógio do WIN."""
+        forced = self.env.get("MT5_WSP")
+        for sym in ([forced] if forced else []) + ["WSP@", "WSP$N", "WSP$"]:
+            try:
+                if sym and self.mt5.symbol_select(sym, True):
+                    self.symbols["WSP"] = sym
+                    out = {tf: self.bars("WSP", tf) for tf in ("5", "15")}
+                    if all(len(v) >= 500 for v in out.values()):
+                        return out
+            except Exception:  # noqa: BLE001
+                pass
+            self.symbols.pop("WSP", None)
+        return {}
+
     def snapshot(self, extra_keys: Optional[list[str]] = None) -> dict:
         """{("WIN","1D"): barras, ("WIN","5"): ..., "ticks": {...}, "simbolos": {...}} — reconecta se o terminal caiu."""
         if not self.connected:
@@ -141,6 +156,7 @@ class MT5Feed:
             out: dict = {(k, tf): self.bars(k, tf) for k in ("WIN", "WDO") for tf in TF}
             out["ticks"] = {k: self.last_price(k) for k in ("WIN", "WDO")}
             out["extras"] = self.extras(extra_keys or [])
+            out["sp"] = self.sp_intraday()
         except Exception:
             self.close()
             raise

@@ -416,10 +416,12 @@ class Engine:
         for k, a in TARGETS.items():
             for tf in ("5", "15"):
                 bars = h.get((a.tv, tf), [])
-                intr[(k, tf)] = self.mem.merge_bars(bar_key(a), tf, bars) if bars else []
+                # MetaTrader já entrega 20 mil barras: não precisa acumular no banco local a cada ciclo
+                intr[(k, tf)] = bars if self.rt else (self.mem.merge_bars(bar_key(a), tf, bars) if bars else [])
         for tf in ("5", "15"):
             bars = h.get((ES, tf), [])
-            intr[("ES", tf)] = self.mem.merge_bars(ES, tf, bars) if bars else []
+            sp = (self.rt.get("sp") or {}).get(tf)       # micro S&P da B3 em tempo real, quando o MetaTrader tem
+            intr[("ES", tf)] = sp if sp else (self.mem.merge_bars(ES, tf, bars) if bars else [])
 
         now = time.time()
         last5 = intr[("WIN", "5")][-1][0] if intr[("WIN", "5")] else 0

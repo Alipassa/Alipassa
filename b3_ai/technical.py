@@ -64,28 +64,35 @@ def extremes(bars: list[tuple]) -> dict:
     n = len(bars)
     c = [b[4] for b in bars]
     rsi = st.rsi(c, 14)
+    sm = st.sma(c, 20)
+    sdr = st.rolling_std(c, 20)                      # sdr[i] cobre c[i-20:i]; a banda da barra i usa c[i-19:i+1]
+    b_mid = [x or 0.0 for x in sm]
+    b_sd = (sdr[1:] + [st.std(c[-20:]) if n >= 20 else 0.0]) if n else []
     state = [0] * n
     sig = [0] * n
     zv = [0.0] * n
     bbp = [0.5] * n
-    pv = vv = 0.0
+    pv = vv = d1 = d2 = 0.0
     devs: list[float] = []
     last_sig = -99
     for i in range(n):
         if i == 0 or bars[i][0] - bars[i - 1][0] > 3600:
-            pv = vv = 0.0
+            pv = vv = d1 = d2 = 0.0
             devs = []
         vol = bars[i][5] or 1.0
         pv += (bars[i][2] + bars[i][3] + bars[i][4]) / 3 * vol
         vv += vol
         dev = c[i] - pv / vv
         devs.append(dev)
-        sd_v = st.std(devs) if len(devs) >= 12 else 0.0
+        d1 += dev
+        d2 += dev * dev
+        k = len(devs)
+        var = (d2 - d1 * d1 / k) / (k - 1) if k >= 12 else 0.0
+        sd_v = math.sqrt(var) if var > 0 else 0.0
         zv[i] = dev / sd_v if sd_v else 0.0
         if i < 20:
             continue
-        w = c[i - 19:i + 1]
-        mid, sd = st.mean(w), st.std(w) or 1e-9
+        mid, sd = b_mid[i], b_sd[i] or 1e-9
         up, lo = mid + 2 * sd, mid - 2 * sd
         bbp[i] = (c[i] - lo) / (up - lo)
         ob = (rsi[i] >= 70) + (c[i] >= up) + (zv[i] >= 2)
