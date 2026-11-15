@@ -18,7 +18,10 @@ dev = ["pytest>=7"]
 gold-ai = "gold_ai.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["gold_ai*"]
+include = ["gold_ai*", "b3_ai*"]
+
+[tool.setuptools.package-data]
+b3_ai = ["dashboard.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

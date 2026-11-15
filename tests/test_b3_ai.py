@@ -1,0 +1,203 @@
+"""B3 AI — testes offline (sem rede): estatística, modelos, notícias, mercado, relatório e memória."""
+
+import math
+import os
+import random
+import tempfile
+import unittest
+
+from b3_ai import market_b3, model as M, news_ai, report, stats as st
+from b3_ai.data import news as news_data, yahoo
+from b3_ai.memory import Memory
+
+DAY = 86400
+
+
+def synth_daily(n=900, seed=1, drift=0.0, lead=None, beta=0.0, start=1_600_000_000):
+    """Barras diárias sintéticas; com `lead`, o retorno acompanha o de outra série (beta) no mesmo dia."""
+    rnd = random.Random(seed)
+    bars, c = [], 100.0
+    for i in range(n):
+        r = rnd.gauss(drift, 0.012)
+        if lead is not None and i > 0:
+            r += beta * (lead[i][4] / lead[i - 1][4] - 1)
+        o = c
+        c = c * (1 + r)
+        bars.append((start + i * DAY, o, max(o, c) * 1.002, min(o, c) * 0.998, c, 1000.0))
+    return bars
+
+
+class StatsTest(unittest.TestCase):
+    def test_phi_inverse_roundtrip(self):
+        for p in (0.03, 0.2, 0.5, 0.77, 0.97):
+            self.assertAlmostEqual(st.phi(st.phi_inv(p)), p, places=6)
+
+    def test_ridge_recovers_coefficients(self):
+        rnd = random.Random(3)
+        xs = [[rnd.gauss(0, 1), rnd.gauss(0, 1)] for _ in range(500)]
+        ys = [2 * a - 3 * b + rnd.gauss(0, 0.01) for a, b in xs]
+        b = st.ridge(xs, ys, lam=1e-6)
+        self.assertAlmostEqual(b[0], 2, places=2)
+        self.assertAlmostEqual(b[1], -3, places=2)
+
+    def test_logistic_learns_signal(self):
+        rnd = random.Random(5)
+        xs = [[rnd.gauss(0, 1)] for _ in range(1500)]
+        ys = [1 if rnd.random() < 1 / (1 + math.exp(-1.5 * x[0])) else 0 for x in xs]
+        w = st.logistic_fit(xs, ys, lam=0.1)
+        self.assertGreater(w[1], 1.0)
+        self.assertGreater(st.logistic_predict(w, [2.0]), 0.85)
+
+    def test_rsi_bounds(self):
+        self.assertEqual(st.rsi([float(i) for i in range(1, 40)])[-1], 100.0)
+        self.assertLess(st.rsi([float(100 - i) for i in range(40)])[-1], 1.0)
+
+
+class CalibrationTest(unittest.TestCase):
+    def test_noise_model_shrinks_to_base_rate(self):
+        """Sem sinal real, a calibração fora da amostra precisa devolver ~taxa-base (não inventar probabilidade)."""
+        rnd = random.Random(7)
+        xs = [[rnd.gauss(0, 1) for _ in range(6)] for _ in range(900)]
+        ys = [1 if rnd.random() < 0.5 else 0 for _ in xs]
+        m = M.fit_calibrated(xs, ys, [f"f{i}" for i in range(6)], lam=5.0)
+        p = M.apply_model(m, [3, -3, 3, -3, 3, -3])["p_up"]
+        self.assertLess(abs(p - m["base"]), 0.06)
+        self.assertFalse(M.classify(p, m["eval"])["validado"])
+
+    def test_real_signal_is_kept(self):
+        rnd = random.Random(8)
+        xs = [[rnd.gauss(0, 1)] for _ in range(1200)]
+        ys = [1 if rnd.random() < 1 / (1 + math.exp(-1.2 * x[0])) else 0 for x in xs]
+        m = M.fit_calibrated(xs, ys, ["sinal"], lam=1.0)
+        self.assertGreater(m["eval"]["k"], 0.6)
+        self.assertGreater(m["eval"]["hit"], 0.6)
+        self.assertGreater(M.apply_model(m, [2.0])["p_up"], 0.75)
+        self.assertTrue(M.classify(0.8, m["eval"])["validado"])
+
+    def test_bands_sum_to_one(self):
+        b = M.bands(0.62, 0.01)
+        self.assertAlmostEqual(b["alta_forte"] + b["alta"] + b["queda"] + b["queda_forte"], 1.0, places=9)
+        self.assertAlmostEqual(b["alta_forte"] + b["alta"], 0.62, places=9)
+
+
+class DailyModelTest(unittest.TestCase):
+    def test_fair_value_recovers_beta_and_date_mapping(self):
+        lead = synth_daily(seed=11)
+        tgt = synth_daily(seed=12, lead=lead, beta=0.8)
+        d = M.DailyData(tgt, {"ES": lead}, {"ES": "pct"})
+        implied, betas, r2 = M.rolling_betas(d)
+        self.assertAlmostEqual(betas["ES"], 0.8, delta=0.2)
+        self.assertGreater(r2, 0.2)
+        res = M.build_daily(d, synth_daily(seed=13), d, True)
+        self.assertIn(1, res["models"])
+        self.assertIsNotNone(res["feats"][-1])
+        # futuro americano abre na noite anterior: 23:00 UTC de quinta pertence ao pregão de sexta
+        self.assertEqual(M.bar_date(1794524400.0), "2026-11-13")
+
+    def test_fresh_foreign_info_after_local_close(self):
+        lead = synth_daily(seed=21)
+        tgt = synth_daily(seed=22)[:-1]          # o exterior tem um dia a mais que o alvo
+        d = M.DailyData(tgt, {"ES": lead}, {"ES": "pct"})
+        self.assertAlmostEqual(d.fresh["ES"], lead[-1][4] / lead[-2][4] - 1, places=9)
+
+
+class IntradayModelTest(unittest.TestCase):
+    def test_builds_models_per_horizon(self):
+        rnd = random.Random(31)
+        bars, c, ts = [], 100000.0, 1_700_000_000
+        for day in range(12):
+            for i in range(108):
+                o = c
+                c *= 1 + rnd.gauss(0, 0.0006)
+                bars.append((ts + day * DAY + i * 300, o, max(o, c) + 5, min(o, c) - 5, c, 100.0))
+        r = M.build_intraday(bars, bars, bars, 5, {"5 min": 1, "10 min": 2})
+        self.assertEqual(set(r["models"]), {"5 min", "10 min"})
+        self.assertEqual(len(r["f"]["feats"][-1]), len(M.FEATURES_I))
+        p = M.apply_model(r["models"]["5 min"], r["f"]["feats"][-1])["p_up"]
+        self.assertTrue(0.3 < p < 0.7)       # passeio aleatório: nada de probabilidade extrema
+
+
+class NewsTest(unittest.TestCase):
+    def test_classify_direction(self):
+        k = [c[0] for c in news_ai.classify("Fed signals rate hike in December as inflation stays hot")]
+        self.assertIn("fed_duro", k)
+        k = [c[0] for c in news_ai.classify("Copom corta Selic em 0,5 ponto")]
+        self.assertIn("copom_corte", k)
+        self.assertEqual(news_ai.classify("Mega-Sena acumula e vai a R$ 34 milhões"), [])
+
+    def test_opposite_polarity_cancels(self):
+        k = [c[0] for c in news_ai.classify("Petróleo sobe após cair na véspera")]
+        self.assertNotIn("petroleo_alta", k)
+        self.assertNotIn("petroleo_queda", k)
+
+    def test_scores_follow_headlines(self):
+        now = 1_800_000_000.0
+        mk = lambda t, sc: {"title": t, "source": "x", "link": "", "ts": now - 3600, "scope": sc}  # noqa: E731
+        bad = news_ai.analyze([mk("Fed raises rates again, hawkish Powell", "INT"), mk("Risco fiscal aumenta com rombo nas contas públicas", "BR")], now)
+        good = news_ai.analyze([mk("Fed cuts rates, dovish Powell", "INT"), mk("Estrangeiros: entrada recorde de fluxo na bolsa", "BR")], now)
+        self.assertLess(bad["diario"]["score_ibov"], 0)
+        self.assertGreater(bad["diario"]["score_dolar"], 0)
+        self.assertGreater(good["diario"]["score_ibov"], 0)
+
+    def test_rss_parser(self):
+        xml = ("<rss><channel><item><title>Ibovespa sobe 1% - Valor</title><link>https://x/y</link>"
+               "<pubDate>Sun, 15 Nov 2026 11:36:52 GMT</pubDate><source url='u'>Valor</source></item></channel></rss>")
+        it = news_data.parse_rss(xml, "BR")
+        self.assertEqual(it[0]["title"], "Ibovespa sobe 1%")
+        self.assertEqual(it[0]["source"], "Valor")
+
+
+class MarketTest(unittest.TestCase):
+    def test_breadth_and_fractional_dedup(self):
+        row = lambda n, c, v, sec="Finance": {"name": n, "description": n, "close": 10.0, "change": c, "Value.Traded": v,  # noqa: E731
+                                              "sector": sec, "type": "stock", "subtype": "common", "SMA50": 9.0, "SMA200": 11.0}
+        out = market_b3.process([row("AAAA3", 2.0, 5e6), row("AAAA3F", 2.0, 5e6), row("BBBB4", -1.0, 9e6), row("CCCC3", 5.0, 100.0)])
+        s = out["resumo"]
+        self.assertEqual(len(out["papeis"]), 3)             # fracionário removido
+        self.assertEqual((s["altas"], s["quedas"], s["liquidas"]), (1, 1, 2))   # ilíquido fora da amplitude
+        self.assertEqual(s["setores"][0]["setor"], "Financeiro")
+
+
+class MemoryTest(unittest.TestCase):
+    def test_bars_accumulate_and_scoreboard(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = Memory(os.path.join(d, "t.db"))
+            m.merge_bars("W", "5", [(1.0, 1, 1, 1, 1, 1), (2.0, 1, 1, 1, 2, 1)])
+            self.assertEqual(len(m.merge_bars("W", "5", [(2.0, 1, 1, 1, 3, 1), (3.0, 1, 1, 1, 4, 1)])), 3)
+            m.record("WIN", "Diário", "2026-01-02", 100.0, 0.6)
+            m.record("WIN", "Diário", "2026-01-03", 100.0, 0.4)
+            m.resolve("WIN", "Diário", "2026-01-02", 101.0, 100.0)   # previu alta, subiu → acerto
+            m.resolve("WIN", "Diário", "2026-01-03", 101.0, 100.0)   # previu queda, subiu → erro
+            sb = m.scoreboard()[0]
+            self.assertEqual((sb["n"], sb["acerto"]), (2, 0.5))
+            m.close()
+
+
+class YahooTest(unittest.TestCase):
+    def test_parse_chart_skips_nulls(self):
+        p = {"chart": {"result": [{"timestamp": [1, 2], "indicators": {"quote": [{"open": [1, None], "high": [2, 2], "low": [1, 1],
+                                                                                       "close": [1.5, 2], "volume": [10, 10]}]}}]}}
+        self.assertEqual(yahoo.parse_chart(p), [(1.0, 1.0, 2.0, 1.0, 1.5, 10.0)])
+
+
+class ReportTest(unittest.TestCase):
+    def test_report_renders_big_numbers(self):
+        row = {"horizonte": "Diário", "tipo": "diario", "alvo": "seg 16/11", "p_alta": 0.58, "p_queda": 0.42, "base": 0.51, "k": 0.7,
+               "oos_n": 800, "oos_acerto": 0.54, "oos_acerto_conv": 0.56, "oos_n_conv": 100, "amostra": 1400, "motivos": [],
+               "faixas": M.bands(0.58, 0.02), "sigma_pct": 2.0, "faixa_min": 170000.0, "faixa_max": 178000.0, "ref": 174000.0,
+               "nota": "", "ajuste_exterior": 0.0, "sinal": "VIÉS DE ALTA", "validado": True, "confianca": "validada"}
+        lv = {k: 1.0 for k in ("pivot", "r1", "r2", "s1", "s2", "max_ant", "min_ant", "fech_ant", "atr14", "rsi14", "mm20", "mm50", "mm200", "max20", "min20")}
+        conf = {"implicito": 0.1, "realizado": 0.7, "descolamento": 0.6, "descolamento_sigma": 0.4, "r2": 0.12, "fatores": [],
+                "pos_fechamento": [], "pos_fechamento_total": 0.0, "leitura": "ok", "data": "2026-11-13"}
+        s = {"atualizado": 1794756548.0, "pregao": "2026-11-13", "mercado_aberto": False, "atraso": "15 min", "leitura": ["x"],
+             "ativos": {"WIN": {"nome": "Mini Índice (WIN)", "preco": 174230.0, "var": 0.76, "max": 1.0, "min": 1.0, "sigma_dia_pct": 2.4,
+                                "prob": [row], "confronto": conf, "niveis": lv, "intraday": None}},
+             "cotacoes": [], "brasil_ny": [], "b3": None, "bcb": {}, "noticias": None, "placar": [], "aviso_legal": "aviso"}
+        md = report.markdown(s)
+        self.assertIn("**58%**", md)
+        self.assertIn("**42%**", md)
+        self.assertIn("<table>", report.to_html(s))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,3 +1,16 @@
+# B3 AI — mercado brasileiro × exterior (novo)
+
+Painel local com **todas as empresas da B3**, mercados internacionais, confronto exterior × Brasil, notícias com deduções e
+**quadro de probabilidades do mini índice (WIN) e do mini dólar (WDO)** para 5 min · 10 min · 30 min · 1 h · diário · semanal,
+além do relatório. Dados reais, Python puro, somente leitura. Documentação: [docs/B3_AI.md](docs/B3_AI.md).
+
+```bash
+python -m b3_ai painel        # http://127.0.0.1:8766  (Windows: scripts\rodar_b3_ai.bat)
+python -m b3_ai relatorio
+```
+
+---
+
 # MARKET AI ENGINE 5.0
 
 > **Regra central do projeto** — "MAXIMIZAR O APROVEITAMENTO DAS OPORTUNIDADES ESTATISTICAMENTE VÁLIDAS, MAXIMIZAR A EXPECTANCY E O
