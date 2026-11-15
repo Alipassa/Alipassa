@@ -83,6 +83,16 @@ def cmd_auditoria(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diagnostico(args: argparse.Namespace) -> int:
+    from . import diagnose
+    text = diagnose.run(args.dados)
+    with open("diagnostico.txt", "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text)
+    print("gravado em diagnostico.txt — envie esse arquivo (ou cole o texto) para análise")
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -112,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     au = sub.add_parser("auditoria", help="testa as fontes e mede os acertos fora da amostra")
     au.add_argument("--saida", default="relatorios")
     au.set_defaults(func=cmd_auditoria)
+    dg = sub.add_parser("diagnostico", help="confere Python, MetaTrader 5 e fontes; grava diagnostico.txt")
+    dg.set_defaults(func=cmd_diagnostico)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)
