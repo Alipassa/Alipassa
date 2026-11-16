@@ -66,7 +66,9 @@ class Engine:
         self._bcb_cache: tuple[float, dict] = (0.0, {})
         self.etapa, self.etapa_ts, self.ciclo_ts, self.ciclos = "iniciando", time.time(), time.time(), 0
         self._b3_ts = 0.0
-        self.b3_rt = 0               # quantos papéis da tabela vieram do MetaTrader no último ciclo
+        self.b3_rt = self.b3_rt_liq = self.b3_liq = 0     # papéis da tabela com preço do MetaTrader (total e entre os líquidos)
+        self._b3_rows: list[dict] = []
+        self._b3_scan_ts = 0.0
         self._focus_cache: tuple[float, dict] = (0.0, {})
         self._alerts_sent: set[str] = set()
         self.ai: dict = {}           # última análise escrita pelo analista com IA (sob demanda)
@@ -209,9 +211,13 @@ class Engine:
         intl = ("Mercados internacionais em tempo real" + (", exceto: " + ", ".join(late) if late else "") + ".") if self.delays \
             else "Histórico pelo Yahoo (diário)."
         if self.rt:
-            total = len(self.b3.get("papeis", []))
-            acoes = (f" Ações da B3 em tempo real pelo MetaTrader ({self.b3_rt} de {total} papéis; os demais com ~15 min de atraso)."
-                     if self.b3_rt else " Tabela de ações da B3 com ~15 min de atraso.")
+            if self.b3_rt:
+                acoes = (f" Ações da B3 em tempo real pelo MetaTrader: {self.b3_rt_liq} das {self.b3_liq} ações mais negociadas e "
+                         f"{self.b3_rt} papéis no total" + (" (a leitura dos demais continua nas próximas rodadas)."
+                                                             if self.b3_rt_liq < self.b3_liq else
+                                                             "; os que faltam são papéis sem negócio no último pregão, mostrados com o último dado público."))
+            else:
+                acoes = " Tabela de ações da B3 com ~15 min de atraso."
             return "WIN e WDO em TEMPO REAL pelo MetaTrader 5 (" + ", ".join(self.rt["simbolos"].values()) + "). " + intl + acoes
         return "WIN, WDO e ações da B3 com ~15 min de atraso (use o MetaTrader 5 para tempo real). " + intl
 
@@ -334,21 +340,32 @@ class Engine:
         return {"pilares": P, "alta": up, "queda": down, "neutro": len(P) - up - down, "rotulo": label, "lado": lado}
 
     def refresh_b3(self) -> list[str]:
-        try:
-            rows = tv.scan_b3()
-        except DataError as e:
-            return [f"scanner B3: {e}"]
+        """Tabela da B3: cadastro público (setor, valor de mercado, indicadores; relido a cada ~55 s) com o preço em tempo
+        real do MetaTrader por cima, relido a cada ciclo."""
         notes: list[str] = []
-        self.b3_rt = 0
+        if not self._b3_rows or time.time() - self._b3_scan_ts > 55:
+            try:
+                self._b3_rows = tv.scan_b3()
+                self._b3_scan_ts = time.time()
+            except DataError as e:
+                if not self._b3_rows:
+                    return [f"scanner B3: {e}"]
+                notes.append(f"scanner B3: {e} — mantendo o cadastro anterior")
+        rows = [dict(r) for r in self._b3_rows]
+        self.b3_rt = self.b3_rt_liq = self.b3_liq = 0
         if self.mt5 is not None:
-            # preço em tempo real do MetaTrader por cima do cadastro público (setor, valor de mercado, indicadores)
             try:
                 liquid = sorted((r for r in rows if r.get("close") is not None and r.get("name")),
                                 key=lambda r: -(r.get("Value.Traded") or 0))
                 tickers = [r["name"] for r in liquid if r.get("type") == "stock"] + [r["name"] for r in liquid if r.get("type") != "stock"]
-                live = self.mt5.stocks(tickers[:1500])
+                tickers = tickers[:1500]
+                seen = sum(1 for t in tickers if t in self.mt5._stocks)
+                # enquanto falta ler boa parte da lista, dá mais tempo por rodada (a 1ª leitura de cada papel é a lenta)
+                live = self.mt5.stocks(tickers, budget_s=15.0 if seen < 0.8 * len(tickers) else 5.0)
                 newest = max((v["ts"] for v in live.values()), default=0)
                 for r in rows:
+                    is_liq = r.get("type") == "stock" and (r.get("Value.Traded") or 0) >= market_b3.MIN_LIQ
+                    self.b3_liq += 1 if is_liq else 0
                     v = live.get(r.get("name"))
                     if not v or newest - v["ts"] > 20 * 3600:      # papel que não negociou no pregão mais recente: mantém o público
                         continue
@@ -356,6 +373,7 @@ class Engine:
                     if v["vol"] > 0:
                         r["volume"], r["Value.Traded"] = v["vol"], v["vol"] * v["p"]
                     self.b3_rt += 1
+                    self.b3_rt_liq += 1 if is_liq else 0
             except Exception as e:  # noqa: BLE001 — sem MetaTrader a tabela segue com o dado público
                 notes.append(f"ações pelo MetaTrader: {e}")
         self.b3 = market_b3.process(rows)
@@ -473,7 +491,7 @@ class Engine:
         self._step("baixando histórico dos mercados internacionais")
         h, n1 = self._history()
         notes += n1
-        if time.time() - self._b3_ts > 55:
+        if self.mt5 is not None or time.time() - self._b3_ts > 55:
             self._step("lendo as ações da B3" + (" no MetaTrader" if self.mt5 is not None else ""))
             notes += self.refresh_b3()
         self._step("lendo notícias")
@@ -657,8 +675,10 @@ class Engine:
             al += alerts.from_shocks(k, TARGETS[k].name, d, is_open or bool(d.fresh), ev_cache)
         for k, a in ativos.items():
             rv = a.get("reversao")
-            if rv and rv["sinal"] and is_open:
-                h = rv["historico"]["30 min"]
+            h = rv["historico"]["30 min"] if rv else None
+            if rv and h["acerto"] is not None and h["n"]:
+                rv["comprovado"] = h["acerto"] - 1.96 * math.sqrt(h["acerto"] * (1 - h["acerto"]) / h["n"]) > 0.5
+            if rv and rv["sinal"] and is_open and rv.get("comprovado"):
                 al.append({"nivel": "REVERSÃO", "lado": rv["sinal"], "ativo": k, "prob": h["acerto"] or 0.0, "horizonte": "reversão intraday",
                            "titulo": f"{a['nome']}: {rv['rotulo']}",
                            "texto": f"RSI {rv['rsi']:.0f}, {rv['vwap_z']:+.1f} desvios do VWAP. Nos últimos {h['n']} sinais iguais, o preço foi na "

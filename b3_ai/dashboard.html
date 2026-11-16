@@ -313,7 +313,7 @@ function render(){
       <div style="position:relative;height:14px;border-radius:99px;margin:8px 0 2px;background:linear-gradient(90deg,var(--up-bg),var(--surface2) 30%,var(--surface2) 70%,var(--down-bg))"><i style="position:absolute;top:-3px;bottom:-3px;width:4px;border-radius:2px;background:var(--text);left:calc(${pos}% - 2px)"></i></div>
       <div style="display:flex;justify-content:space-between" class="faint"><span>sobrevendido (zona de compra)</span><span>sobrecomprado (zona de venda)</span></div>
       RSI ${nf(V.rsi,0)} · ${V.vwap_z>0?"+":""}${nf(V.vwap_z,1)} desvios do VWAP · posição nas bandas ${nf(pos,0)}%<br>
-      <span class="muted">Sinal medido: em ${h30.n} reversões do histórico o preço foi na direção do sinal em <b>${h30.acerto==null?"—":nf(h30.acerto*100,0)+"%"}</b> das vezes em 30 min (média ${pct(h30.media_pct,3)}) e ${h60.acerto==null?"—":nf(h60.acerto*100,0)+"%"} em 1 h.</span>`+
+      ${V.comprovado?"":'<span class="chip">⚪ sinal sem vantagem comprovada no histórico: use só como descrição do momento</span><br>'}<span class="muted">Sinal medido: em ${h30.n} reversões do histórico o preço foi na direção do sinal em <b>${h30.acerto==null?"—":nf(h30.acerto*100,0)+"%"}</b> das vezes em 30 min (média ${pct(h30.media_pct,3)}) e ${h60.acerto==null?"—":nf(h60.acerto*100,0)+"%"} em 1 h.</span>`+
       (V.recentes.length?'<br><span class="muted">Últimos sinais: '+V.recentes.slice(-5).map(r=>`<span class="chip"><span class="${r.lado>0?"up":"down"}">${r.lado>0?"▲":"▼"}</span> ${hhmm(r.ts)} · ${nf(r.preco,d)}</span>`).join("")+"</span>":"");
   }else $("rev").innerHTML='<span class="muted">sem barras intraday</span>';
   // ---- quadro

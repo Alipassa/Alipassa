@@ -90,21 +90,26 @@ porque não há histórico de manchetes para validá-las fora da amostra.
 
 ## O que acerta 80 % ou mais — e o que não acerta
 
-Medido no histórico real (15/11/2026). O painel mostra sempre o número medido, nunca um número prometido.
+Medido em 16/11/2026 com o histórico do MetaTrader da XP (20 mil barras de 5 min, 1.248 pregões; `python -m b3_ai auditoria`).
+O painel mostra sempre o número medido, nunca um número prometido.
 
 | Previsão | Acerto medido | Observação |
 | --- | --- | --- |
-| Direção da ABERTURA a partir do exterior durante a noite | mini índice 79 % (97 % quando o S&P andou forte, 76 casos); mini dólar 81 % (92 %) | é o gap de abertura, não a direção do pregão; depois de gap grande o mini índice fechou contra o gap em 68 % de 59 casos |
-| Faixa de preço de 80 % (todos os horizontes) | 77–83 % fora da amostra | o preço ficou dentro da faixa nessa proporção; serve para alvo e stop |
-| Choque no exterior → pregão do mini índice | dólar disparando: queda em 94 % de 93 pregões; VIX disparando: queda em 81 % de 98 | relação no MESMO pregão; dispara ALERTA/ATENÇÃO quando o choque está acontecendo |
-| Fecho do dia × fechamento anterior | 95 %+ quando o dia já andou meio desvio | referência é o fechamento anterior, não o preço atual: não é vantagem para quem entra agora |
-| Direção do próximo pregão (WIN) | ~54 % em 825 pregões | vantagem pequena e real |
-| Direção em 5 min a 1 h | 47–53 % | sem vantagem comprovada com dado público atrasado em 15 min |
-| Sinal de reversão em extremos (WIN, 30 min) | ~60 % em 111 sinais (67 % na 1ª metade, 53 % na 2ª) | instável; no mini dólar ficou abaixo de 50 % |
+| Direção da ABERTURA com exterior forte durante a noite | mini índice 97 % (76 casos); mini dólar 92 % (72) | é o gap de abertura, não a direção do pregão |
+| Direção da ABERTURA, todos os casos | mini índice 79 % (206); mini dólar 81 % (194) | estável na 2ª metade do histórico |
+| Choque no exterior → pregão do mini índice | dólar disparando: queda em 93 % de 55; emergentes caindo: 84 %; VIX disparando: 81 % | relação no MESMO pregão; dispara os alertas |
+| Faixa de preço de 80 % (todos os horizontes) | 79–84 % fora da amostra | serve para alvo e stop |
+| Direção do próximo pregão — mini dólar | 57,0 % em 521 (61 % quando há convicção, 162 casos) | vantagem comprovada |
+| Direção em 5 e 10 min — mini dólar | 52,5 % em 8.720 e 52,1 % em 8.954 | vantagem pequena, estatisticamente sólida |
+| Direção do mini índice (5 min a semanal) | 44–50 % | **sem vantagem**: o painel mostra ~50/50 |
+| Sinal de reversão em extremos | 50 % em 483 sinais (WIN); 48 % em 388 (WDO) | **não funciona** como gatilho; fica como descrição |
 
-Prever a DIREÇÃO do preço a partir de agora com 80 % de acerto não é alcançável de forma honesta — nem por este sistema nem
-por outro; quem mostra esse número em backtest ajustou o modelo ao passado. O que o painel faz é separar o que é confiável
-(faixas, choques, contexto) do que é quase cara-ou-coroa, e avisar quando algo raro e forte acontece.
+Uma medição anterior, com a série pública do mini índice (sem ajuste nas trocas de contrato), tinha dado 53,7 % para a direção
+diária e 60 % para o sinal de reversão. Com o histórico maior e ajustado do MetaTrader, as duas vantagens desapareceram: eram
+ruído. Por isso o alerta de reversão só dispara quando o sinal prova vantagem no histórico disponível.
+
+Prever a DIREÇÃO do mini índice a partir de agora com 80 % de acerto não é alcançável de forma honesta. O que o painel faz é
+separar o que é confiável (abertura, choques, faixas) do que é cara-ou-coroa, e avisar quando algo raro e forte acontece.
 
 ## Opinião sobre os dados (sem custo)
 

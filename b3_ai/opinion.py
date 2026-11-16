@@ -93,7 +93,8 @@ def _asset_view(a: dict, dec: int) -> tuple[str, list[str]]:
     if rv and (rv["estado"] or rv["sinal"]):
         h = rv["historico"]["30 min"]
         L.append(f"Intraday: **{rv['rotulo']}** (RSI {rv['rsi']:.0f}). Esse sinal acertou {(h['acerto'] or 0) * 100:.0f}% em {h['n']} casos — "
-                 "use como apoio, não como gatilho único.")
+                 + ("use como apoio, não como gatilho único." if rv.get("comprovado") else
+                    "não se distingue do acaso: serve para descrever o momento, não para decidir a entrada."))
     L.append(f"Níveis: suportes {_n(lv['s1'], dec)} e {_n(lv['s2'], dec)} · pivô {_n(lv['pivot'], dec)} · resistências "
              f"{_n(lv['r1'], dec)} e {_n(lv['r2'], dec)} · médias de 20/200 em {_n(lv['mm20'], dec)}/{_n(lv['mm200'], dec)}.")
     return verdict, L
