@@ -104,6 +104,19 @@ def run(engine: Engine) -> str:
                 L += [f"| {k} | {name} | {b['n']} | **{b['cobertura'] * 100:.1f}%** |" for name, b in ir["band80"].items() if b]
         if k in dres:
             L += [f"| {k} | {'Diário' if h == 1 else 'Semanal'} | {b['n']} | **{b['cobertura'] * 100:.1f}%** |" for h, b in dres[k]["band80"].items() if b]
+    est = s.get("abertura_estudo") or engine._opening().get("estudo") or {}
+    L += ["", "## 3b. Direção da abertura a partir do exterior durante a noite", "",
+          "Movimento do líder (S&P para o mini índice, dólar × peso mexicano para o mini dólar) entre o fechamento da B3 e a "
+          "abertura seguinte × direção do gap de abertura. A coluna da 2ª metade mostra se o acerto se manteve.", "",
+          "| Ativo | Movimento do líder | Casos | Acerto | Acerto na 2ª metade |", "| --- | --- | ---: | ---: | ---: |"]
+    nomes = ["pequeno (< 0,25σ)", "médio (0,25 a 0,75σ)", "grande (> 0,75σ)"]
+    for k, e in est.items():
+        if not e:
+            continue
+        L.append(f"| {k} | todos | {e['n']} | **{e['acerto'] * 100:.1f}%** | {e['acerto2'] * 100:.1f}% em {e['n2']} |")
+        L += [f"| {k} | {nomes[j]} | {b['n']} | **{(b['acerto'] or 0) * 100:.1f}%** | {(b['acerto2'] or 0) * 100:.1f}% em {b['n2']} |" for j, b in enumerate(e["bins"])]
+        if e.get("devolve"):
+            L.append(f"| {k} | depois de gap grande, pregão fechou CONTRA o gap | {e['devolve']['n']} | **{e['devolve']['pct'] * 100:.0f}%** | — |")
     L += ["", "## 4. Sinal de reversão nos extremos (5 min)", "",
           "| Ativo | Sinais | Acerto em 30 min | Intervalo 95% | Conclusão | Acerto em 1 h | Ganho médio em 30 min |", "| --- | ---: | ---: | --- | --- | ---: | ---: |"]
     for k, a in s["ativos"].items():

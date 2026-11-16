@@ -20,7 +20,7 @@ python -m b3_ai auditoria     # testa as fontes e mede os acertos fora da amostr
 | Tendência e extremos | tendência do dia, da semana e do mês; extremo de compra/venda em 5 min (RSI, bandas, VWAP) e sinal de reversão com o acerto medido |
 | Síntese para decisão | quantas frentes independentes (estatística, exterior, notícias, analistas, Focus, amplitude, técnica) apontam para cada lado |
 | Opinião sobre os dados | botão que analisa tudo o que está na tela e escreve a opinião na hora, sem custo; outro botão leva os dados prontos para o Claude |
-| Quadro de probabilidades | 5 min · 10 min · 30 min · 1 hora · fecho de hoje (com pregão aberto) · diário · semanal, com sinal, validação e acerto fora da amostra |
+| Quadro de probabilidades | abertura (com o pregão fechado) · 5 min · 10 min · 30 min · 1 hora · fecho de hoje (com pregão aberto) · diário · semanal, com sinal, validação e acerto fora da amostra |
 | Confronto exterior × Brasil | quanto os mercados internacionais implicavam para o ativo, quanto ele fez, o descolamento e a contribuição de cada fator |
 | Notícias e deduções | tema, cadeia de causa e efeito, setores e ações atingidos com a variação real do dia (o mercado confirmou a notícia?) e o efeito medido no histórico do mini índice |
 | Agenda | decisões de juros dos EUA (calendário oficial do Fed) e do Copom (Banco Central), payroll e eventos do `dados/agenda.json`, com o efeito histórico dos dias de Fed |
@@ -94,6 +94,7 @@ Medido no histórico real (15/11/2026). O painel mostra sempre o número medido,
 
 | Previsão | Acerto medido | Observação |
 | --- | --- | --- |
+| Direção da ABERTURA a partir do exterior durante a noite | mini índice 79 % (97 % quando o S&P andou forte, 76 casos); mini dólar 81 % (92 %) | é o gap de abertura, não a direção do pregão; depois de gap grande o mini índice fechou contra o gap em 68 % de 59 casos |
 | Faixa de preço de 80 % (todos os horizontes) | 77–83 % fora da amostra | o preço ficou dentro da faixa nessa proporção; serve para alvo e stop |
 | Choque no exterior → pregão do mini índice | dólar disparando: queda em 94 % de 93 pregões; VIX disparando: queda em 81 % de 98 | relação no MESMO pregão; dispara ALERTA/ATENÇÃO quando o choque está acontecendo |
 | Fecho do dia × fechamento anterior | 95 %+ quando o dia já andou meio desvio | referência é o fechamento anterior, não o preço atual: não é vantagem para quem entra agora |

@@ -395,3 +395,28 @@ class MT5StocksTest(unittest.TestCase):
         self.assertEqual(f.stocks([], 1), live)                   # sem lista: devolve o que já tem
         f.stocks(["PETR4", "VALE3"], budget_s=0)                  # orçamento zero: não trava nem perde o que já leu
         self.assertEqual(sorted(f._stocks), ["PETR4", "VALE3"])
+
+
+class OpeningTest(unittest.TestCase):
+    def test_opening_follows_overnight_leader(self):
+        rnd = random.Random(61)
+        H = 3600
+        tgt, lead, px, lp, t = [], [], 100000.0, 5000.0, 1_700_000_000
+        for day in range(140):
+            base = t + day * 86400
+            for hh in range(9):                                   # pregão do alvo: 9 barras de 1 h
+                o = px
+                px *= 1 + rnd.gauss(0, 0.001)
+                tgt.append((base + hh * H, o, max(o, px), min(o, px), px, 1.0))
+            night = rnd.gauss(0, 0.006)                           # o líder anda à noite e o alvo abre seguindo
+            for hh in range(24):
+                o = lp
+                lp *= 1 + (night / 15 if hh >= 9 else rnd.gauss(0, 0.0003))
+                lead.append((base + hh * H, o, max(o, lp), min(o, lp), lp, 1.0))
+            px *= 1 + 0.8 * night + rnd.gauss(0, 0.0005)
+        e = M.opening_study(tgt, lead)
+        self.assertGreater(e["n"], 100)
+        self.assertGreater(e["acerto"], 0.8)
+        self.assertGreater(e["bins"][-1]["acerto"], 0.95)         # movimento grande do líder → abertura quase sempre acompanha
+        self.assertAlmostEqual(e["beta"], 0.8, delta=0.15)
+        self.assertLess(M.opening_study(tgt, lead, sign=-1)["acerto"], 0.2)

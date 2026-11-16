@@ -14,10 +14,16 @@ from .data.http import DataError
 from .memory import Memory
 from .universe import ASSETS, BY_KEY, FACTORS, TARGETS
 
+# abertura: líder do exterior durante a noite → direção do gap. (símbolo do líder, sinal, nome)
+OPEN_LEADER = {"WIN": ("OANDA:SPX500USD", 1, "S&P 500"), "WDO": ("FX_IDC:USDMXN", 1, "dólar × peso mexicano")}
 DAILY_BARS = 1800
 INTRA_BARS = 5000
 ES = BY_KEY["ES"].tv
 WEEKDAYS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+
+
+def bars5_ok(b: list[tuple]) -> bool:
+    return len(b) > 10
 
 
 def brt(ts: float) -> datetime:
@@ -48,6 +54,7 @@ class Engine:
         self.rt: dict = {}            # dados em tempo real do MetaTrader no ciclo atual (vazio = feed público)
         self.data_dir = data_dir
         self._agenda_cache: tuple[float, dict] = (0.0, {})
+        self._open_cache: tuple[float, dict] = (0.0, {})
         self.mem = Memory(f"{data_dir}/b3_ai.db")
         self.with_news = with_news
         self.lock = threading.Lock()
@@ -118,6 +125,47 @@ class Engine:
         except Exception:  # noqa: BLE001
             pass
         return cached
+
+    def _opening(self) -> dict:
+        """Estudo da abertura (refeito a cada 6 h) + barras recentes de 1 h dos líderes para a leitura ao vivo."""
+        ts, cached = self._open_cache
+        try:
+            if not cached or time.time() - ts > 6 * 3600:
+                reqs = [(TARGETS[k].tv, "60", 5000) for k in TARGETS] + [(v[0], "60", 5000) for v in OPEN_LEADER.values()]
+                h = tv.fetch_history(reqs)
+                cached = {"estudo": {k: M.opening_study(h.get((TARGETS[k].tv, "60"), []), h.get((OPEN_LEADER[k][0], "60"), []), OPEN_LEADER[k][1])
+                                     for k in TARGETS}}
+                self._open_cache = (time.time(), cached)
+            live = tv.fetch_history([(v[0], "60", 120) for v in OPEN_LEADER.values()])
+            cached["lider"] = {k: live.get((OPEN_LEADER[k][0], "60"), []) for k in TARGETS}
+        except Exception:  # noqa: BLE001 — sem o estudo, o quadro só fica sem a linha de abertura
+            cached = cached or {"estudo": {}, "lider": {}}
+        return cached
+
+    def _open_row(self, k: str, op: dict, close_ts: float, close_px: float, alvo: str) -> Optional[dict]:
+        est, lb = (op.get("estudo") or {}).get(k), (op.get("lider") or {}).get(k) or []
+        if not est or len(lb) < 5:
+            return None
+        a = M._at(lb, close_ts, 3600)
+        if not a:
+            return None
+        x = OPEN_LEADER[k][1] * (lb[-1][4] / a - 1)
+        b = next((i for i in est["bins"] if abs(x) < i["ate"] * est["sd"]), est["bins"][-1])
+        hit = b["acerto"] if b["n"] >= 25 and b["acerto"] is not None else est["acerto"]
+        p = 0.5 if x == 0 else st.clamp(hit if x > 0 else 1 - hit, 0.03, 0.97)
+        gap = est["beta"] * x
+        dv = est.get("devolve")
+        nota = f"{OPEN_LEADER[k][2]} {x * 100:+.2f}% desde o fechamento da B3 → gap esperado {gap * 100:+.2f}%. É a direção da ABERTURA, não do pregão"
+        if dv:
+            nota += f"; depois de gap grande, o pregão fechou CONTRA o gap em {dv['pct'] * 100:.0f}% de {dv['n']} casos"
+        row = {"horizonte": "Abertura", "tipo": "abertura", "alvo": alvo, "p_alta": p, "p_queda": 1 - p, "base": 0.5, "k": None,
+               "oos_n": b["n2"], "oos_acerto": b["acerto2"], "oos_acerto_conv": est["acerto2"], "oos_n_conv": est["n2"], "amostra": est["n"],
+               "motivos": [], "faixas": M.bands(p, est["gap_sd"]), "sigma_pct": est["gap_sd"] * 100,
+               "faixa_min": close_px * (1 + gap - est["gap_sd"]), "faixa_max": close_px * (1 + gap + est["gap_sd"]), "ref": close_px,
+               "validado": bool(b["n"] >= 25 and (b["acerto2"] or 0) > 0.6), "nota": nota, "ajuste_exterior": gap * 100,
+               "confianca": f"frequência histórica: abertura acompanhou o exterior em {hit * 100:.0f}% de {b['n']} casos desse tamanho"}
+        row["sinal"] = "ABERTURA EM ALTA" if p >= 0.55 else "ABERTURA EM QUEDA" if p <= 0.45 else "ABERTURA INDEFINIDA"
+        return row
 
     def _agenda(self, d: "M.DailyData") -> dict:
         """Próximos eventos de alto impacto + o que o mini índice fez nos dias de decisão do Fed (medido)."""
@@ -494,6 +542,7 @@ class Engine:
                     r["f"] = M.intraday_features(intr[(k, tf)], intr[("ES", tf)], intr[(o, tf)])
         ires = self._intra_cache["res"]
 
+        opening = self._opening() if not is_open else {}
         ativos = {}
         for k, a in TARGETS.items():
             if k not in dd:
@@ -547,6 +596,10 @@ class Engine:
                                        fmt_date(nd if complete else next_sessions(today, 1)), shift, b80=r["band80"].get(1)))
             rows.append(self._prob_row("Semanal", "semanal", r["models"][5], r["feats"][-1], sig_d * math.sqrt(5), bars[-1][4],
                                        "até " + fmt_date(nw), shift, b80=r["band80"].get(5)))
+            if not is_open and bars5_ok(intr[(k, "5")]):
+                orow = self._open_row(k, opening, intr[(k, "5")][-1][0] + 300, intr[(k, "5")][-1][4], "abertura de " + fmt_date(nd) + " × fechamento anterior")
+                if orow:
+                    rows.insert(0, orow)
             rows = [x for x in rows if x]
             # memória: grava previsões e resolve as vencidas
             self._remember(k, rows, d, intr[(k, "5")], base_ts, is_open, complete)
@@ -572,6 +625,7 @@ class Engine:
             "b3": self.b3["resumo"], "noticias": news_state, "bcb": self._bcb(), "focus": self._focus(),
             "ia": self.ai, "placar": self.mem.scoreboard(),
             "historico": self.mem.recent(), "avisos": notes,
+            "abertura_estudo": (opening.get("estudo") if opening else (self._open_cache[1] or {}).get("estudo")),
             "tempo_real": bool(self.rt), "simbolos_mt5": self.rt.get("simbolos"), "atraso": self._delay_text(),
             "aviso_legal": "Probabilidades estatísticas calculadas sobre histórico real e validadas fora da amostra. "
                            "Não são garantia de movimento nem recomendação de investimento. O painel não envia ordens.",

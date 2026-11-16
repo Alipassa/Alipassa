@@ -1,17 +1,17 @@
 # Auditoria do B3 AI
 
-Gerada em 15/11/2026 17:24 (Brasília) · pregão de referência 2026-11-13 · WIN, WDO e ações da B3 com ~15 min de atraso (use o MetaTrader 5 para tempo real). Mercados internacionais em tempo real, exceto: DI futuro (1º venc.) (15 min), Ibovespa (15 min), Minério de ferro (SGX) (10 min).
+Gerada em 15/11/2026 22:02 (Brasília) · pregão de referência 2026-11-13 · WIN, WDO e ações da B3 com ~15 min de atraso (use o MetaTrader 5 para tempo real). Mercados internacionais em tempo real, exceto: DI futuro (1º venc.) (15 min), Ibovespa (15 min), Minério de ferro (SGX) (10 min).
 
 ## 1. Fontes de dados
 
 | Fonte | Situação | Detalhe |
 | --- | --- | --- |
-| B3 — todas as empresas (scanner) | ✅ ok | 2324 papéis · 0.6s |
-| Histórico WIN (feed público) | ✅ ok | 50 barras · 0.5s |
-| Banco Central (Selic, PTAX, IPCA) | ✅ ok | 4 séries · 1.9s |
-| Boletim Focus | ✅ ok | 4 indicadores · 2.4s |
-| Notícias (RSS) | ✅ ok | 824 manchetes, 0 feeds com erro · 2.5s |
-| Agenda (Fed, Copom) | ✅ ok | 4 eventos · 0.9s |
+| B3 — todas as empresas (scanner) | ✅ ok | 2324 papéis · 0.7s |
+| Histórico WIN (feed público) | ✅ ok | 50 barras · 0.3s |
+| Banco Central (Selic, PTAX, IPCA) | ✅ ok | 3 séries · 3.7s |
+| Boletim Focus | ✅ ok | 4 indicadores · 4.8s |
+| Notícias (RSS) | ✅ ok | 832 manchetes, 0 feeds com erro · 3.4s |
+| Agenda (Fed, Copom) | ✅ ok | 4 eventos · 1.1s |
 | MetaTrader 5 (tempo real) | ✅ ok | não ativado (rode com --fonte mt5) |
 
 ## 2. Direção — acerto fora da amostra (walk-forward)
@@ -28,12 +28,12 @@ O modelo é treinado só com o passado e prevê o trecho seguinte. Acerto = prev
 | WIN | Semanal | 823 | 432 | **52.5%** | 49.1–55.9% | ⚪ não distinguível do acaso | 59.7% em 196 |
 | WDO | 5 min | 2105 | 1036 | **49.2%** | 47.1–51.4% | ⚪ não distinguível do acaso | — (0 casos) |
 | WDO | 10 min | 2150 | 1070 | **49.8%** | 47.7–51.9% | ⚪ não distinguível do acaso | — (0 casos) |
-| WDO | 30 min | 2123 | 1105 | **52.0%** | 49.9–54.2% | ⚪ não distinguível do acaso | — (0 casos) |
-| WDO | 1 hora | 2030 | 1054 | **51.9%** | 49.7–54.1% | ⚪ não distinguível do acaso | 57.9% em 95 |
+| WDO | 30 min | 2123 | 1104 | **52.0%** | 49.9–54.1% | ⚪ não distinguível do acaso | — (0 casos) |
+| WDO | 1 hora | 2031 | 1053 | **51.8%** | 49.7–54.0% | ⚪ não distinguível do acaso | 56.7% em 97 |
 | WDO | Diário | 825 | 420 | **50.9%** | 47.5–54.3% | ⚪ não distinguível do acaso | 50.0% em 16 |
 | WDO | Semanal | 823 | 428 | **52.0%** | 48.6–55.4% | ⚪ não distinguível do acaso | 62.5% em 16 |
 
-Total: 10344 acertos em 20545 previsões de direção (50.3%).
+Total: 10342 acertos em 20546 previsões de direção (50.3%).
 
 ## 3. Faixa de preço de 80% — cobertura fora da amostra
 
@@ -53,6 +53,23 @@ A faixa é calculada com a 1ª metade do histórico e conferida na 2ª. O alvo �
 | WDO | 10 min | 2298 | **82.8%** |
 | WDO | Diário | 750 | **80.1%** |
 | WDO | Semanal | 748 | **82.0%** |
+
+## 3b. Direção da abertura a partir do exterior durante a noite
+
+Movimento do líder (S&P para o mini índice, dólar × peso mexicano para o mini dólar) entre o fechamento da B3 e a abertura seguinte × direção do gap de abertura. A coluna da 2ª metade mostra se o acerto se manteve.
+
+| Ativo | Movimento do líder | Casos | Acerto | Acerto na 2ª metade |
+| --- | --- | ---: | ---: | ---: |
+| WIN | todos | 206 | **78.6%** | 78.6% em 103 |
+| WIN | pequeno (< 0,25σ) | 53 | **60.4%** | 55.2% em 29 |
+| WIN | médio (0,25 a 0,75σ) | 77 | **72.7%** | 77.5% em 40 |
+| WIN | grande (> 0,75σ) | 76 | **97.4%** | 100.0% em 34 |
+| WIN | depois de gap grande, pregão fechou CONTRA o gap | 59 | **68%** | — |
+| WDO | todos | 194 | **80.9%** | 79.4% em 97 |
+| WDO | pequeno (< 0,25σ) | 44 | **65.9%** | 71.4% em 21 |
+| WDO | médio (0,25 a 0,75σ) | 78 | **79.5%** | 76.2% em 42 |
+| WDO | grande (> 0,75σ) | 72 | **91.7%** | 88.2% em 34 |
+| WDO | depois de gap grande, pregão fechou CONTRA o gap | 79 | **51%** | — |
 
 ## 4. Sinal de reversão nos extremos (5 min)
 

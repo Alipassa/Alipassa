@@ -197,6 +197,68 @@ def event_study(target: "DailyData", series: list[float], direction: int, thr: f
             "seguinte_media": st.mean(nxt) * 100, "seguinte_pct_alta": sum(1 for r in nxt if r > 0) / len(nxt)}
 
 
+OPEN_BINS = [0.0, 0.25, 0.75, 99.0]      # tamanho do movimento do líder durante a noite, em desvios-padrão
+
+
+def _at(bars: list[tuple], t: float, span: float) -> Optional[float]:
+    """Fechamento da última barra já encerrada no instante t (barras de `span` segundos)."""
+    lo, hi, ans = 0, len(bars) - 1, None
+    while lo <= hi:
+        m = (lo + hi) // 2
+        if bars[m][0] + span <= t:
+            ans, lo = bars[m][4], m + 1
+        else:
+            hi = m - 1
+    return ans
+
+
+def opening_study(target60: list[tuple], leader60: list[tuple], sign: int = 1) -> Optional[dict]:
+    """A abertura segue o exterior? Para cada pregão: movimento do líder entre o fechamento anterior do alvo e a
+    abertura × sinal do gap de abertura (abertura − fechamento anterior). `sign` = −1 quando a relação é inversa.
+
+    Devolve o acerto por tamanho do movimento, o acerto só na 2ª metade (estabilidade), o gap esperado por unidade de
+    movimento e o que o pregão fez depois de gaps grandes (continuou ou devolveu).
+    """
+    ss = [x for x in sessions_gap(target60, 2 * 3600) if len(x) >= 5]
+    rows = []
+    for k in range(1, len(ss)):
+        pc, tc, op, to, cl = ss[k - 1][-1][4], ss[k - 1][-1][0] + 3600, ss[k][0][1], ss[k][0][0], ss[k][-1][4]
+        a, b = _at(leader60, tc, 3600), _at(leader60, to, 3600)
+        if a and b and op != pc and b != a:
+            rows.append((sign * (b / a - 1), op / pc - 1, cl / op - 1))
+    if len(rows) < 80:
+        return None
+    sd = st.std([r[0] for r in rows]) or 1e-9
+    half = len(rows) // 2
+
+    def hit(sel: list) -> Optional[float]:
+        return sum(1 for x, g, _ in sel if (x > 0) == (g > 0)) / len(sel) if sel else None
+
+    bins = []
+    for j in range(len(OPEN_BINS) - 1):
+        sel = [r for r in rows if OPEN_BINS[j] * sd <= abs(r[0]) < OPEN_BINS[j + 1] * sd]
+        sel2 = [r for r in rows[half:] if OPEN_BINS[j] * sd <= abs(r[0]) < OPEN_BINS[j + 1] * sd]
+        bins.append({"de": OPEN_BINS[j], "ate": OPEN_BINS[j + 1], "n": len(sel), "acerto": hit(sel), "n2": len(sel2), "acerto2": hit(sel2)})
+    sxx = sum(r[0] * r[0] for r in rows)
+    gsd = st.std([r[1] for r in rows]) or 1e-9
+    # "devolve": usa todos os pregões (não depende do histórico do líder, que é mais curto)
+    allg = [(ss[k][0][1] / ss[k - 1][-1][4] - 1, ss[k][-1][4] / ss[k][0][1] - 1) for k in range(1, len(ss))]
+    asd = st.std([g for g, _ in allg]) or 1e-9
+    big = [(0.0, g, c) for g, c in allg if abs(g) >= 0.75 * asd and c != 0]
+    return {"n": len(rows), "acerto": hit(rows), "acerto2": hit(rows[half:]), "n2": len(rows) - half, "sd": sd, "bins": bins,
+            "beta": sum(r[0] * r[1] for r in rows) / sxx if sxx else 0.0, "gap_sd": gsd,
+            "devolve": {"n": len(big), "pct": sum(1 for _, g, c in big if (g > 0) != (c > 0)) / len(big)} if len(big) >= 25 else None}
+
+
+def sessions_gap(bars: list[tuple], gap: float) -> list[list[tuple]]:
+    out: list[list[tuple]] = []
+    for i, b in enumerate(bars):
+        if i == 0 or b[0] - bars[i - 1][0] > gap:
+            out.append([])
+        out[-1].append(b)
+    return out
+
+
 # ============================================================================= modelo diário (confronto + 1d/5d)
 class DailyData:
     """Séries diárias alinhadas às datas de pregão do alvo."""
