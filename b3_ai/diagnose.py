@@ -66,7 +66,16 @@ def run(data_dir: str = "dados") -> str:
                     t0 = time.time()
                     acoes = feed.stocks(["PETR4", "VALE3", "ITUB4", "BBAS3", "MGLU3", "WEGE3", "ABEV3", "BBDC4"], budget_s=20)
                     add(len(acoes) >= 5, "ações da B3 pelo MetaTrader",
-                        f"{len(acoes)} de 8 lidas em {time.time() - t0:.1f}s — " + ", ".join(f"{k} {v['p']:.2f} ({v['c']:+.2f}%)" for k, v in acoes.items()))
+                        f"{len(acoes)} de 8 lidas em {time.time() - t0:.1f}s")
+                    for k, v in acoes.items():
+                        L.append(f"       {k}: {v['p']:.2f} ({v['c']:+.2f}%) · {time.strftime('%d/%m %H:%M', time.gmtime(v['ts'] - 3 * 3600))} · {v['fonte']}")
+                    for k in ("PETR4", "VALE3"):
+                        i = mt5.symbol_info(k)
+                        r = mt5.copy_rates_from_pos(k, mt5.TIMEFRAME_D1, 0, 3)
+                        L.append(f"       [{k} bruto] last={getattr(i, 'last', None)} bid={getattr(i, 'bid', None)} time={getattr(i, 'time', None)} "
+                                 f"price_change={getattr(i, 'price_change', None)} session_close={getattr(i, 'session_close', None)} "
+                                 f"select={getattr(i, 'select', None)} · barras D1: "
+                                 + "; ".join(time.strftime('%d/%m/%y', time.gmtime(float(x['time']))) + f" {float(x['close']):.2f}" for x in (r if r is not None else [])))
                 except Exception as e:  # noqa: BLE001
                     add(False, "ações da B3 pelo MetaTrader", f"{type(e).__name__}: {e}")
                 for word in ("FERRO", "IRON", "MINERIO", "WSP", "IBOV", "DI1"):

@@ -135,11 +135,48 @@ class MT5Feed:
                 self.symbols.pop(key, None)
         return out
 
-    def stocks(self, tickers: list[str], budget_s: float = 6.0) -> dict[str, dict]:
-        """Preço e variação do dia das ações da B3 direto do terminal (barra diária corrente × fechamento anterior).
+    def _stock_quote(self, tk: str) -> Optional[dict]:
+        """Uma ação: prefere o último negócio do terminal (symbol_info: preço e variação do dia já calculados pela
+        corretora); só usa a barra diária quando o terminal não tem a cotação. A barra diária de um papel fora de
+        sincronia pode vir ANTIGA — por isso cada leitura leva a data (`ts`) e a origem (`fonte`), e quem consome descarta
+        o que não for do pregão mais recente."""
+        shift = self.offset_h * 3600
+        try:
+            info = self.mt5.symbol_info(tk)
+        except Exception:  # noqa: BLE001
+            info = None
+        last = float(getattr(info, "last", 0) or 0) if info is not None else 0.0
+        ts_tick = float(getattr(info, "time", 0) or 0) if info is not None else 0.0
+        bars = None
+        try:
+            bars = self.mt5.copy_rates_from_pos(tk, self.mt5.TIMEFRAME_D1, 0, 2)
+        except Exception:  # noqa: BLE001
+            pass
+        bar = bars[-1] if bars is not None and len(bars) >= 1 else None
+        prev = float(bars[-2]["close"]) if bars is not None and len(bars) >= 2 else 0.0
+        ts_bar = float(bar["time"]) if bar is not None else 0.0
+        if last > 0 and ts_tick >= ts_bar:            # cotação do terminal é a informação mais nova
+            chg = getattr(info, "price_change", None)
+            ref = float(getattr(info, "session_close", 0) or 0)
+            if chg is None or (chg == 0 and ref > 0 and abs(last / ref - 1) > 1e-9):
+                base = ref or (prev if bar is not None and ts_tick - ts_bar < 86400 else 0.0)
+                chg = (last / base - 1) * 100 if base > 0 else None
+            if chg is not None:
+                same_day = bar is not None and ts_tick - ts_bar < 86400
+                return {"p": last, "c": float(chg), "o": float(bar["open"]) if same_day else last, "h": float(bar["high"]) if same_day else last,
+                        "l": float(bar["low"]) if same_day else last, "vol": (float(bar["real_volume"]) if same_day else 0.0),
+                        "ts": ts_tick - shift, "lido": time.time(), "fonte": "último negócio"}
+        if bar is None or prev <= 0 or float(bar["close"]) <= 0:
+            return None
+        c = float(bar["close"])
+        return {"p": c, "c": (c / prev - 1) * 100, "o": float(bar["open"]), "h": float(bar["high"]), "l": float(bar["low"]),
+                "vol": float(bar["real_volume"]) or 0.0, "ts": ts_bar - shift, "lido": time.time(), "fonte": "barra diária"}
 
-        Não mexe na "Observação do Mercado". Lê em rodízio dentro de `budget_s` segundos por chamada — o que não couber
-        fica para a próxima — e devolve tudo o que já foi lido, com a hora da leitura (`lido`). Passe os mais líquidos primeiro.
+    def stocks(self, tickers: list[str], budget_s: float = 6.0) -> dict[str, dict]:
+        """Preço e variação do dia das ações da B3 direto do terminal, sem mexer na "Observação do Mercado".
+
+        Lê em rodízio dentro de `budget_s` segundos por chamada — o que não couber fica para a próxima — e devolve tudo o
+        que já foi lido. Passe os mais líquidos primeiro.
         """
         if not tickers:
             return self._stocks
@@ -147,26 +184,16 @@ class MT5Feed:
             self.connect()
         t0 = time.time()
         n = len(tickers)
-        shift = self.offset_h * 3600
+        done = 0
         for step in range(n):
             if time.time() - t0 > budget_s:
                 break
+            done = step + 1
             tk = tickers[(self._stock_pos + step) % n]
-            try:
-                r = self.mt5.copy_rates_from_pos(tk, self.mt5.TIMEFRAME_D1, 0, 2)
-            except Exception:  # noqa: BLE001
-                r = None
-            if r is None or len(r) < 2:
-                continue
-            last, prev = r[-1], r[-2]
-            c, pc = float(last["close"]), float(prev["close"])
-            if c <= 0 or pc <= 0:
-                continue
-            self._stocks[tk] = {"p": c, "c": (c / pc - 1) * 100, "o": float(last["open"]), "h": float(last["high"]), "l": float(last["low"]),
-                                "vol": float(last["real_volume"]) or 0.0, "ts": float(last["time"]) - shift, "lido": time.time()}
-        else:
-            step = n
-        self._stock_pos = (self._stock_pos + step) % n
+            q = self._stock_quote(tk)
+            if q:
+                self._stocks[tk] = q
+        self._stock_pos = (self._stock_pos + done) % n
         return self._stocks
 
     def sp_intraday(self) -> dict[str, list[tuple]]:

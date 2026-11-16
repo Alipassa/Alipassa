@@ -372,29 +372,44 @@ class MT5ExtrasTest(unittest.TestCase):
 
 
 class MT5StocksTest(unittest.TestCase):
-    def test_stock_quotes_change_and_rotation(self):
+    def _feed(self, info):
         from b3_ai.data.mt5 import MT5Feed
 
         class Quotes(FakeMT5):
-            calls = 0
+            def symbol_info(self, sym):
+                return info.get(sym)
 
             def copy_rates_from_pos(self, sym, tf, start, n):
-                Quotes.calls += 1
                 if sym in ("WIN@", "WDO@"):
                     return FakeMT5.copy_rates_from_pos(self, sym, tf, start, n)
                 if sym == "XXXX3":
                     return None                                   # papel que o terminal não tem
+                day = 86400
                 return [{"time": 1_700_000_000, "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.0, "tick_volume": 1, "real_volume": 100},
-                        {"time": 1_700_086_400, "open": 10.1, "high": 10.9, "low": 10.0, "close": 10.5, "tick_volume": 1, "real_volume": 2000}]
+                        {"time": 1_700_000_000 + day, "open": 10.1, "high": 10.9, "low": 10.0, "close": 10.5, "tick_volume": 1, "real_volume": 2000}]
 
-        f = MT5Feed(Quotes(), env={"MT5_UTC_OFFSET_HOURS": "-3"})
+        return MT5Feed(Quotes(), env={"MT5_UTC_OFFSET_HOURS": "-3"})
+
+    def test_daily_bar_fallback_change_and_rotation(self):
+        f = self._feed({})
         live = f.stocks(["PETR4", "XXXX3", "VALE3"])
         self.assertEqual(sorted(live), ["PETR4", "VALE3"])
         self.assertAlmostEqual(live["PETR4"]["c"], 5.0)           # 10,00 → 10,50
-        self.assertEqual((live["PETR4"]["p"], live["PETR4"]["vol"]), (10.5, 2000.0))
+        self.assertEqual((live["PETR4"]["p"], live["PETR4"]["vol"], live["PETR4"]["fonte"]), (10.5, 2000.0, "barra diária"))
         self.assertEqual(f.stocks([], 1), live)                   # sem lista: devolve o que já tem
         f.stocks(["PETR4", "VALE3"], budget_s=0)                  # orçamento zero: não trava nem perde o que já leu
         self.assertEqual(sorted(f._stocks), ["PETR4", "VALE3"])
+
+    def test_terminal_quote_wins_over_stale_daily_bar(self):
+        """Caso real (PETR4 na XP): a barra diária veio antiga; o último negócio do terminal é o que vale."""
+        newer = 1_700_000_000 + 40 * 86400
+        info = {"PETR4": type("I", (), {"last": 45.27, "time": newer, "price_change": 1.34, "session_close": 44.67})(),
+                "VALE3": type("I", (), {"last": 0.0, "time": 0})()}
+        live = self._feed(info).stocks(["PETR4", "VALE3"])
+        self.assertEqual((live["PETR4"]["p"], live["PETR4"]["c"], live["PETR4"]["fonte"]), (45.27, 1.34, "último negócio"))
+        self.assertEqual(live["PETR4"]["h"], 45.27)               # barra de outro dia não empresta máxima/mínima
+        self.assertEqual(live["VALE3"]["fonte"], "barra diária")  # sem cotação no terminal: cai para a barra
+        self.assertGreater(live["PETR4"]["ts"], live["VALE3"]["ts"])
 
 
 class OpeningTest(unittest.TestCase):
