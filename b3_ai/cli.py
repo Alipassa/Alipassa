@@ -93,6 +93,18 @@ def cmd_diagnostico(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_simulacao(args: argparse.Namespace) -> int:
+    from . import simulate
+    text = simulate.run(_engine(args))
+    os.makedirs(args.saida, exist_ok=True)
+    path = os.path.join(args.saida, "simulacao_" + datetime.now(tz=BRT).strftime("%Y%m%d_%H%M") + ".md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text)
+    print(f"\nsimulação gravada em {path}")
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -124,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
     au.set_defaults(func=cmd_auditoria)
     dg = sub.add_parser("diagnostico", help="confere Python, MetaTrader 5 e fontes; grava diagnostico.txt")
     dg.set_defaults(func=cmd_diagnostico)
+    sm = sub.add_parser("simulacao", help="simula as estratégias com custos: dá lucro ou não?")
+    sm.add_argument("--saida", default="relatorios")
+    sm.set_defaults(func=cmd_simulacao)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)

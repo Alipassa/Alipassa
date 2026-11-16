@@ -91,7 +91,10 @@ def fit_calibrated(xs: list[list[float]], ys: list[int], names: list[str], lam: 
         preds, outs = walk_forward(xs, ys, start, step, lam)
     base = st.mean(ys)
     ev = evaluate(preds, outs, base)
-    return {"w": st.logistic_fit(xs, ys, lam=lam), "base": base, "eval": ev, "names": names, "n_train": n}
+    k = ev["k"]
+    return {"w": st.logistic_fit(xs, ys, lam=lam), "base": base, "eval": ev, "names": names, "n_train": n,
+            # previsões fora da amostra, já calibradas, alinhadas às amostras xs[oos_start:] (usadas na simulação com custos)
+            "oos_start": start, "oos_p": [base + k * (p - base) for p in preds]}
 
 
 def apply_model(model: dict, row: list[float]) -> dict:
@@ -374,14 +377,17 @@ def build_daily(d: DailyData, vix_bars: list[tuple], cross: DailyData, last_comp
     end = n if last_complete else n - 1          # índice (exclusivo) do último pregão fechado
     models, b80 = {}, {}
     for h, lam in ((1, 20.0), (5, 40.0)):
-        xs, ys, az = [], [], []
+        xs, ys, az, ts_ = [], [], [], []
         for t in range(300, end - h):
             if feats[t] is None:
                 continue
+            ts_.append(t)
             xs.append(feats[t])
             ys.append(1 if d.close[t + h] > d.close[t] else 0)
             az.append(abs(d.close[t + h] / d.close[t] - 1) / (sig[t] * math.sqrt(h)))
         models[h] = fit_calibrated(xs, ys, FEATURES_D, lam, start_frac=0.45, folds=8, embargo=h - 1)
+        if models[h]:
+            models[h]["t"] = ts_
         b80[h] = band80(az)
     # análogos: mesmo sinal de exterior e de descolamento → o que aconteceu no pregão seguinte
     analog = None
@@ -483,15 +489,18 @@ def build_intraday(win: list[tuple], es: list[tuple], wdo: list[tuple], tf_min: 
     sec = tf_min * 60
     models, b80 = {}, {}
     for name, h in horizons.items():
-        xs, ys, az = [], [], []
+        xs, ys, az, ts_ = [], [], [], []
         for i in range(n - h):
             if feats[i] is None or ts[i + h] - ts[i] > h * sec + 900:
                 continue
             az.append(abs(close[i + h] / close[i] - 1) / (f["sigma"][i] * math.sqrt(h)))
             if close[i + h] == close[i]:
                 continue
+            ts_.append(i)
             xs.append(feats[i])
             ys.append(1 if close[i + h] > close[i] else 0)
         models[name] = fit_calibrated(xs, ys, FEATURES_I, lam=30.0, start_frac=0.5, folds=4, embargo=h - 1)
+        if models[name]:
+            models[name]["t"], models[name]["h"] = ts_, h
         b80[name] = band80(az)
     return {"models": models, "f": f, "tf": tf_min, "band80": b80}

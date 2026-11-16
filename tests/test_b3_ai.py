@@ -435,3 +435,35 @@ class OpeningTest(unittest.TestCase):
         self.assertGreater(e["bins"][-1]["acerto"], 0.95)         # movimento grande do líder → abertura quase sempre acompanha
         self.assertAlmostEqual(e["beta"], 0.8, delta=0.15)
         self.assertLess(M.opening_study(tgt, lead, sign=-1)["acerto"], 0.2)
+
+
+class SimulationTest(unittest.TestCase):
+    def test_costs_turn_small_edge_into_loss(self):
+        from b3_ai import simulate
+        self.assertAlmostEqual(simulate.cost("WDO"), 2 * 0.5 * 10 + simulate.FEE["WDO"])
+        r = simulate.summarize("x", "WDO", [1.0, -1.0, 1.0, 1.0] * 20)      # 75 % de acerto, 1 ponto por operação
+        self.assertEqual(r["n"], 80)
+        self.assertAlmostEqual(r["acerto_bruto"], 0.75)
+        self.assertLess(r["liq_medio"], 0)                                   # +R$ 5 de média bruta não paga R$ 12,60 de custo
+        self.assertIn("prejuízo", r["veredito"])
+        good = simulate.summarize("y", "WIN", [300.0, -100.0] * 40)
+        self.assertIn("lucro comprovado", good["veredito"])
+        self.assertEqual(good["seq_perdas"], 1)
+        self.assertEqual(simulate.summarize("z", "WIN", [])["n"], 0)
+
+    def test_gap_fade_enters_against_the_gap(self):
+        from b3_ai import simulate
+        rnd = random.Random(71)
+        bars, px, t = [], 100000.0, 1_700_000_000
+        for day in range(80):
+            big = day >= 45 and day % 5 == 0
+            op = px * (1 + (0.02 if big else rnd.gauss(0, 0.001)))           # gap grande para cima...
+            cl = op * (1 - 0.01) if big else op * (1 + rnd.gauss(0, 0.002))  # ...que devolve metade até o fechamento
+            for i in range(8):
+                p0 = op + (cl - op) * i / 8
+                p1 = op + (cl - op) * (i + 1) / 8
+                bars.append((t + day * 86400 + i * 900, p0, max(p0, p1), min(p0, p1), p1, 1.0))
+            px = cl
+        res = simulate.gap_fade(bars)
+        self.assertGreaterEqual(len(res), 5)
+        self.assertTrue(all(x > 0 for x in res))                             # vendeu na abertura, recomprou mais baixo

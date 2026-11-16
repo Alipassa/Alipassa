@@ -665,7 +665,8 @@ class Engine:
                            "Não são garantia de movimento nem recomendação de investimento. O painel não envia ordens.",
         }
         self._audit_daily = (daily["WIN"], {**fb}, kinds)
-        self._audit_bars = {k: daily[k] for k in TARGETS}      # insumos para a auditoria refazer os estudos de choque
+        self._audit_bars = {k: daily[k] for k in TARGETS}
+        self._sim_intr = intr                                  # barras intraday do ciclo, para a simulação com custos      # insumos para a auditoria refazer os estudos de choque
         if "WDO" in dd:      # dólar local como "choque" para o mini índice (não entra na regressão do exterior)
             cm = dict(zip(dd["WDO"].dates, dd["WDO"].ret))
             dd["WIN"].x["CROSS"] = [cm.get(x, 0.0) for x in dd["WIN"].dates]
