@@ -624,7 +624,9 @@ class Engine:
         dd = {k: M.DailyData(daily[k], fb, kinds) for k in TARGETS if len(daily[k]) > 700}
         if "WIN" not in dd:
             raise DataError("histórico diário insuficiente para o WIN")
-        dkey = (win_last, complete, len(dd))
+        # a chave inclui a última data e o nº de barras de CADA alvo: na abertura o WDO pode ganhar a barra do dia alguns
+        # segundos depois do WIN, e reaproveitar modelos calculados com uma barra a menos estoura os índices
+        dkey = (complete, tuple((k, d.dates[-1], len(d.dates)) for k, d in sorted(dd.items())))
         if self._daily_cache.get("key") != dkey:
             res = {}
             for k, d in dd.items():

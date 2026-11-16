@@ -30,7 +30,9 @@ class Service:
                 self.last_error = ""
                 return True
             except Exception as e:  # noqa: BLE001 — o painel continua no ar com o último estado
-                self.last_error = f"{type(e).__name__}: {e}"
+                tb = traceback.extract_tb(e.__traceback__)
+                where = " ← ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in tb[-3:][::-1])
+                self.last_error = f"{type(e).__name__}: {e} [{where}]"
                 print(f"[b3-ai] ciclo falhou: {self.last_error}")
                 if os.environ.get("B3AI_DEBUG"):
                     traceback.print_exc()

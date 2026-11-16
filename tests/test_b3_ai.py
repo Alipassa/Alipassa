@@ -519,3 +519,59 @@ class GapStateTest(unittest.TestCase):
         self.assertIsNone(simulate.gap_state(bars, False))            # pregão fechado: não há gap de hoje
         calm = bars + [(t + 60 * 86400, px * 1.0001, px * 1.0002, px, px * 1.0001, 1.0)]
         self.assertEqual(simulate.gap_state(calm, True)["lado"], 0)   # gap pequeno: sem operação
+
+
+class OpenSessionTest(unittest.TestCase):
+    """Virada da abertura: um alvo ganha a barra do dia antes do outro e o ciclo seguinte não pode estourar."""
+
+    def test_cycle_survives_targets_gaining_today_bar_at_different_times(self):
+        import contextlib
+        import io
+        import tempfile as tf
+        import time as _t
+        from b3_ai import engine as E
+
+        day0 = int(_t.time() // DAY) * DAY - 900 * DAY + 12 * 3600
+        full = {"WIN": synth_daily(900, seed=101, start=day0), "WDO": synth_daily(900, seed=102, start=day0)}
+        facs = {a.tv: synth_daily(900, seed=200 + i, start=day0) for i, a in enumerate(E.ASSETS)}
+
+        def intraday(seed, upto):
+            rnd, out, px = random.Random(seed), [], 1000.0
+            for dd_ in range(60, 0, -1):
+                base = upto - dd_ * DAY
+                for i in range(100):
+                    o = px
+                    px *= 1 + rnd.gauss(0, 0.0005)
+                    out.append((base + i * 300, o, max(o, px), min(o, px), px, 5.0))
+            return out
+
+        now = _t.time()
+        state = {"WIN": 900, "WDO": 899}                      # o WDO ainda sem a barra de hoje
+
+        def fake_history(reqs, timeout=45.0, delays=None, chunk=12):
+            h = {}
+            for sym, tfm, _n in reqs:
+                key = next((k for k, a in E.TARGETS.items() if a.tv == sym), None)
+                if tfm == "1D":
+                    h[(sym, tfm)] = full[key][:state[key]] if key else facs.get(sym, [])
+                elif tfm in ("5", "15"):
+                    bars = intraday(hash(sym) % 1000, now)
+                    h[(sym, tfm)] = bars + [(now - 600, bars[-1][4], bars[-1][4], bars[-1][4], bars[-1][4], 1.0)]   # barra fresca: pregão aberto
+                else:
+                    h[(sym, tfm)] = []
+            return h
+
+        orig = (E.tv.fetch_history, E.tv.scan_b3, E.Engine._agenda, E.Engine._focus, E.Engine._bcb)
+        E.tv.fetch_history, E.tv.scan_b3 = fake_history, lambda: []
+        E.Engine._agenda = lambda self, d: {"eventos": [], "fomc_historico": None, "erros": []}
+        E.Engine._focus = E.Engine._bcb = lambda self: {}
+        try:
+            with tf.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+                e = E.Engine(tmp, with_news=False)
+                self.assertTrue(e.cycle()["ok"])
+                state["WDO"] = 900                              # agora o WDO também tem a barra do dia
+                e._tv_try = 0
+                self.assertTrue(e.cycle()["ok"])
+                e.mem.close()
+        finally:
+            E.tv.fetch_history, E.tv.scan_b3, E.Engine._agenda, E.Engine._focus, E.Engine._bcb = orig
