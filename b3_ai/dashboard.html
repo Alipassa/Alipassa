@@ -325,12 +325,17 @@ function render(){
   }else $("rev").innerHTML='<span class="muted">sem barras intraday</span>';
   renderPatterns(A);
   const G=A.gap, money2=v=>v==null?"—":"R$ "+nf(v,2);
-  if(G&&G.historico&&G.historico.n){const H=G.historico,T2=G.hoje;
-    $("gapBox").innerHTML=(T2?(T2.grande?`<b class="${T2.lado>0?"up":"down"}">${T2.lado>0?"▲ COMPRA":"▼ VENDA"} contra o gap</b> — gap <b>${esc(T2.forca)}</b> de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio${Math.abs(T2.z)>=2?"s":""}).
-          <div class="kv" style="margin-top:6px"><div><b>${nf(T2.abertura,d)}</b><span>abertura · entrar até 1 hora depois deu o mesmo resultado</span></div><div><b>${nf(T2.stop_preco,d)}</b><span>stop só de proteção · 2 desvios diários ≈ ${money2(T2.stop_rs)} por contrato</span></div><div><b>${nf(T2.meio_gap,d)} / ${nf(T2.fech_ant,d)}</b><span>metade do gap / gap fechado (referências)</span></div><div><b class="${cls(T2.resultado_rs)}">${money2(T2.resultado_rs)}</b><span>resultado agora, por contrato (antes dos custos)</span></div></div>Saída no fechamento do pregão (sair antes de 4 horas piorou o resultado).<br>Contexto: abriu <b>${T2.fora_da_faixa?"FORA":"dentro"}</b> da faixa de ontem · ontem fechou <b>${T2.vespera_na_direcao?"na mesma direção":"contra a direção"}</b> do gap ${T2.fora_da_faixa&&T2.vespera_na_direcao?'<span class="chip">os dois contextos em que a devolução foi mais forte no estudo</span>':T2.fora_da_faixa||T2.vespera_na_direcao?'<span class="chip">um dos dois contextos favoráveis</span>':'<span class="chip">nenhum dos contextos favoráveis: devolução mais fraca no estudo</span>'}`
-        :`Gap de hoje: ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio) — abaixo do limite de 0,75, <b>sem operação</b>.`)
-      :'<span class="muted">Aguardando a abertura do pregão para medir o gap.</span>')+
-      `<br><span class="muted">Simulação com custos: ${H.n} operações · ${nf(H.acerto_bruto*100,0)}% de acerto · média <b class="${cls(H.liq_medio)}">${money2(H.liq_medio)}</b> por contrato (intervalo ${money2(H.ic[0])} a ${money2(H.ic[1])}) · pior queda ${money2(H.pior_queda)} · ${esc(H.veredito)}</span>`+
+  if(G&&G.historico&&G.historico.n){const H=G.historico,C2=G.forte||{},C1=G.fraco||{},C0=G.sem_contexto||{},T2=G.hoje;
+    const hist=(H2,rot)=>H2&&H2.n?`${rot}: ${H2.n} operações · ${nf(H2.acerto_bruto*100,0)}% de acerto · média <b class="${cls(H2.liq_medio)}">${money2(H2.liq_medio)}</b> por contrato`:"";
+    let top;
+    if(!T2)top='<span class="muted">Aguardando a abertura do pregão para medir o gap.</span>';
+    else if(!T2.grande)top=`Gap de hoje: ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio) — abaixo do limite de 0,75, <b>sem operação</b>.`;
+    else{const ctx=`abriu <b>${T2.fora_da_faixa?"FORA":"dentro"}</b> da faixa de ontem · ontem fechou <b>${T2.vespera_na_direcao?"na mesma direção":"contra a direção"}</b> do gap`;
+      if(T2.contextos===0)top=`Gap grande de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio), mas <b>sem contexto favorável</b> (${ctx}) — no histórico esse caso quase não deu vantagem: <b>melhor ficar de fora</b>.`;
+      else if(T2.fraco)top=`Gap grande de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio) com <b>sinal fraco</b>: só um contexto favorável (${ctx}). A devolução seria ${T2.lado>0?"▲ compra":"▼ venda"}, mas a vantagem medida nesse caso é pequena — sem alerta.`;
+      else top=`<b class="${T2.lado>0?"up":"down"}">${T2.lado>0?"▲ COMPRA":"▼ VENDA"} contra o gap</b> — <b>SINAL FORTE</b>: os dois contextos favoráveis (${ctx}). Gap de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio).
+          <div class="kv" style="margin-top:6px"><div><b>${nf(T2.abertura,d)}</b><span>abertura · entrar até 1 hora depois deu o mesmo resultado</span></div><div><b>${nf(T2.stop_preco,d)}</b><span>stop só de proteção · 2 desvios diários ≈ ${money2(T2.stop_rs)} por contrato</span></div><div><b>${nf(T2.meio_gap,d)} / ${nf(T2.fech_ant,d)}</b><span>metade do gap / gap fechado (referências)</span></div><div><b class="${cls(T2.resultado_rs)}">${money2(T2.resultado_rs)}</b><span>resultado agora, por contrato (antes dos custos)</span></div></div>Saída no fechamento do pregão (sair antes de 4 horas piorou o resultado).`;}
+    $("gapBox").innerHTML=top+`<br><span class="muted">${[hist(C2,"Sinal forte (os dois contextos)"),hist(C1,"Sinal fraco (um contexto)"),hist(C0,"Sem contexto"),hist(H,"Todos os gaps grandes")].filter(Boolean).join("<br>")} · pior queda ${money2(H.pior_queda)} · ${esc(H.veredito)}</span>`+
       (G.comprovado?"":'<br><span class="chip">⚪ sem lucro comprovado neste ativo: não gera sinal</span>');
   }else $("gapBox").innerHTML='<span class="muted">histórico intraday insuficiente para simular</span>';
   // ---- quadro

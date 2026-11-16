@@ -417,6 +417,25 @@ def _row(name: str, asset: str, trades: list[dict], **kw) -> dict:
     return r
 
 
+def gap_context(t: dict) -> int:
+    """Quantos dos dois contextos favoráveis valem para a ficha: abriu FORA da faixa da véspera · véspera fechou na direção do gap."""
+    return int(not t["dentro"]) + int(t["prev_ret"] * t["gap"] > 0)
+
+
+def gap_tiers(asset: str, T: list[dict]) -> dict:
+    """Resultado da regra base por contexto (0, 1 ou 2 contextos favoráveis; "algum" = 1 ou 2)."""
+    names = {"dois": "os dois contextos (fora da faixa de ontem E ontem na mesma direção)", "um": "só um dos dois contextos",
+             "nenhum": "nenhum contexto (dentro da faixa e ontem contra o gap)", "algum": "pelo menos um contexto (regra do sinal)"}
+    sel = {"dois": lambda c: c == 2, "um": lambda c: c == 1, "nenhum": lambda c: c == 0, "algum": lambda c: c >= 1}
+    out = {}
+    for k, f in sel.items():
+        sub = [t for t in T if f(gap_context(t))]
+        r = summarize(names[k], asset, [gap_result(t) for t in sub])
+        r["liq_2a"] = summarize(names[k], asset, [gap_result(t) for t in sub if t in T[len(T) // 2:]]).get("liq_medio")
+        out[k] = r
+    return out
+
+
 def gap_filters(T: list[dict]) -> dict:
     """Filtros candidatos para melhorar a estratégia: {nome: (função que aceita a ficha, barra de entrada)}."""
     have = [t for t in T if t["lider"] is not None]
@@ -476,6 +495,8 @@ def gap_study(asset: str, bars: list[tuple], leader: Optional[list[tuple]] = Non
         return {"n": len(T)}
     S: dict = {"n": len(T)}
     S["filtros"] = gap_best_filter(asset, T)
+    tiers = gap_tiers(asset, T)
+    S["contexto"] = [tiers[k] for k in ("algum", "dois", "um", "nenhum")]
     S["base"] = [_row("regra base: entra na abertura, sai no fechamento, sem stop", asset, T)]
     S["tamanho"] = [_row(nm, asset, [t for t in T if lo <= t["z"] < hi]) for nm, lo, hi in
                     (("gap de 0,75 a 1,25 desvio", 0.75, 1.25), ("gap de 1,25 a 2 desvios", 1.25, 2.0), ("gap acima de 2 desvios", 2.0, 99))]
@@ -511,7 +532,7 @@ def run_gap(engine: "Engine") -> str:
          "Regra base: o mini índice abre com gap grande (≥ 0,75 desvio dos gaps dos 40 pregões anteriores) → entra na abertura CONTRA o gap "
          f"e sai no fechamento. 1 mini contrato; custo por operação: WIN {r(cost('WIN'))} · WDO {r(cost('WDO'))}. Cada tabela muda UMA coisa da "
          "regra. A coluna \"2ª metade\" mostra o ganho médio só na metade mais recente: uma variação só é confiável se for boa nas duas.", ""]
-    titles = [("base", "Regra base"), ("tamanho", "Por tamanho do gap"), ("direcao", "Por direção do gap"),
+    titles = [("base", "Regra base"), ("contexto", "Por contexto do gap (a regra do sinal no painel)"), ("tamanho", "Por tamanho do gap"), ("direcao", "Por direção do gap"),
               ("tendencia", "Em relação à tendência"), ("saida", "Quando sair"), ("stop", "Com stop"), ("entrada", "Quando entrar"),
               ("semana", "Por dia da semana")]
     for k in ("WIN", "WDO"):

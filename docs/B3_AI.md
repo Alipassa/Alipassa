@@ -136,6 +136,13 @@ Estudo de uso (`python -m b3_ai gap`, 99 operações em barras de 15 min do Meta
 
 Pior momento contra a posição: até R$ 380 em 90 % das operações ganhadoras; pior perda histórica R$ 865 por contrato.
 
+Filtros (escolhidos na 1ª metade do histórico e conferidos na 2ª): dois contextos melhoraram o resultado nas duas metades, no
+MetaTrader e na série pública de 2 anos — **abrir FORA da faixa do pregão anterior** (R$ 110,48 → R$ 201,91, 88 % de acerto na 2ª
+metade) e **o pregão anterior ter fechado na mesma direção do gap** (R$ 135,42 → R$ 219,19, 88 %). Na série pública: os dois juntos
+R$ 214,14 em 39 operações (79 %), só um R$ 43,94 (68 %), nenhum R$ 9,07 (43 %). Regra do sinal no painel: 🎯 só com os dois
+contextos ("sinal forte"); com um, "sinal fraco" sem alerta; com nenhum, "melhor ficar de fora". Tamanho do gap, exterior,
+confirmação nos primeiros 15 minutos e dia da semana não se sustentaram.
+
 A devolução de gap do mini índice é a única com evidência de lucro; o painel mostra o gap do dia, dispara o alerta 🎯 ESTRATÉGIA
 quando ele é grande e registra cada ocorrência como operação de papel no placar ao vivo. Ressalvas: ~14 meses de histórico,
 várias estratégias testadas (uma pode passar por sorte), abertura com escorregamento maior que o simulado e, sem stop, perda
