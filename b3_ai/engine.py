@@ -64,11 +64,19 @@ class Engine:
         self._intra_cache: dict = {}
         self._news_cache: tuple[float, Optional[dict], list[str]] = (0.0, None, [])
         self._bcb_cache: tuple[float, dict] = (0.0, {})
+        self.etapa, self.etapa_ts, self.ciclo_ts, self.ciclos = "iniciando", time.time(), time.time(), 0
         self._b3_ts = 0.0
         self.b3_rt = 0               # quantos papéis da tabela vieram do MetaTrader no último ciclo
         self._focus_cache: tuple[float, dict] = (0.0, {})
         self._alerts_sent: set[str] = set()
         self.ai: dict = {}           # última análise escrita pelo analista com IA (sob demanda)
+
+    def _step(self, nome: str) -> None:
+        """Marca a etapa do ciclo (aparece no painel e na janela preta): mostra se está carregando ou travado, e onde."""
+        now = time.time()
+        if self.ciclos == 0:
+            print(f"[b3-ai] {self.etapa} ... {now - self.etapa_ts:.1f}s", flush=True)
+        self.etapa, self.etapa_ts = nome, now
 
     # ------------------------------------------------------------------ coleta
     def _history(self) -> tuple[dict, list[str]]:
@@ -460,18 +468,22 @@ class Engine:
 
     # ------------------------------------------------------------------ ciclo
     def cycle(self) -> dict:
-        t0 = time.time()
+        t0 = self.ciclo_ts = time.time()
         notes: list[str] = []
+        self._step("baixando histórico dos mercados internacionais")
         h, n1 = self._history()
         notes += n1
         if time.time() - self._b3_ts > 55:
+            self._step("lendo as ações da B3" + (" no MetaTrader" if self.mt5 is not None else ""))
             notes += self.refresh_b3()
+        self._step("lendo notícias")
         news_state, n2 = self._news()
         notes += n2[:2]
 
         # MetaTrader 5: WIN e WDO em tempo real substituem as séries públicas (que continuam valendo para o exterior)
         self.rt = {}
         if self.mt5 is not None:
+            self._step("lendo mini índice e mini dólar no MetaTrader 5")
             try:
                 self.rt = self.mt5.snapshot([a.key for a in ASSETS])
                 for k, a in TARGETS.items():
@@ -504,6 +516,7 @@ class Engine:
         win_last = M.bar_date(daily["WIN"][-1][0])
         complete = not (is_open and win_last == today)
 
+        self._step("treinando os modelos diário e semanal")
         kinds = {a.key: a.kind for a in ASSETS}
         fb = {a.key: daily[a.key] for a in FACTORS}
         dd = {k: M.DailyData(daily[k], fb, kinds) for k in TARGETS if len(daily[k]) > 700}
@@ -526,6 +539,7 @@ class Engine:
                 r["feats"][-1], r["sigma"][-1] = feats[-1], sig[-1]
         dres = self._daily_cache["res"]
 
+        self._step("treinando os modelos de 5 min a 1 hora")
         ikey = int(now // 1200)
         if self._intra_cache.get("key") != ikey or not is_open and "res" not in self._intra_cache:
             ires = {}
@@ -542,6 +556,7 @@ class Engine:
                     r["f"] = M.intraday_features(intr[(k, tf)], intr[("ES", tf)], intr[(o, tf)])
         ires = self._intra_cache["res"]
 
+        self._step("montando o quadro de probabilidades")
         opening = self._opening() if not is_open else {}
         ativos = {}
         for k, a in TARGETS.items():
@@ -616,6 +631,7 @@ class Engine:
                             "M5": [list(b[:5]) for b in intr[(k, "5")][-160:]]},
             }
 
+        self._step("cruzando notícias, agenda e alertas")
         self._enrich_news(news_state, dd, dres)
         quotes = [q for q in (self._quote(a, daily[a.key]) for a in ASSETS) if q]
         ny = self._brasil_ny(quotes)
@@ -672,6 +688,10 @@ class Engine:
         state["leitura"] = self._narrative(state)
         with self.lock:
             self.state = state
+        self._step("aguardando o próximo ciclo")
+        if self.ciclos == 0:
+            print(f"[b3-ai] primeira leitura concluída em {time.time() - t0:.0f}s", flush=True)
+        self.ciclos += 1
         return state
 
     def _brasil_ny(self, quotes: list[dict]) -> list[dict]:

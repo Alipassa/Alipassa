@@ -261,7 +261,8 @@ function seg(el,items,cur,on){el.innerHTML=items.map(([v,l])=>`<button class="${
 function render(){
   if(!S)return;
   const warn=[];
-  if(!S.ok){$("status").textContent="aguardando dados";$("warn").innerHTML=`<div class="warnbox">${esc(S.erro_ciclo||S.erro||"primeira leitura em andamento…")}</div>`;return;}
+  if(!S.ok){$("status").textContent="aguardando dados";
+    $("warn").innerHTML=`<div class="warnbox">${S.erro_ciclo?"A leitura falhou: "+esc(S.erro_ciclo)+" — tentando de novo sozinho.":"Primeira leitura em andamento (costuma levar de 30 s a 2 min). Etapa: <b>"+esc(S.etapa||"iniciando")+"</b> há "+(S.etapa_seg||0)+" s · total "+(S.ciclo_seg||0)+" s."+((S.etapa_seg||0)>180?" Esta etapa está demorando demais: envie uma captura desta tela e da janela preta.":"")}</div>`;return;}
   if(S.erro_ciclo)warn.push("Última atualização falhou ("+S.erro_ciclo+") — mostrando a leitura anterior.");
   (S.avisos||[]).forEach(a=>warn.push(a));
   $("warn").innerHTML=warn.map(w=>`<div class="warnbox">${esc(w)}</div>`).join("");
@@ -503,7 +504,7 @@ $("chart").addEventListener("mouseleave",()=>$("tip").style.display="none");
 addEventListener("resize",drawChart);
 
 async function load(){
-  try{const r=await fetch("/api/state");S=await r.json();render();drawChart();}catch(e){$("warn").innerHTML='<div class="warnbox">Sem conexão com o servidor local do painel.</div>'}
+  try{const r=await fetch("/api/state");S=await r.json();render();drawChart();if(!S.ok)setTimeout(load,3000);}catch(e){$("warn").innerHTML='<div class="warnbox">Sem conexão com o servidor local do painel.</div>'}
 }
 async function loadB3(){
   try{const r=await fetch("/api/b3");B3=(await r.json()).papeis||[];

@@ -69,6 +69,9 @@ def make_handler(svc: Service):
                 with eng.lock:
                     st = dict(eng.state)
                 st["erro_ciclo"] = svc.last_error
+                st["etapa"] = eng.etapa
+                st["etapa_seg"] = round(time.time() - eng.etapa_ts)
+                st["ciclo_seg"] = round(time.time() - eng.ciclo_ts)
                 st["intervalo"] = svc.interval
                 self._json(_clean(st))
             elif path == "/api/b3":
