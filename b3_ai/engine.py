@@ -713,7 +713,8 @@ class Engine:
                              "p_alta": p_close, "p_queda": 1 - p_close, "base": 0.5, "k": None, "oos_n": b["n"] if b else None,
                              "oos_acerto": b["acerto"] if b else None, "amostra": None, "motivos": [], "faixas": M.bands(p_close, sg),
                              "sigma_pct": sg * 100, "faixa_min": price * (1 - sg), "faixa_max": price * (1 + sg), "ref": prev,
-                             "sinal": M.classify(p_close, {})["sinal"], "validado": bool(b and b["n"] >= 30),
+                             "sinal": "FECHO ABAIXO DO ANTERIOR" if p_close <= 0.45 else "FECHO ACIMA DO ANTERIOR" if p_close >= 0.55 else "FECHO INDEFINIDO",
+                             "validado": bool(b and b["n"] >= 30),
                              "confianca": "frequência histórica: quando o dia já andou isso, fechou do mesmo lado nessa proporção",
                              "nota": "referência é o fechamento ANTERIOR, não o preço atual — não indica para onde vai a partir de agora",
                              "ajuste_exterior": 0.0})

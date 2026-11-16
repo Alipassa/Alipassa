@@ -110,11 +110,11 @@ def classify(p_up: float, ev: dict) -> dict:
     """Rótulo de decisão: só há viés quando a probabilidade se afasta de 50 % E o modelo provou algo fora da amostra."""
     proven = bool(ev.get("k", 0) >= 0.15 and (ev.get("hit") or 0) > 0.515 and ev.get("n", 0) >= 100)
     if p_up >= 0.60:
-        label = "ALTA FORTE"
+        label = "ALTA PROVÁVEL"
     elif p_up >= 0.55:
         label = "VIÉS DE ALTA"
     elif p_up <= 0.40:
-        label = "QUEDA FORTE"
+        label = "QUEDA PROVÁVEL"
     elif p_up <= 0.45:
         label = "VIÉS DE QUEDA"
     else:
