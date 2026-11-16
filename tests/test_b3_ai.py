@@ -575,3 +575,29 @@ class OpenSessionTest(unittest.TestCase):
                 e.mem.close()
         finally:
             E.tv.fetch_history, E.tv.scan_b3, E.Engine._agenda, E.Engine._focus, E.Engine._bcb = orig
+
+
+class LiveTickTest(unittest.TestCase):
+    def test_ticks_are_light_and_never_block(self):
+        from b3_ai.data.mt5 import MT5Feed
+        f = MT5Feed(FakeMT5(), env={"MT5_UTC_OFFSET_HOURS": "-3"})
+        self.assertEqual(f.ticks(), {})                       # ainda não conectou: nada, sem erro
+        f.snapshot()
+        t = f.ticks()
+        self.assertEqual(t["WIN"]["ultimo"], 174500.0)
+        self.assertEqual((t["WIN"]["bid"], t["WIN"]["ask"]), (174495.0, 174505.0))
+        import threading
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold():
+            with f.lock:
+                held.set()
+                release.wait(3)
+
+        th = threading.Thread(target=hold)
+        th.start()
+        held.wait(2)
+        self.assertEqual(f.ticks(), {})                       # terminal ocupado por outra leitura: devolve vazio em ~0,5 s
+        release.set()
+        th.join()

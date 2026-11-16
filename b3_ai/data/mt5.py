@@ -21,6 +21,7 @@ O ProfitChart/XPTrader (Nelogica) NÃO é MetaTrader e não oferece esta interfa
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any, Optional
 
@@ -46,6 +47,7 @@ class MT5Feed:
         self.symbols: dict[str, str] = {}
         self.offset_h = -3.0
         self.note = ""
+        self.lock = threading.RLock()          # o módulo MetaTrader5 não é seguro entre threads: toda chamada passa por aqui
         self._stocks: dict[str, dict] = {}     # ticker → última leitura (preço, variação, volume) em tempo real
         self._stock_pos = 0
 
@@ -190,7 +192,8 @@ class MT5Feed:
                 break
             done = step + 1
             tk = tickers[(self._stock_pos + step) % n]
-            q = self._stock_quote(tk)
+            with self.lock:                      # trava por papel: o preço ao vivo não espera a lista inteira
+                q = self._stock_quote(tk)
             if q:
                 self._stocks[tk] = q
         self._stock_pos = (self._stock_pos + done) % n
@@ -213,6 +216,26 @@ class MT5Feed:
 
     def snapshot(self, extra_keys: Optional[list[str]] = None) -> dict:
         """{("WIN","1D"): barras, ("WIN","5"): ..., "ticks": {...}, "simbolos": {...}} — reconecta se o terminal caiu."""
+        with self.lock:
+            return self._snapshot(extra_keys)
+
+    def ticks(self) -> dict:
+        """Último negócio de WIN e WDO agora (leitura leve, para o preço ao vivo do painel). {} se o terminal não responde."""
+        if not self.connected or not self.lock.acquire(timeout=0.5):
+            return {}
+        try:
+            out = {}
+            for k in ("WIN", "WDO"):
+                t = self.last_price(k) if k in self.symbols else None
+                if t:
+                    out[k] = t
+            return out
+        except Exception:  # noqa: BLE001
+            return {}
+        finally:
+            self.lock.release()
+
+    def _snapshot(self, extra_keys: Optional[list[str]] = None) -> dict:
         if not self.connected:
             self.connect()
         try:

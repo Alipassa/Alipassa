@@ -135,7 +135,7 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
   <div class="card">
     <h2 id="pxTitle">Cotação</h2>
     <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
-      <span id="px" class="num" style="font-size:34px;font-weight:800">—</span><span id="pxChg" class="num" style="font-size:16px;font-weight:700"></span>
+      <span id="px" class="num" style="font-size:34px;font-weight:800">—</span><span id="pxChg" class="num" style="font-size:16px;font-weight:700"></span><span id="pxLive" class="small muted"></span>
     </div>
     <div class="kv" id="pxKv"></div>
     <h3>Tendência — dia · semana · mês</h3>
@@ -351,6 +351,7 @@ function render(){
     <span class="num ${cls(x.contrib)}" style="text-align:right">${x.contrib>0?"+":""}${nf(x.contrib,2)} pp</span></div>`}).join("");
   // ---- leitura
   $("read").innerHTML=(S.leitura||[]).map(x=>`<li>${esc(x)}</li>`).join("");
+  paintLive();
   renderAlerts(); renderSynth(); renderAI(); renderAgenda(); renderAnalysts();
   renderNews(); renderIntl(); renderB3Summary();
   $("foot").textContent=S.aviso_legal;
@@ -536,6 +537,18 @@ addEventListener("resize",drawChart);
 async function load(){
   try{const r=await fetch("/api/state");S=await r.json();render();drawChart();if(!S.ok)setTimeout(load,3000);}catch(e){$("warn").innerHTML='<div class="warnbox">Sem conexão com o servidor local do painel.</div>'}
 }
+let LIVE=null;
+function paintLive(){
+  if(!S||!S.ok||!LIVE||!LIVE.ativos)return; const A=S.ativos[asset],t=LIVE.ativos[asset]; if(!A||!t||!t.ultimo)return;
+  const age=Date.now()/1000-LIVE.lido; if(age>10){$("pxLive").textContent="";return}
+  const d=dec(),ref=A.fech_ant; $("px").textContent=nf(t.ultimo,d);
+  if(ref)$("pxChg").innerHTML=chg((t.ultimo/ref-1)*100);
+  $("pxLive").innerHTML=`<span class="up">●</span> ao vivo ${new Date(LIVE.lido*1000).toLocaleTimeString("pt-BR")} · compra ${nf(t.bid,d)} · venda ${nf(t.ask,d)}`;
+}
+async function loadTick(){
+  if(!S||!S.tempo_real)return;
+  try{const r=await fetch("/api/tick");LIVE=await r.json();paintLive()}catch(e){}
+}
 async function loadB3(){
   try{const r=await fetch("/api/b3");B3=(await r.json()).papeis||[];
     const cur=$("fSector").value,secs=[...new Set(B3.map(x=>x.s))].filter(s=>s&&s!=="—").sort((a,b)=>a.localeCompare(b));
@@ -551,7 +564,7 @@ $("btnClaude").onclick=async()=>{const b=$("btnClaude");let t="";try{t=await (aw
   if(!t){b.textContent="Sem dados ainda";return}
   let ok=false;try{await navigator.clipboard.writeText(t);ok=true}catch(e){try{const a=document.createElement("textarea");a.value=t;document.body.appendChild(a);a.select();ok=document.execCommand("copy");a.remove()}catch(e2){}}
   b.textContent=ok?"Copiado — cole no Claude (Ctrl+V)":"Não consegui copiar";if(ok)window.open("https://claude.ai/new","_blank","noopener");setTimeout(()=>b.textContent="Levar os dados para o Claude",8000)};
-load();loadB3();setInterval(load,15000);setInterval(loadB3,60000);
+load();loadB3();setInterval(load,10000);setInterval(loadB3,60000);setInterval(loadTick,1000);
 </script>
 </body>
 </html>

@@ -22,6 +22,7 @@ class Service:
         self.wake = threading.Event()
         self.busy = threading.Lock()
         self.last_error = ""
+        self.live: dict = {}                    # último negócio de WIN/WDO lido a cada segundo do MetaTrader
 
     def run_once(self) -> bool:
         with self.busy:
@@ -37,6 +38,18 @@ class Service:
                 if os.environ.get("B3AI_DEBUG"):
                     traceback.print_exc()
                 return False
+
+    def tick_loop(self) -> None:
+        """Preço ao vivo: lê só o último negócio de WIN e WDO a cada segundo, sem esperar o ciclo completo de cálculo."""
+        feed = self.engine.mt5
+        while feed is not None:
+            try:
+                t = feed.ticks()
+                if t:
+                    self.live = {"ativos": t, "lido": time.time()}
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1.0)
 
     def loop(self) -> None:
         while True:
@@ -76,6 +89,8 @@ def make_handler(svc: Service):
                 st["ciclo_seg"] = round(time.time() - eng.ciclo_ts)
                 st["intervalo"] = svc.interval
                 self._json(_clean(st))
+            elif path == "/api/tick":
+                self._json(_clean(svc.live))
             elif path == "/api/b3":
                 self._json(_clean({"papeis": eng.b3.get("papeis", [])}))
             elif path == "/api/prompt":
@@ -123,6 +138,8 @@ def _clean(o):
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8766, interval: int = 60, open_browser: bool = True) -> None:
     svc = Service(engine, interval)
     threading.Thread(target=svc.loop, name="b3-ai-coleta", daemon=True).start()
+    if engine.mt5 is not None:
+        threading.Thread(target=svc.tick_loop, name="b3-ai-preco", daemon=True).start()
     httpd = ThreadingHTTPServer((host, port), make_handler(svc))
     url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}"
     print(f"B3 AI — painel em {url}  (Ctrl+C para sair). A primeira leitura leva alguns segundos.")
