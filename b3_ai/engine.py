@@ -256,6 +256,8 @@ class Engine:
         except Exception:  # noqa: BLE001
             st_now = None
         if st_now:
+            st_now["stop_rs"] = st_now["stop_pts"] * simulate.POINT[k]
+            st_now["resultado_rs"] = st_now["resultado_pts"] * simulate.POINT[k] if st_now["resultado_pts"] is not None else None
             out["hoje"] = st_now
             if st_now["grande"]:           # registra a operação de papel uma vez por pregão: entrada = abertura, lado = contra o gap
                 self.mem.record(k, "Devolução de gap", d.dates[-1], st_now["abertura"], 0.75 if st_now["lado"] > 0 else 0.25)
@@ -783,7 +785,9 @@ class Engine:
                 al.append({"nivel": "ESTRATÉGIA", "lado": lado, "ativo": k, "prob": hs.get("acerto_bruto") or 0.0, "horizonte": "devolução de gap",
                            "titulo": f"{a['nome']}: gap grande de {hoje['gap_pct']:+.2f}% na abertura — devolução de gap aponta "
                                      f"{'COMPRA' if lado > 0 else 'VENDA'} até o fechamento",
-                           "texto": f"Abriu em {hoje['abertura']:,.0f} contra {hoje['fech_ant']:,.0f} do fechamento anterior. Na simulação com custos: "
+                           "texto": f"Gap {hoje['forca']} ({abs(hoje['z']):.1f} desvio): abriu em {hoje['abertura']:,.0f} contra {hoje['fech_ant']:,.0f} do fechamento "
+                                    f"anterior. Stop sugerido em {hoje['stop_preco']:,.0f} (1 desvio diário, ≈ R$ {hoje['stop_rs']:,.0f} por contrato); saída no "
+                                    "fechamento. Na simulação com custos: "
                                     f"{hs['n']} operações, {hs['acerto_bruto'] * 100:.0f}% de acerto, média de R$ {hs['liq_medio']:,.2f} por contrato, "
                                     f"pior queda acumulada de R$ {hs['pior_queda']:,.2f}. Sem stop, a perda num dia de tendência pode ser grande.",
                            "chave": f"{k}|gapfade|{a['data']}"})

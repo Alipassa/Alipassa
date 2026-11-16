@@ -127,12 +127,18 @@ def gap_state(bars15: list[tuple], is_open: bool, min_sessions: int = 40) -> Opt
     if not is_open or len(done) < min_sessions or not ss:
         return None
     gaps = [done[j][0][1] / done[j - 1][-1][4] - 1 for j in range(len(done) - min_sessions + 2, len(done))]
-    gsd = st.std(gaps) or 1e-9
+    dayr = [done[j][-1][4] / done[j - 1][-1][4] - 1 for j in range(len(done) - min_sessions + 2, len(done))]
+    gsd, dsd = st.std(gaps) or 1e-9, st.std(dayr) or 1e-9
     op, prev = ss[-1][0][1], done[-1][-1][4]
     gap = op / prev - 1
     z = gap / gsd
+    side = (-1 if gap > 0 else 1) if abs(z) >= GAP_LIMIAR else 0
+    stop_pts = dsd * op                                   # stop de 1 desvio diário: corta poucas ganhadoras e limita o dia ruim
     return {"gap_pct": gap * 100, "z": z, "abertura": op, "fech_ant": prev, "grande": abs(z) >= GAP_LIMIAR,
-            "lado": (-1 if gap > 0 else 1) if abs(z) >= GAP_LIMIAR else 0, "barras_hoje": len(ss[-1])}
+            "forca": "forte" if abs(z) >= 1.25 else "moderado" if abs(z) >= GAP_LIMIAR else "pequeno",
+            "lado": side, "barras_hoje": len(ss[-1]), "stop_pts": stop_pts, "stop_preco": op - side * stop_pts if side else None,
+            "meio_gap": (op + prev) / 2, "ultimo": ss[-1][-1][4],
+            "resultado_pts": side * (ss[-1][-1][4] - op) if side else None}
 
 
 def run(engine: "Engine") -> str:
@@ -342,5 +348,131 @@ def run_extremes(engine: "Engine") -> str:
     L += ["## Como ler", "",
           "- Um filtro só vale se der ✅ na 2ª metade. Bom na 1ª e ruim na 2ª = ajuste ao passado, não vantagem.",
           "- Com poucas operações o intervalo fica largo: \"não distinguível de zero\" significa que ainda não há prova, nem a favor nem contra.",
+          "- Resultado passado não garante resultado futuro.", ""]
+    return "\n".join(L)
+
+
+# ============================================================================= estudo da devolução de gap
+def gap_trades(bars: list[tuple], min_sessions: int = 40) -> list[dict]:
+    """Uma ficha por pregão com gap grande: tudo o que é preciso para testar variações da estratégia."""
+    ss = [x for x in M.sessions_gap(bars, 2 * 3600) if len(x) >= 5]
+    out = []
+    for k in range(min_sessions, len(ss)):
+        gaps = [ss[j][0][1] / ss[j - 1][-1][4] - 1 for j in range(k - min_sessions + 1, k)]
+        dayr = [ss[j][-1][4] / ss[j - 1][-1][4] - 1 for j in range(k - min_sessions + 1, k)]
+        gsd, dsd = st.std(gaps) or 1e-9, st.std(dayr) or 1e-9
+        s = ss[k]
+        op, prev = s[0][1], ss[k - 1][-1][4]
+        gap = op / prev - 1
+        if abs(gap) < GAP_LIMIAR * gsd:
+            continue
+        side = -1 if gap > 0 else 1
+        closes20 = [ss[j][-1][4] for j in range(k - 20, k)]
+        trend = 1 if prev > st.mean(closes20) else -1
+        mae = max(((b[2] - op) if side < 0 else (op - b[3])) for b in s)                 # pior momento contra a posição (pontos)
+        out.append({"k": k, "ts": s[0][0], "z": abs(gap) / gsd, "gap": gap, "side": side, "op": op, "prev": prev, "dsd": dsd,
+                    "bars": s, "mae": max(mae, 0.0), "trend": trend, "weekday": datetime.fromtimestamp(s[0][0], tz=BRT).weekday(),
+                    "prev_ret": prev / ss[k - 2][-1][4] - 1 if k >= 2 else 0.0})
+    return out
+
+
+def gap_result(t: dict, entry_bar: int = 0, exit_bar: Optional[int] = None, stop_sigma: float = 0.0, target_fill: float = 0.0) -> float:
+    """Resultado bruto (pontos) de uma ficha. entry_bar 0 = abertura; n = fechamento da n-ésima barra de 15 min.
+    exit_bar None = fechamento do pregão. stop_sigma em desvios diários. target_fill: sai quando devolveu essa fração do gap."""
+    s, side = t["bars"], t["side"]
+    if entry_bar >= len(s) - 1:
+        return 0.0
+    entry = t["op"] if entry_bar == 0 else s[entry_bar - 1][4]
+    last = len(s) - 1 if exit_bar is None else min(exit_bar, len(s) - 1)
+    stop = stop_sigma * t["dsd"] * t["op"] if stop_sigma > 0 else None
+    target = entry + side * target_fill * abs(t["op"] - t["prev"]) if target_fill > 0 else None
+    for j in range(entry_bar, last + 1):
+        b = s[j]
+        if stop is not None and ((b[2] - entry) if side < 0 else (entry - b[3])) >= stop:
+            return -stop
+        if target is not None and ((b[3] <= target) if side < 0 else (b[2] >= target)):
+            return side * (target - entry)
+    return side * (s[last][4] - entry)
+
+
+def _row(name: str, asset: str, trades: list[dict], **kw) -> dict:
+    r = summarize(name, asset, [gap_result(t, **kw) for t in trades])
+    half = len(trades) // 2
+    r2 = summarize(name, asset, [gap_result(t, **kw) for t in trades[half:]])
+    r["liq_2a"] = r2.get("liq_medio")
+    return r
+
+
+def gap_study(asset: str, bars: list[tuple]) -> dict:
+    T = gap_trades(bars)
+    if len(T) < 30:
+        return {"n": len(T)}
+    S: dict = {"n": len(T)}
+    S["base"] = [_row("regra base: entra na abertura, sai no fechamento, sem stop", asset, T)]
+    S["tamanho"] = [_row(nm, asset, [t for t in T if lo <= t["z"] < hi]) for nm, lo, hi in
+                    (("gap de 0,75 a 1,25 desvio", 0.75, 1.25), ("gap de 1,25 a 2 desvios", 1.25, 2.0), ("gap acima de 2 desvios", 2.0, 99))]
+    S["direcao"] = [_row("gap de ALTA → vender", asset, [t for t in T if t["side"] < 0]),
+                    _row("gap de QUEDA → comprar", asset, [t for t in T if t["side"] > 0])]
+    S["tendencia"] = [_row("gap a favor da tendência de 20 pregões (operação contra a tendência)", asset, [t for t in T if t["side"] != t["trend"]]),
+                      _row("gap contra a tendência de 20 pregões (operação a favor da tendência)", asset, [t for t in T if t["side"] == t["trend"]])]
+    S["saida"] = [_row(nm, asset, T, exit_bar=b) for nm, b in
+                  (("sair depois de 1 hora", 4), ("sair depois de 2 horas", 8), ("sair depois de 4 horas", 16))] + \
+                 [_row("sair no fechamento", asset, T)] + \
+                 [_row(f"sair quando devolver {int(f * 100)}% do gap (ou no fechamento)", asset, T, target_fill=f) for f in (0.5, 1.0)]
+    S["stop"] = [_row("sem stop", asset, T)] + [_row(f"stop de {x:g} desvio diário", asset, T, stop_sigma=x) for x in (0.5, 0.75, 1.0, 1.5)]
+    S["entrada"] = [_row(nm, asset, T, entry_bar=b) for nm, b in
+                    (("entrar na abertura", 0), ("entrar depois de 15 min", 1), ("entrar depois de 30 min", 2), ("entrar depois de 1 hora", 4))]
+    S["semana"] = [_row(nm, asset, [t for t in T if t["weekday"] == w]) for w, nm in enumerate(("segunda", "terça", "quarta", "quinta", "sexta"))]
+    wins = sorted(t["mae"] * POINT[asset] for t in T if gap_result(t) > 0)
+    loss = sorted(-gap_result(t) * POINT[asset] for t in T if gap_result(t) < 0)
+    allm = sorted(t["mae"] * POINT[asset] for t in T)
+    q = lambda v, p: v[min(len(v) - 1, int(p * len(v)))] if v else None  # noqa: E731
+    S["calor"] = {"ganhadoras": len(wins), "mae_mediana": q(wins, 0.5), "mae_p80": q(wins, 0.8), "mae_p90": q(wins, 0.9),
+                  "perda_mediana": q(loss, 0.5), "perda_p90": q(loss, 0.9), "pior_perda": loss[-1] if loss else None,
+                  "mae_todas_p90": q(allm, 0.9), "desvio_diario_rs": st.mean([t["dsd"] * t["op"] for t in T]) * POINT[asset]}
+    S["por_mes"] = round(len(T) / max(1, (T[-1]["ts"] - T[0]["ts"]) / (30 * 86400)), 1)
+    return S
+
+
+def run_gap(engine: "Engine") -> str:
+    s = engine.cycle()
+    intr = engine._sim_intr
+    when = datetime.fromtimestamp(s["atualizado"], tz=BRT).strftime("%d/%m/%Y %H:%M")
+    r = lambda v: "—" if v is None else f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")  # noqa: E731
+    L = ["# Devolução de gap no mini índice — estudo de uso", "", f"Gerado em {when} (Brasília) · {s['atraso']}", "",
+         "Regra base: o mini índice abre com gap grande (≥ 0,75 desvio dos gaps dos 40 pregões anteriores) → entra na abertura CONTRA o gap "
+         f"e sai no fechamento. 1 mini contrato; custo por operação: WIN {r(cost('WIN'))} · WDO {r(cost('WDO'))}. Cada tabela muda UMA coisa da "
+         "regra. A coluna \"2ª metade\" mostra o ganho médio só na metade mais recente: uma variação só é confiável se for boa nas duas.", ""]
+    titles = [("base", "Regra base"), ("tamanho", "Por tamanho do gap"), ("direcao", "Por direção do gap"),
+              ("tendencia", "Em relação à tendência"), ("saida", "Quando sair"), ("stop", "Com stop"), ("entrada", "Quando entrar"),
+              ("semana", "Por dia da semana")]
+    for k in ("WIN", "WDO"):
+        S = gap_study(k, intr.get((k, "15")) or [])
+        L += [f"## {'Mini índice' if k == 'WIN' else 'Mini dólar'}", ""]
+        if S.get("n", 0) < 30:
+            L += [f"Só {S.get('n', 0)} gaps grandes no histórico disponível: insuficiente para o estudo.", ""]
+            continue
+        L += [f"{S['n']} gaps grandes no histórico — cerca de {S['por_mes']} por mês.", ""]
+        for key, title in titles:
+            L += [f"### {title}", "", "| Variação | Operações | Acerto | Ganho médio líquido | Intervalo 95% | 2ª metade | Total | Pior queda | Conclusão |",
+                  "| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |"]
+            for x in S[key]:
+                if not x["n"]:
+                    L.append(f"| {x['nome']} | 0 | — | — | — | — | — | — | sem operações |")
+                    continue
+                L.append(f"| {x['nome']} | {x['n']} | {x['acerto_bruto'] * 100:.0f}% | **{r(x['liq_medio'])}** | {r(x['ic'][0])} a {r(x['ic'][1])} | "
+                         f"{r(x.get('liq_2a'))} | {r(x['total'])} | {r(x['pior_queda'])} | {x['veredito']} |")
+            L.append("")
+        c = S["calor"]
+        L += ["### Quanto a operação vai contra antes de terminar (regra base)", "",
+              f"- Desvio diário médio do período: {r(c['desvio_diario_rs'])} por contrato.",
+              f"- Nas {c['ganhadoras']} operações que terminaram no lucro, o pior momento contra a posição foi de {r(c['mae_mediana'])} na mediana, "
+              f"{r(c['mae_p80'])} em 80% delas e {r(c['mae_p90'])} em 90% delas.",
+              f"- Nas que terminaram no prejuízo: perda mediana de {r(c['perda_mediana'])}, 90% perderam até {r(c['perda_p90'])}, e a pior perdeu {r(c['pior_perda'])}.",
+              f"- Em 90% de TODAS as operações o pior momento não passou de {r(c['mae_todas_p90'])}.", ""]
+    L += ["## Como ler", "",
+          "- Poucas operações por linha = intervalo largo. Prefira variações com ✅ ou, pelo menos, positivas no total E na 2ª metade.",
+          "- Escolher a melhor linha de cada tabela e juntar tudo é ajustar ao passado: mude no máximo uma ou duas coisas da regra base.",
+          "- A simulação entra exatamente no preço de abertura com 1 tick de escorregamento; na prática o primeiro negócio pode sair pior.",
           "- Resultado passado não garante resultado futuro.", ""]
     return "\n".join(L)

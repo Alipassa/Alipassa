@@ -117,6 +117,18 @@ def cmd_extremos(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gap(args: argparse.Namespace) -> int:
+    from . import simulate
+    text = simulate.run_gap(_engine(args))
+    os.makedirs(args.saida, exist_ok=True)
+    path = os.path.join(args.saida, "gap_" + datetime.now(tz=BRT).strftime("%Y%m%d_%H%M") + ".md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text)
+    print(f"\nestudo gravado em {path}")
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -154,6 +166,9 @@ def main(argv: list[str] | None = None) -> int:
     ex = sub.add_parser("extremos", help="testa os extremos de compra e venda como entrada, com filtros e custos")
     ex.add_argument("--saida", default="relatorios")
     ex.set_defaults(func=cmd_extremos)
+    gp = sub.add_parser("gap", help="estudo de uso da estratégia de devolução de gap (tamanho, direção, saída, stop, entrada)")
+    gp.add_argument("--saida", default="relatorios")
+    gp.set_defaults(func=cmd_gap)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)

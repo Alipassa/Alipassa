@@ -326,7 +326,8 @@ function render(){
   renderPatterns(A);
   const G=A.gap, money2=v=>v==null?"—":"R$ "+nf(v,2);
   if(G&&G.historico&&G.historico.n){const H=G.historico,T2=G.hoje;
-    $("gapBox").innerHTML=(T2?(T2.grande?`<b class="${T2.lado>0?"up":"down"}">${T2.lado>0?"▲ COMPRA":"▼ VENDA"} contra o gap</b> — abriu com gap de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio${Math.abs(T2.z)>=2?"s":""}); saída no fechamento.`
+    $("gapBox").innerHTML=(T2?(T2.grande?`<b class="${T2.lado>0?"up":"down"}">${T2.lado>0?"▲ COMPRA":"▼ VENDA"} contra o gap</b> — gap <b>${esc(T2.forca)}</b> de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio${Math.abs(T2.z)>=2?"s":""}).
+          <div class="kv" style="margin-top:6px"><div><b>${nf(T2.abertura,d)}</b><span>entrada (abertura)</span></div><div><b>${nf(T2.stop_preco,d)}</b><span>stop sugerido · 1 desvio diário ≈ ${money2(T2.stop_rs)} por contrato</span></div><div><b>${nf(T2.meio_gap,d)} / ${nf(T2.fech_ant,d)}</b><span>metade do gap / gap fechado (referências)</span></div><div><b class="${cls(T2.resultado_rs)}">${money2(T2.resultado_rs)}</b><span>resultado agora, por contrato (antes dos custos)</span></div></div>Saída no fechamento do pregão.`
         :`Gap de hoje: ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio) — abaixo do limite de 0,75, <b>sem operação</b>.`)
       :'<span class="muted">Aguardando a abertura do pregão para medir o gap.</span>')+
       `<br><span class="muted">Simulação com custos: ${H.n} operações · ${nf(H.acerto_bruto*100,0)}% de acerto · média <b class="${cls(H.liq_medio)}">${money2(H.liq_medio)}</b> por contrato (intervalo ${money2(H.ic[0])} a ${money2(H.ic[1])}) · pior queda ${money2(H.pior_queda)} · ${esc(H.veredito)}</span>`+
