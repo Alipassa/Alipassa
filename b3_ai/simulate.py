@@ -140,6 +140,9 @@ def gap_state(bars15: list[tuple], is_open: bool, min_sessions: int = 40) -> Opt
             "forca": "forte" if abs(z) >= 1.25 else "moderado" if abs(z) >= GAP_LIMIAR else "pequeno",
             "lado": side, "barras_hoje": len(ss[-1]), "stop_pts": stop_pts, "stop_preco": op - side * stop_pts if side else None,
             "meio_gap": (op + prev) / 2, "ultimo": ss[-1][-1][4],
+            # contexto do gap (os dois filtros que melhoraram o resultado no estudo de 2 anos; confirme com o seu histórico)
+            "fora_da_faixa": not (min(b[3] for b in done[-1]) <= op <= max(b[2] for b in done[-1])),
+            "vespera_na_direcao": (prev / done[-2][-1][4] - 1) * gap > 0,
             "resultado_pts": side * (ss[-1][-1][4] - op) if side else None}
 
 
@@ -355,9 +358,12 @@ def run_extremes(engine: "Engine") -> str:
 
 
 # ============================================================================= estudo da devolução de gap
-def gap_trades(bars: list[tuple], min_sessions: int = 40) -> list[dict]:
-    """Uma ficha por pregão com gap grande: tudo o que é preciso para testar variações da estratégia."""
+def gap_trades(bars: list[tuple], min_sessions: int = 40, leader: Optional[list[tuple]] = None) -> list[dict]:
+    """Uma ficha por pregão com gap grande: tudo o que é preciso para testar variações da estratégia.
+    `leader`: barras do S&P (micro S&P da B3 ou contrato de 24 h) para medir quanto do gap o exterior explica."""
     ss = [x for x in M.sessions_gap(bars, 2 * 3600) if len(x) >= 5]
+    span = min((bars[i][0] - bars[i - 1][0] for i in range(1, min(len(bars), 200))), default=900) or 900
+    lspan = min((leader[i][0] - leader[i - 1][0] for i in range(1, min(len(leader), 200))), default=900) if leader else 900
     out = []
     for k in range(min_sessions, len(ss)):
         gaps = [ss[j][0][1] / ss[j - 1][-1][4] - 1 for j in range(k - min_sessions + 1, k)]
@@ -372,7 +378,13 @@ def gap_trades(bars: list[tuple], min_sessions: int = 40) -> list[dict]:
         closes20 = [ss[j][-1][4] for j in range(k - 20, k)]
         trend = 1 if prev > st.mean(closes20) else -1
         mae = max(((b[2] - op) if side < 0 else (op - b[3])) for b in s)                 # pior momento contra a posição (pontos)
-        out.append({"k": k, "ts": s[0][0], "z": abs(gap) / gsd, "gap": gap, "side": side, "op": op, "prev": prev, "dsd": dsd,
+        ph, pl = max(b[2] for b in ss[k - 1]), min(b[3] for b in ss[k - 1])
+        lead = None
+        if leader:
+            a, b_ = M._at(leader, ss[k - 1][-1][0] + span, lspan), M._at(leader, s[0][0] + lspan, lspan)
+            lead = (b_ / a - 1) if a and b_ else None
+        out.append({"dentro": pl <= op <= ph, "confirma": side * (s[0][4] - op) > 0, "lider": lead,
+                    "k": k, "ts": s[0][0], "z": abs(gap) / gsd, "gap": gap, "side": side, "op": op, "prev": prev, "dsd": dsd,
                     "bars": s, "mae": max(mae, 0.0), "trend": trend, "weekday": datetime.fromtimestamp(s[0][0], tz=BRT).weekday(),
                     "prev_ret": prev / ss[k - 2][-1][4] - 1 if k >= 2 else 0.0})
     return out
@@ -405,11 +417,65 @@ def _row(name: str, asset: str, trades: list[dict], **kw) -> dict:
     return r
 
 
-def gap_study(asset: str, bars: list[tuple]) -> dict:
-    T = gap_trades(bars)
+def gap_filters(T: list[dict]) -> dict:
+    """Filtros candidatos para melhorar a estratégia: {nome: (função que aceita a ficha, barra de entrada)}."""
+    have = [t for t in T if t["lider"] is not None]
+    sxx = sum(t["lider"] ** 2 for t in have)
+    beta = sum(t["lider"] * t["gap"] for t in have) / sxx if sxx else 0.0      # quanto do gap o exterior costuma explicar
+
+    def excess(t: dict) -> Optional[float]:
+        return None if t["lider"] is None else t["gap"] - beta * t["lider"]
+
+    return {
+        "abriu DENTRO da faixa da véspera": (lambda t: t["dentro"], 0),
+        "abriu FORA da faixa da véspera": (lambda t: not t["dentro"], 0),
+        "primeiros 15 min a favor da devolução (entra depois deles)": (lambda t: t["confirma"], 1),
+        "primeiros 15 min contra a devolução (entra depois deles)": (lambda t: not t["confirma"], 1),
+        "gap maior do que o exterior justifica": (lambda t: excess(t) is not None and abs(excess(t)) >= 0.5 * abs(t["gap"]), 0),
+        "gap que o exterior explica": (lambda t: excess(t) is not None and abs(excess(t)) < 0.5 * abs(t["gap"]), 0),
+        "gap CONTRA o exterior (S&P foi para o outro lado)": (lambda t: t["lider"] is not None and t["lider"] * t["gap"] < 0, 0),
+        "véspera fechou na direção do gap": (lambda t: t["prev_ret"] * t["gap"] > 0, 0),
+        "véspera fechou contra o gap": (lambda t: t["prev_ret"] * t["gap"] < 0, 0),
+    }
+
+
+def gap_best_filter(asset: str, T: list[dict]) -> dict:
+    """Escolhe UM filtro na 1ª metade (maior ganho médio líquido, ≥ 12 operações e melhor que a regra base) e mostra o
+    resultado dele na 2ª metade, ao lado da regra base na mesma metade. Só vale adotar se melhorar nas duas."""
+    half = len(T) // 2
+    tr, te = T[:half], T[half:]
+    F = gap_filters(T)
+    c = cost(asset)
+
+    def avg(trades: list[dict], f, eb: int) -> tuple[int, float]:
+        r = [gap_result(t, entry_bar=eb) for t in trades if f(t)]
+        return len(r), (st.mean(r) * POINT[asset] - c if r else 0.0)
+
+    base_tr, base_te = avg(tr, lambda t: True, 0), avg(te, lambda t: True, 0)
+    best, best_m = None, base_tr[1]
+    for name, (f, eb) in F.items():
+        n, m = avg(tr, f, eb)
+        if n >= 12 and m > best_m:
+            best, best_m = name, m
+    out = {"base_1a": base_tr, "base_2a": base_te, "escolhido": best, "linhas": []}
+    for name, (f, eb) in F.items():
+        n1, m1 = avg(tr, f, eb)
+        r2 = summarize(name, asset, [gap_result(t, entry_bar=eb) for t in te if f(t)])
+        r2["n_1a"], r2["liq_1a"] = n1, m1
+        out["linhas"].append(r2)
+    if best:
+        f, eb = F[best]
+        out["resultado"] = summarize(best, asset, [gap_result(t, entry_bar=eb) for t in te if f(t)])
+        out["melhorou"] = bool(out["resultado"]["n"] >= 10 and out["resultado"]["liq_medio"] > base_te[1])
+    return out
+
+
+def gap_study(asset: str, bars: list[tuple], leader: Optional[list[tuple]] = None) -> dict:
+    T = gap_trades(bars, leader=leader)
     if len(T) < 30:
         return {"n": len(T)}
     S: dict = {"n": len(T)}
+    S["filtros"] = gap_best_filter(asset, T)
     S["base"] = [_row("regra base: entra na abertura, sai no fechamento, sem stop", asset, T)]
     S["tamanho"] = [_row(nm, asset, [t for t in T if lo <= t["z"] < hi]) for nm, lo, hi in
                     (("gap de 0,75 a 1,25 desvio", 0.75, 1.25), ("gap de 1,25 a 2 desvios", 1.25, 2.0), ("gap acima de 2 desvios", 2.0, 99))]
@@ -449,7 +515,7 @@ def run_gap(engine: "Engine") -> str:
               ("tendencia", "Em relação à tendência"), ("saida", "Quando sair"), ("stop", "Com stop"), ("entrada", "Quando entrar"),
               ("semana", "Por dia da semana")]
     for k in ("WIN", "WDO"):
-        S = gap_study(k, intr.get((k, "15")) or [])
+        S = gap_study(k, intr.get((k, "15")) or [], leader=intr.get(("ES", "15")))
         L += [f"## {'Mini índice' if k == 'WIN' else 'Mini dólar'}", ""]
         if S.get("n", 0) < 30:
             L += [f"Só {S.get('n', 0)} gaps grandes no histórico disponível: insuficiente para o estudo.", ""]
@@ -465,6 +531,24 @@ def run_gap(engine: "Engine") -> str:
                 L.append(f"| {x['nome']} | {x['n']} | {x['acerto_bruto'] * 100:.0f}% | **{r(x['liq_medio'])}** | {r(x['ic'][0])} a {r(x['ic'][1])} | "
                          f"{r(x.get('liq_2a'))} | {r(x['total'])} | {r(x['pior_queda'])} | {x['veredito']} |")
             L.append("")
+        Fz = S["filtros"]
+        L += ["### Filtros para acertar mais (escolhidos na 1ª metade, conferidos na 2ª)", "",
+              f"Regra base: {r(Fz['base_1a'][1])} em {Fz['base_1a'][0]} operações na 1ª metade e {r(Fz['base_2a'][1])} em {Fz['base_2a'][0]} na 2ª.", "",
+              "| Filtro | 1ª metade: operações | 1ª metade: ganho médio | 2ª metade: operações | Acerto | Ganho médio líquido | Intervalo 95% | Conclusão |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |"]
+        for x in Fz["linhas"]:
+            if not x["n"]:
+                L.append(f"| {x['nome']} | {x['n_1a']} | {r(x['liq_1a']) if x['n_1a'] else '—'} | 0 | — | — | — | sem operações |")
+                continue
+            L.append(f"| {x['nome']} | {x['n_1a']} | {r(x['liq_1a'])} | {x['n']} | {x['acerto_bruto'] * 100:.0f}% | **{r(x['liq_medio'])}** | "
+                     f"{r(x['ic'][0])} a {r(x['ic'][1])} | {x['veredito']} |")
+        if Fz.get("escolhido"):
+            res = Fz["resultado"]
+            L += ["", f"**Filtro escolhido na 1ª metade: {Fz['escolhido']}.** Na 2ª metade: " +
+                  (f"{res['n']} operações, {res['acerto_bruto'] * 100:.0f}% de acerto, {r(res['liq_medio'])} por operação, contra {r(Fz['base_2a'][1])} "
+                   f"da regra base — {'MELHOROU' if Fz.get('melhorou') else 'NÃO melhorou'}." if res["n"] else "nenhuma operação."), ""]
+        else:
+            L += ["", "**Nenhum filtro superou a regra base na 1ª metade.** A regra simples continua sendo a melhor.", ""]
         c = S["calor"]
         L += ["### Quanto a operação vai contra antes de terminar (regra base)", "",
               f"- Desvio diário médio do período: {r(c['desvio_diario_rs'])} por contrato.",

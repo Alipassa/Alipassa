@@ -516,6 +516,7 @@ class GapStateTest(unittest.TestCase):
         self.assertTrue(g["grande"])
         self.assertEqual(g["lado"], -1)                               # gap de alta → devolução = venda
         self.assertAlmostEqual(g["gap_pct"], 2.0, places=1)
+        self.assertTrue(g["fora_da_faixa"])                           # 2 % acima: fora da faixa de ontem
         self.assertIsNone(simulate.gap_state(bars, False))            # pregão fechado: não há gap de hoje
         calm = bars + [(t + 60 * 86400, px * 1.0001, px * 1.0002, px, px * 1.0001, 1.0)]
         self.assertEqual(simulate.gap_state(calm, True)["lado"], 0)   # gap pequeno: sem operação
@@ -601,3 +602,35 @@ class LiveTickTest(unittest.TestCase):
         self.assertEqual(f.ticks(), {})                       # terminal ocupado por outra leitura: devolve vazio em ~0,5 s
         release.set()
         th.join()
+
+
+class GapFiltersTest(unittest.TestCase):
+    def test_filter_is_chosen_on_first_half_and_checked_on_second(self):
+        """Gaps que abrem FORA da faixa da véspera devolvem; os de dentro não. O estudo precisa achar isso sozinho."""
+        from b3_ai import simulate
+        rnd = random.Random(111)
+        bars, px, t = [], 100000.0, 1_700_000_000
+        for day in range(330):
+            kind = day % 3 if day >= 45 else 9
+            wide = day >= 44 and (day + 1) % 3 == 1               # véspera de gap "de dentro": pregão de faixa larga
+            if kind == 0:
+                op = px * 1.012                                  # gap grande para FORA da faixa de ontem → devolve
+                cl = op * (1 - 0.006 + rnd.gauss(0, 0.001))
+            elif kind == 1:
+                op = px * (1 + rnd.choice((-1, 1)) * 0.010)      # gap do mesmo tamanho, mas DENTRO da faixa larga de ontem → aleatório
+                cl = op * (1 + rnd.gauss(0, 0.006))
+            else:
+                op = px * (1 + rnd.gauss(0, 0.0003))
+                cl = op * (1 + rnd.gauss(0, 0.002))
+            for i in range(8):
+                p0, p1 = op + (cl - op) * i / 8, op + (cl - op) * (i + 1) / 8
+                hi, lo = max(p0, p1), min(p0, p1)
+                if wide and i == 3:
+                    hi, lo = hi * 1.02, lo * 0.98
+                bars.append((t + day * 86400 + i * 900, p0, hi, lo, p1, 1.0))
+            px = cl
+        S = simulate.gap_study("WIN", bars)
+        F = S["filtros"]
+        self.assertEqual(F["escolhido"], "abriu FORA da faixa da véspera")
+        self.assertTrue(F["melhorou"])
+        self.assertGreater(F["resultado"]["acerto_bruto"], 0.9)
