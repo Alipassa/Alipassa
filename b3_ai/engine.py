@@ -786,8 +786,8 @@ class Engine:
                            "titulo": f"{a['nome']}: gap grande de {hoje['gap_pct']:+.2f}% na abertura — devolução de gap aponta "
                                      f"{'COMPRA' if lado > 0 else 'VENDA'} até o fechamento",
                            "texto": f"Gap {hoje['forca']} ({abs(hoje['z']):.1f} desvio): abriu em {hoje['abertura']:,.0f} contra {hoje['fech_ant']:,.0f} do fechamento "
-                                    f"anterior. Stop sugerido em {hoje['stop_preco']:,.0f} (1 desvio diário, ≈ R$ {hoje['stop_rs']:,.0f} por contrato); saída no "
-                                    "fechamento. Na simulação com custos: "
+                                    f"anterior. Entrada na abertura ou até 1 hora depois (o resultado histórico foi o mesmo); saída no fechamento; stop só de "
+                                    f"proteção em {hoje['stop_preco']:,.0f} (2 desvios diários, ≈ R$ {hoje['stop_rs']:,.0f} por contrato). Na simulação com custos: "
                                     f"{hs['n']} operações, {hs['acerto_bruto'] * 100:.0f}% de acerto, média de R$ {hs['liq_medio']:,.2f} por contrato, "
                                     f"pior queda acumulada de R$ {hs['pior_queda']:,.2f}. Sem stop, a perda num dia de tendência pode ser grande.",
                            "chave": f"{k}|gapfade|{a['data']}"})

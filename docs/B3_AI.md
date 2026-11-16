@@ -124,6 +124,18 @@ Medido em 16/11/2026 com o histórico do MetaTrader da XP:
 | Mini dólar — 5 min com convicção | 487 | 56,1 % | R$ −9,27 | ❌ prejuízo: o custo come a vantagem |
 | Mini dólar — devolução de gap | 107 | 49,5 % | R$ −17,62 | não distinguível de zero |
 
+Estudo de uso (`python -m b3_ai gap`, 99 operações em barras de 15 min do MetaTrader, 16/11/2026):
+
+| O que muda na regra | Resultado |
+| --- | --- |
+| Momento da entrada | abertura R$ 82,80 · depois de 15 min R$ 87,50 · 30 min R$ 74,05 · 1 hora R$ 90,86 — todos com evidência: não depende do primeiro negócio |
+| Saída | 1 hora R$ 0,28 · 2 horas R$ 36,91 · 4 horas R$ 87,05 · fechamento R$ 82,80 · ao devolver 50 % do gap R$ 30,97: é preciso segurar |
+| Stop | sem stop R$ 82,80 · 0,5 desvio R$ 36,11 · 1 desvio R$ 60,41 · 1,5 desvio R$ 62,75: todo stop testado piorou |
+| Tamanho do gap | sem padrão estável (na série pública o gap forte foi melhor; no MetaTrader, o moderado): operar todos os ≥ 0,75 desvio |
+| Mini dólar | nenhuma variação funcionou |
+
+Pior momento contra a posição: até R$ 380 em 90 % das operações ganhadoras; pior perda histórica R$ 865 por contrato.
+
 A devolução de gap do mini índice é a única com evidência de lucro; o painel mostra o gap do dia, dispara o alerta 🎯 ESTRATÉGIA
 quando ele é grande e registra cada ocorrência como operação de papel no placar ao vivo. Ressalvas: ~14 meses de histórico,
 várias estratégias testadas (uma pode passar por sorte), abertura com escorregamento maior que o simulado e, sem stop, perda

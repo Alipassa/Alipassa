@@ -133,7 +133,9 @@ def gap_state(bars15: list[tuple], is_open: bool, min_sessions: int = 40) -> Opt
     gap = op / prev - 1
     z = gap / gsd
     side = (-1 if gap > 0 else 1) if abs(z) >= GAP_LIMIAR else 0
-    stop_pts = dsd * op                                   # stop de 1 desvio diário: corta poucas ganhadoras e limita o dia ruim
+    # No histórico do MetaTrader (99 operações) nenhum stop de 0,5 a 1,5 desvio melhorou o resultado; o stop sugerido é só
+    # de PROTEÇÃO, a 2 desvios diários — além da pior perda histórica — contra um dia fora do que já foi visto.
+    stop_pts = 2.0 * dsd * op
     return {"gap_pct": gap * 100, "z": z, "abertura": op, "fech_ant": prev, "grande": abs(z) >= GAP_LIMIAR,
             "forca": "forte" if abs(z) >= 1.25 else "moderado" if abs(z) >= GAP_LIMIAR else "pequeno",
             "lado": side, "barras_hoje": len(ss[-1]), "stop_pts": stop_pts, "stop_preco": op - side * stop_pts if side else None,
@@ -419,7 +421,7 @@ def gap_study(asset: str, bars: list[tuple]) -> dict:
                   (("sair depois de 1 hora", 4), ("sair depois de 2 horas", 8), ("sair depois de 4 horas", 16))] + \
                  [_row("sair no fechamento", asset, T)] + \
                  [_row(f"sair quando devolver {int(f * 100)}% do gap (ou no fechamento)", asset, T, target_fill=f) for f in (0.5, 1.0)]
-    S["stop"] = [_row("sem stop", asset, T)] + [_row(f"stop de {x:g} desvio diário", asset, T, stop_sigma=x) for x in (0.5, 0.75, 1.0, 1.5)]
+    S["stop"] = [_row("sem stop", asset, T)] + [_row(f"stop de {x:g} desvio diário", asset, T, stop_sigma=x) for x in (0.5, 0.75, 1.0, 1.5, 2.0, 3.0)]
     S["entrada"] = [_row(nm, asset, T, entry_bar=b) for nm, b in
                     (("entrar na abertura", 0), ("entrar depois de 15 min", 1), ("entrar depois de 30 min", 2), ("entrar depois de 1 hora", 4))]
     S["semana"] = [_row(nm, asset, [t for t in T if t["weekday"] == w]) for w, nm in enumerate(("segunda", "terça", "quarta", "quinta", "sexta"))]
