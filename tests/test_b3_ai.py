@@ -531,7 +531,7 @@ class OpenSessionTest(unittest.TestCase):
         import time as _t
         from b3_ai import engine as E
 
-        day0 = int(_t.time() // DAY) * DAY - 900 * DAY + 12 * 3600
+        day0 = int((_t.time() - 3 * 3600) // DAY) * DAY - 899 * DAY + 12 * 3600     # a última barra do WIN é a de HOJE (Brasília)
         full = {"WIN": synth_daily(900, seed=101, start=day0), "WDO": synth_daily(900, seed=102, start=day0)}
         facs = {a.tv: synth_daily(900, seed=200 + i, start=day0) for i, a in enumerate(E.ASSETS)}
 
