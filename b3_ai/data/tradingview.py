@@ -53,7 +53,7 @@ def _frame(m: str, p: list) -> str:
     return f"~m~{len(s)}~m~{s}"
 
 
-def fetch_history(requests: list[tuple[str, str, int]], timeout: float = 45.0,
+def _fetch_chunk(requests: list[tuple[str, str, int]], timeout: float = 45.0,
                   delays: Optional[dict[str, int]] = None) -> dict[tuple[str, str], list[Bar]]:
     """requests = [(símbolo, timeframe, nº de barras)], timeframe "1D", "5", "15", "60"...
 
@@ -115,6 +115,31 @@ def fetch_history(requests: list[tuple[str, str, int]], timeout: float = 45.0,
         ws.close()
     for k in out:
         out[k].sort(key=lambda b: b[0])
+    return out
+
+
+def fetch_history(requests: list[tuple[str, str, int]], timeout: float = 45.0,
+                  delays: Optional[dict[str, int]] = None, chunk: int = 12) -> dict[tuple[str, str], list[Bar]]:
+    """Histórico de várias séries, em conexões pequenas (até `chunk` séries cada) e com uma nova tentativa por lote.
+
+    O servidor público derruba conexões com séries demais ou pedidos muito frequentes; lotes pequenos e a repetição evitam
+    que uma queda derrube a leitura inteira. Levanta DataError só se NENHUM lote vier.
+    """
+    out: dict[tuple[str, str], list[Bar]] = {}
+    last: Optional[Exception] = None
+    for i in range(0, len(requests), chunk):
+        part = requests[i:i + chunk]
+        for attempt in (0, 1):
+            try:
+                out.update(_fetch_chunk(part, timeout, delays))
+                break
+            except DataError as e:
+                last = e
+                time.sleep(1.5 * (attempt + 1))
+        if i + chunk < len(requests):
+            time.sleep(0.25)
+    if not out and requests:
+        raise last or DataError("histórico TradingView indisponível")
     return out
 
 

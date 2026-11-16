@@ -155,3 +155,170 @@ def run(engine: Engine) -> str:
           "- A simulação não inclui imposto de renda, margem, nem a diferença entre operar day trade e carregar posição.",
           "- Resultado passado não garante resultado futuro. Teste em conta de simulação antes de usar dinheiro de verdade.", ""]
     return "\n".join(L)
+
+
+# ============================================================================= extremos com filtro (treino × teste)
+def _context(bars: list[tuple]) -> dict:
+    """Por barra: sessão, abertura, VWAP, eficiência do dia até ali, fechamento/máx./mín. do pregão anterior e desvio diário."""
+    n = len(bars)
+    sess = [0] * n
+    s = -1
+    for i in range(n):
+        if i == 0 or bars[i][0] - bars[i - 1][0] > 3600:
+            s += 1
+        sess[i] = s
+    first = {}
+    last = {}
+    for i in range(n):
+        first.setdefault(sess[i], i)
+        last[sess[i]] = i
+    closes = [bars[last[k]][4] for k in range(s + 1)]
+    highs = [max(b[2] for b in bars[first[k]:last[k] + 1]) for k in range(s + 1)]
+    lows = [min(b[3] for b in bars[first[k]:last[k] + 1]) for k in range(s + 1)]
+    dsd = [0.0] * (s + 1)
+    for k in range(21, s + 1):
+        dsd[k] = st.std([closes[j] / closes[j - 1] - 1 for j in range(k - 20, k)])
+    vwap, eff, pv, vv, path = [0.0] * n, [1.0] * n, 0.0, 0.0, 0.0
+    for i in range(n):
+        if i == first[sess[i]]:
+            pv = vv = path = 0.0
+        else:
+            path += abs(bars[i][4] - bars[i - 1][4])
+        vol = bars[i][5] or 1.0
+        pv += (bars[i][2] + bars[i][3] + bars[i][4]) / 3 * vol
+        vv += vol
+        vwap[i] = pv / vv
+        op = bars[first[sess[i]]][1]
+        eff[i] = abs(bars[i][4] - op) / path if path else 1.0
+    return {"sess": sess, "first": first, "last": last, "closes": closes, "highs": highs, "lows": lows, "dsd": dsd, "vwap": vwap, "eff": eff}
+
+
+def _exit_fixed(bars: list[tuple], ctx: dict, i: int, side: int, hold: int) -> tuple[float, int]:
+    j = min(i + hold, ctx["last"][ctx["sess"][i]])
+    return side * (bars[j][4] - bars[i][4]), j
+
+
+def extremes_lateral(bars: list[tuple], ctx: dict, sig: list[int], lo: int, hi: int, eff_max: float, hold: int) -> list[float]:
+    """Sinal de reversão só quando o dia está LATERAL (eficiência do pregão até ali abaixo de eff_max)."""
+    out, busy = [], -1
+    for i in range(max(lo, 1), hi):
+        if sig[i] and i > busy and ctx["eff"][i] < eff_max and i - ctx["first"][ctx["sess"][i]] >= 12:
+            r, busy = _exit_fixed(bars, ctx, i, sig[i], hold)
+            out.append(r)
+    return out
+
+
+def extremes_band(bars: list[tuple], ctx: dict, lo: int, hi: int, mult: float) -> list[float]:
+    """Preço sai da faixa diária (mult × 1,28 desvio do dia): entra contra, sai na volta ao VWAP ou no fechamento;
+    stop a mais 0,6 desvio diário contra. Uma operação por pregão."""
+    out, done = [], set()
+    for i in range(lo, hi):
+        k = ctx["sess"][i]
+        sd = ctx["dsd"][k]
+        if k in done or k < 22 or not sd:
+            continue
+        ref = ctx["closes"][k - 1]
+        r = bars[i][4] / ref - 1
+        if abs(r) < mult * 1.2816 * sd:
+            continue
+        done.add(k)
+        side = -1 if r > 0 else 1
+        entry, stop = bars[i][4], 0.6 * sd * ref
+        res = side * (bars[ctx["last"][k]][4] - entry)
+        for j in range(i + 1, ctx["last"][k] + 1):
+            adverse = (bars[j][2] - entry) if side < 0 else (entry - bars[j][3])
+            if adverse >= stop:
+                res = -stop
+                break
+            if (side < 0 and bars[j][3] <= ctx["vwap"][j]) or (side > 0 and bars[j][2] >= ctx["vwap"][j]):
+                res = side * (ctx["vwap"][j] - entry)
+                break
+        out.append(res)
+    return out
+
+
+def extremes_pivot(bars: list[tuple], ctx: dict, sig: list[int], lo: int, hi: int, level: int, hold: int) -> list[float]:
+    """Sinal de reversão só perto de suporte/resistência do pregão anterior (level 1 = S1/R1 ou além; 2 = S2/R2 ou além)."""
+    out, busy = [], -1
+    for i in range(max(lo, 1), hi):
+        k = ctx["sess"][i]
+        if not sig[i] or i <= busy or k < 1:
+            continue
+        h, l, c = ctx["highs"][k - 1], ctx["lows"][k - 1], ctx["closes"][k - 1]
+        p = (h + l + c) / 3
+        sup = (2 * p - h) if level == 1 else p - (h - l)
+        res_ = (2 * p - l) if level == 1 else p + (h - l)
+        tol = 0.15 * (h - l)
+        px = bars[i][4]
+        if (sig[i] > 0 and px <= sup + tol) or (sig[i] < 0 and px >= res_ - tol):
+            r, busy = _exit_fixed(bars, ctx, i, sig[i], hold)
+            out.append(r)
+    return out
+
+
+def extremes_study(asset: str, bars: list[tuple]) -> list[dict]:
+    """Três filtros para o sinal de extremo. O parâmetro de cada um é escolhido na 1ª metade do histórico (maior ganho médio
+    líquido, mínimo de 15 operações) e o resultado mostrado é o da 2ª metade — que o filtro nunca viu."""
+    from . import technical as T
+    if len(bars) < 3000:
+        return []
+    ctx, sig = _context(bars), T.extremes(bars)["signal"]
+    half = len(bars) // 2
+    c = cost(asset)
+
+    def pick(fn, grid: list[tuple], label) -> dict:
+        best, best_m = None, -1e18
+        for params in grid:
+            tr = fn(0, half, *params)
+            if len(tr) >= 15:
+                m = st.mean(tr) * POINT[asset] - c
+                if m > best_m:
+                    best, best_m = params, m
+        if best is None:
+            return {"nome": f"{asset} {label(grid[0]).split(' (')[0]}", "ativo": asset, "n": 0, "nota": "operações insuficientes na 1ª metade para escolher o filtro"}
+        out = summarize(f"{asset} {label(best)}", asset, fn(half, len(bars), *best))
+        out["treino"] = best_m
+        return out
+
+    base = summarize(f"{asset} extremo sem filtro (referência, 2ª metade)", asset,
+                     extremes_lateral(bars, ctx, sig, half, len(bars), 9.9, 6))
+    base["treino"] = None
+    return [
+        base,
+        pick(lambda lo, hi, e, hd: extremes_lateral(bars, ctx, sig, lo, hi, e, hd), [(e, hd) for e in (0.15, 0.25, 0.35) for hd in (6, 12)],
+             lambda p: f"extremo só em dia lateral (eficiência < {p[0]:.2f}, saída em {p[1] * 5} min)"),
+        pick(lambda lo, hi, m: extremes_band(bars, ctx, lo, hi, m), [(0.8,), (1.0,), (1.2,)],
+             lambda p: f"preço fora da faixa diária ({p[0]:.1f} × faixa de 80%), saída no VWAP"),
+        pick(lambda lo, hi, lv, hd: extremes_pivot(bars, ctx, sig, lo, hi, lv, hd), [(lv, hd) for lv in (1, 2) for hd in (6, 12)],
+             lambda p: f"extremo em {'S1/R1' if p[0] == 1 else 'S2/R2'} (saída em {p[1] * 5} min)"),
+    ]
+
+
+def run_extremes(engine: Engine) -> str:
+    s = engine.cycle()
+    intr = engine._sim_intr
+    when = datetime.fromtimestamp(s["atualizado"], tz=BRT).strftime("%d/%m/%Y %H:%M")
+    r = lambda v: "—" if v is None else f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")  # noqa: E731
+    L = ["# Extremos de compra e venda como entrada — teste com filtros e custos", "", f"Gerado em {when} (Brasília) · {s['atraso']}", "",
+         "Entrada contra o movimento quando o preço está num extremo (RSI, bandas, VWAP) e dá o gatilho de virada. Cada filtro tem o "
+         "parâmetro escolhido na 1ª metade do histórico; os números abaixo são da 2ª metade, que o filtro não viu. 1 mini contrato, "
+         f"custo por operação: WIN {r(cost('WIN'))} · WDO {r(cost('WDO'))}.", ""]
+    for k in ("WIN", "WDO"):
+        bars = intr.get((k, "5")) or []
+        rows = extremes_study(k, bars)
+        n_s = len({b[0] // 86400 for b in bars})
+        L += [f"## {'Mini índice' if k == 'WIN' else 'Mini dólar'} — {len(bars)} barras de 5 min (~{n_s} pregões)", "",
+              "| Filtro | Ganho médio na 1ª metade | Operações (2ª metade) | Acerto bruto | Ganho médio líquido | Intervalo 95% | Total | Pior queda | Conclusão |",
+              "| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |"]
+        for x in rows:
+            if not x["n"]:
+                L.append(f"| {x['nome']} | — | 0 | — | — | — | — | — | {x.get('nota', 'sem operações')} |")
+                continue
+            L.append(f"| {x['nome']} | {r(x.get('treino'))} | {x['n']} | {x['acerto_bruto'] * 100:.1f}% | **{r(x['liq_medio'])}** | "
+                     f"{r(x['ic'][0])} a {r(x['ic'][1])} | {r(x['total'])} | {r(x['pior_queda'])} | {x['veredito']} |")
+        L.append("")
+    L += ["## Como ler", "",
+          "- Um filtro só vale se der ✅ na 2ª metade. Bom na 1ª e ruim na 2ª = ajuste ao passado, não vantagem.",
+          "- Com poucas operações o intervalo fica largo: \"não distinguível de zero\" significa que ainda não há prova, nem a favor nem contra.",
+          "- Resultado passado não garante resultado futuro.", ""]
+    return "\n".join(L)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -47,10 +48,12 @@ def fmt_date(iso: str) -> str:
 
 class Engine:
     def __init__(self, data_dir: str = "dados", with_news: bool = True, fonte: str = "") -> None:
-        import os
         self.fonte = (fonte or os.environ.get("B3AI_FONTE") or "web").lower()
         self.mt5 = mt5feed.MT5Feed() if self.fonte == "mt5" else None
         self.delays: dict[str, int] = {}     # atraso (s) de cada série, informado pelo feed
+        self.tv_every = max(30, int(os.environ.get("B3AI_TV_SEG", "60")))   # intervalo mínimo entre leituras da fonte pública
+        self._tv_cache: tuple[float, dict, dict] = (0.0, {}, {})
+        self._tv_try, self._tv_fails, self._mt5_ok = 0.0, 0, False
         self.rt: dict = {}            # dados em tempo real do MetaTrader no ciclo atual (vazio = feed público)
         self.data_dir = data_dir
         self._agenda_cache: tuple[float, dict] = (0.0, {})
@@ -82,19 +85,47 @@ class Engine:
 
     # ------------------------------------------------------------------ coleta
     def _history(self) -> tuple[dict, list[str]]:
+        """Histórico público (TradingView). Para não ser cortado por excesso de pedidos, é relido no máximo a cada
+        `tv_every` segundos; entre uma leitura e outra — e quando a fonte falha — vale a última leitura boa. Com o
+        MetaTrader ativo, WIN e WDO não são pedidos aqui (vêm do terminal a cada ciclo). Yahoo só entra sem nada em cache."""
         notes: list[str] = []
-        reqs = [(a.tv, "1D", DAILY_BARS) for a in list(TARGETS.values()) + ASSETS]
-        reqs += [(TARGETS[k].tv, tf, INTRA_BARS) for k in TARGETS for tf in ("5", "15")] + [(ES, "5", INTRA_BARS), (ES, "15", INTRA_BARS)]
+        now = time.time()
+        ts, cached, delays = self._tv_cache
+        wait = self.tv_every * (2 ** min(self._tv_fails, 4))            # falhou: espera 2×, 4×... até 16× antes de tentar de novo
+        if cached and now - self._tv_try < wait:
+            self.delays = dict(delays)
+            if self._tv_fails:
+                notes.append(f"fonte pública do exterior instável: usando a leitura de {max(1, round((now - ts) / 60))} min atrás "
+                             "(mini índice, mini dólar e ações seguem pelo MetaTrader)" if self.mt5 is not None else
+                             f"fonte pública instável: usando a leitura de {max(1, round((now - ts) / 60))} min atrás")
+            return dict(cached), notes
+        self._tv_try = now
+        skip_targets = self.mt5 is not None and self._mt5_ok
+        reqs = [(a.tv, "1D", DAILY_BARS) for a in ASSETS]
+        reqs += [(ES, "5", INTRA_BARS), (ES, "15", INTRA_BARS)]
+        if not skip_targets:
+            reqs += [(a.tv, "1D", DAILY_BARS) for a in TARGETS.values()]
+            reqs += [(TARGETS[k].tv, tf, INTRA_BARS) for k in TARGETS for tf in ("5", "15")]
         try:
-            self.delays = {}
-            h = tv.fetch_history(reqs, delays=self.delays)
-            missing = [s for s, tf, _ in reqs if (s, tf) not in h]
-            if (TARGETS["WIN"].tv, "1D") not in h:
+            d: dict[str, int] = {}
+            h = tv.fetch_history(reqs, delays=d)
+            if not skip_targets and (TARGETS["WIN"].tv, "1D") not in h:
                 raise DataError("histórico do WIN não veio")
-            if missing:
-                notes.append("sem histórico: " + ", ".join(sorted(set(missing))))
-            return h, notes
+            missing = sorted({s_ for s_, tf, _ in reqs if (s_, tf) not in h})
+            if cached:                                   # série que faltou nesta leitura: mantém a anterior
+                for key, bars in cached.items():
+                    h.setdefault(key, bars)
+            elif missing:
+                notes.append("sem histórico: " + ", ".join(missing))
+            self._tv_cache, self._tv_fails, self.delays = (now, h, d), 0, d
+            return dict(h), notes
         except DataError as e:
+            self._tv_fails += 1
+            if cached and now - ts < 6 * 3600:
+                self.delays = dict(delays)
+                notes.append(f"fonte pública do exterior falhou ({e}); usando a leitura de {max(1, round((now - ts) / 60))} min atrás e "
+                             "tentando de novo em seguida")
+                return dict(cached), notes
             notes.append(f"TradingView (histórico) falhou: {e} — usando Yahoo (diário, sem intraday; WIN≈Ibovespa, WDO≈USD/BRL)")
         h = {}
         for a in list(TARGETS.values()) + ASSETS:
@@ -104,7 +135,7 @@ class Engine:
                 h[(a.tv, "1D")] = yahoo.fetch_daily(a.yahoo)
             except DataError as e:
                 notes.append(f"Yahoo {a.yahoo}: {e}")
-        if (TARGETS["WIN"].tv, "1D") not in h:
+        if (TARGETS["WIN"].tv, "1D") not in h and not skip_targets:
             raise DataError("; ".join(notes[-3:]) or "sem dados de mercado")
         return h, notes
 
@@ -146,8 +177,10 @@ class Engine:
                 cached = {"estudo": {k: M.opening_study(h.get((TARGETS[k].tv, "60"), []), h.get((OPEN_LEADER[k][0], "60"), []), OPEN_LEADER[k][1])
                                      for k in TARGETS}}
                 self._open_cache = (time.time(), cached)
-            live = tv.fetch_history([(v[0], "60", 120) for v in OPEN_LEADER.values()])
-            cached["lider"] = {k: live.get((OPEN_LEADER[k][0], "60"), []) for k in TARGETS}
+            if not cached.get("lider") or time.time() - cached.get("lider_ts", 0) > self.tv_every:
+                live = tv.fetch_history([(v[0], "60", 120) for v in OPEN_LEADER.values()])
+                cached["lider"] = {k: live.get((OPEN_LEADER[k][0], "60"), []) for k in TARGETS}
+                cached["lider_ts"] = time.time()
         except Exception:  # noqa: BLE001 — sem o estudo, o quadro só fica sem a linha de abertura
             cached = cached or {"estudo": {}, "lider": {}}
         return cached
@@ -504,6 +537,7 @@ class Engine:
             self._step("lendo mini índice e mini dólar no MetaTrader 5")
             try:
                 self.rt = self.mt5.snapshot([a.key for a in ASSETS])
+                self._mt5_ok = True
                 for k, a in TARGETS.items():
                     for tf in ("1D", "5", "15"):
                         h[(a.tv, tf)] = self.rt[(k, tf)]
@@ -512,6 +546,8 @@ class Engine:
                     self.delays[BY_KEY[k].tv] = 0
             except Exception as e:  # noqa: BLE001 — sem MetaTrader o painel segue com o dado público
                 self.rt = {}
+                if self._mt5_ok:                 # o próximo ciclo volta a pedir WIN e WDO à fonte pública
+                    self._mt5_ok, self._tv_try = False, 0.0
                 notes.append(f"MetaTrader 5 indisponível ({e}) — usando cotações públicas com ~15 min de atraso")
         bar_key = (lambda a: f"MT5:{a.key}") if self.rt else (lambda a: a.tv)   # históricos acumulados separados por fonte
         daily = {a.key: h.get((a.tv, "1D"), []) for a in list(TARGETS.values()) + ASSETS}
