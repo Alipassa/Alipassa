@@ -328,7 +328,11 @@ function render(){
   if(G&&G.historico&&G.historico.n){const H=G.historico,C2=G.forte||{},C1=G.fraco||{},C0=G.sem_contexto||{},T2=G.hoje;
     const hist=(H2,rot)=>H2&&H2.n?`${rot}: ${H2.n} operações · ${nf(H2.acerto_bruto*100,0)}% de acerto · média <b class="${cls(H2.liq_medio)}">${money2(H2.liq_medio)}</b> por contrato`:"";
     let top;
-    if(!T2)top='<span class="muted">Aguardando a abertura do pregão para medir o gap.</span>';
+    const PR=G.pre;
+    if(!T2&&PR)top=`<b>Antes da abertura.</b> O sinal só existe depois do primeiro negócio, mas o gatilho já é conhecido: o último pregão foi de <b>${PR.dia_de_alta?"alta":"queda"}</b>, então só há sinal forte se o mercado abrir <b>${PR.dia_de_alta?"acima":"abaixo"} de ${nf(PR.gatilho,d)}</b> (gap de ${pct(PR.gap_necessario_pct)} sobre o fechamento de ${nf(PR.fechamento,d)}) → <b class="${PR.lado>0?"up":"down"}">${PR.lado>0?"▲ compra":"▼ venda"}</b> até o fechamento.`+
+        (PR.gap_esperado_pct!=null?` Pelo exterior, o gap esperado agora é de ${pct(PR.gap_esperado_pct)}: sinal forte <b>${esc(PR.situacao)}</b> na próxima abertura.`:"")+
+        `<br><span class="muted">Abrindo do outro lado, ou sem passar desse preço, não há sinal forte. Faixa do último pregão: ${nf(PR.minima,d)} a ${nf(PR.maxima,d)}.</span>`;
+    else if(!T2)top='<span class="muted">Aguardando a abertura do pregão para medir o gap.</span>';
     else if(!T2.grande)top=`Gap de hoje: ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio) — abaixo do limite de 0,75, <b>sem operação</b>.`;
     else{const ctx=`abriu <b>${T2.fora_da_faixa?"FORA":"dentro"}</b> da faixa de ontem · ontem fechou <b>${T2.vespera_na_direcao?"na mesma direção":"contra a direção"}</b> do gap`;
       if(T2.contextos===0)top=`Gap grande de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio), mas <b>sem contexto favorável</b> (${ctx}) — no histórico esse caso quase não deu vantagem: <b>melhor ficar de fora</b>.`;

@@ -276,6 +276,11 @@ class Engine:
                     self.mem.record(k, "Gap com contexto", d.dates[-1], st_now["abertura"], p_side)
                 if st_now["operar"]:
                     self.mem.record(k, "Gap sinal forte", d.dates[-1], st_now["abertura"], p_side)
+        if not is_open:
+            try:
+                out["pre"] = simulate.gap_preopen(bars15)
+            except Exception:  # noqa: BLE001
+                out["pre"] = None
         closes = dict(zip(d.dates, d.close))
         last_done = d.dates[-1] if complete else d.dates[-2]
         for hz in ("Devolução de gap", "Gap com contexto", "Gap sinal forte"):
@@ -283,6 +288,17 @@ class Engine:
                 if due in closes and due <= last_done:
                     self.mem.resolve(k, hz, due, closes[due], ref)
         return out
+
+    def _gap_with_forecast(self, k: str, bars15: list[tuple], is_open: bool, d: "M.DailyData", complete: bool, rows: list[dict]) -> Optional[dict]:
+        g = self._gap(k, bars15, is_open, d, complete)
+        pre = (g or {}).get("pre")
+        ab = next((r for r in rows if r["horizonte"] == "Abertura"), None)
+        if pre and ab:                    # o exterior, pela previsão de abertura, aponta para um gap de quanto?
+            pre["gap_esperado_pct"] = ab.get("ajuste_exterior")
+            exp, need = ab.get("ajuste_exterior") or 0.0, pre["gap_necessario_pct"]
+            pre["situacao"] = ("provável" if exp * need > 0 and abs(exp) >= abs(need) else
+                               "possível" if exp * need > 0 and abs(exp) >= 0.5 * abs(need) else "improvável")
+        return g
 
     def _patterns(self, k: str, bars15: list[tuple], is_open: bool) -> Optional[dict]:
         """Padrões confirmados: os diários (refeitos quando o pregão muda) + os de dentro do pregão (a cada 20 min)."""
@@ -753,7 +769,7 @@ class Engine:
                 "prob": rows, "confronto": conf, "niveis": lv, "intraday": self._intraday_read(intr[(k, "5")]),
                 "analogo": r["analog"], "sigma_dia_pct": sig_d * 100,
                 "padroes": self._patterns(k, intr[(k, "15")], is_open),
-                "gap": self._gap(k, intr[(k, "15")], is_open, d, complete),
+                "gap": self._gap_with_forecast(k, intr[(k, "15")], is_open, d, complete, rows),
                 "tendencias": T.trends(bars, intr[(k, "5")]), "reversao": T.reversal_read(intr[(k, "5")]),
                 "candles": {"D1": [list(b[:5]) for b in bars[-180:]],
                             "M15": [list(b[:5]) for b in intr[(k, "15")][-160:]],

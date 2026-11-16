@@ -146,6 +146,28 @@ def gap_state(bars15: list[tuple], is_open: bool, min_sessions: int = 40) -> Opt
             "resultado_pts": side * (ss[-1][-1][4] - op) if side else None}
 
 
+def gap_preopen(bars15: list[tuple], min_sessions: int = 40) -> Optional[dict]:
+    """Com o pregão FECHADO: o que precisa acontecer na próxima abertura para haver sinal forte.
+
+    Sinal forte = gap grande + abrir fora da faixa do último pregão + o último pregão ter fechado na direção do gap. Como a
+    direção do último pregão já é conhecida, só UM lado pode dar sinal forte, e ele vira um preço de gatilho."""
+    done = [x for x in M.sessions_gap(bars15, 2 * 3600) if len(x) >= 5]
+    if len(done) < min_sessions:
+        return None
+    gaps = [done[j][0][1] / done[j - 1][-1][4] - 1 for j in range(len(done) - min_sessions + 2, len(done))]
+    dayr = [done[j][-1][4] / done[j - 1][-1][4] - 1 for j in range(len(done) - min_sessions + 2, len(done))]
+    gsd, dsd = st.std(gaps) or 1e-9, st.std(dayr) or 1e-9
+    last = done[-1]
+    close, hi, lo = last[-1][4], max(b[2] for b in last), min(b[3] for b in last)
+    up_day = close > done[-2][-1][4]
+    if close == done[-2][-1][4]:
+        return None
+    gatilho = max(hi, close * (1 + GAP_LIMIAR * gsd)) if up_day else min(lo, close * (1 - GAP_LIMIAR * gsd))
+    return {"fechamento": close, "maxima": hi, "minima": lo, "dia_de_alta": up_day, "gatilho": gatilho,
+            "gap_necessario_pct": (gatilho / close - 1) * 100, "lado": -1 if up_day else 1,
+            "stop_pts": 2.0 * dsd * gatilho, "limite_gap_pct": GAP_LIMIAR * gsd * 100}
+
+
 def run(engine: "Engine") -> str:
     s = engine.cycle()
     dres, ires, intr = engine._daily_cache["res"], engine._intra_cache["res"], engine._sim_intr

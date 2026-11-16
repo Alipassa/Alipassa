@@ -649,3 +649,26 @@ class GapAssetsTest(unittest.TestCase):
         r = simulate.summarize_pct("x", [0.01] * 40, 0.1)
         self.assertAlmostEqual(r["liq"], 0.9)
         self.assertEqual(simulate.portfolio([], lambda c: True)["dias"], 0)
+
+
+class GapPreopenTest(unittest.TestCase):
+    def test_trigger_price_follows_last_session_direction(self):
+        from b3_ai import simulate
+        rnd = random.Random(121)
+        bars, px, t = [], 100000.0, 1_700_000_000
+        for day in range(60):
+            op = px * (1 + rnd.gauss(0, 0.002))
+            cl = op * (1.01 if day == 59 else 1 + rnd.gauss(0, 0.002))        # último pregão: alta de 1 %
+            for i in range(8):
+                p0, p1 = op + (cl - op) * i / 8, op + (cl - op) * (i + 1) / 8
+                bars.append((t + day * 86400 + i * 900, p0, max(p0, p1), min(p0, p1), p1, 1.0))
+            px = cl
+        p = simulate.gap_preopen(bars)
+        self.assertTrue(p["dia_de_alta"])
+        self.assertEqual(p["lado"], -1)                                       # dia de alta → só gap de alta dá sinal → venda
+        self.assertGreaterEqual(p["gatilho"], p["maxima"])                    # precisa abrir fora da faixa
+        self.assertGreater(p["gap_necessario_pct"], 0)
+        # abrir exatamente no gatilho satisfaz as três condições do sinal forte
+        today = bars + [(t + 60 * 86400, p["gatilho"] * 1.0001, p["gatilho"] * 1.0002, p["gatilho"], p["gatilho"] * 1.0001, 1.0)]
+        g = simulate.gap_state(today, True)
+        self.assertTrue(g["grande"] and g["fora_da_faixa"] and g["vespera_na_direcao"])
