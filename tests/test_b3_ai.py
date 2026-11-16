@@ -467,3 +467,34 @@ class SimulationTest(unittest.TestCase):
         res = simulate.gap_fade(bars)
         self.assertGreaterEqual(len(res), 5)
         self.assertTrue(all(x > 0 for x in res))                             # vendeu na abertura, recomprou mais baixo
+
+
+class PatternsTest(unittest.TestCase):
+    def _data(self, planted: bool):
+        """Passeio aleatório; com `planted`, depois de 3 quedas seguidas o pregão seguinte sobe em ~80 % das vezes."""
+        from b3_ai import patterns
+        rnd = random.Random(81)
+        bars, c, streak = [], 100.0, 0
+        for i in range(1900):
+            r = rnd.gauss(0, 0.012)
+            if planted and streak >= 3:
+                r = abs(r) if rnd.random() < 0.8 else -abs(r)
+            streak = streak + 1 if r < 0 else 0
+            o = c
+            c *= 1 + r
+            bars.append((1_500_000_000 + i * DAY, o, max(o, c) * 1.001, min(o, c) * 0.999, c, 1.0))
+        d = M.DailyData(bars, {}, {})
+        res = M.build_daily(d, [], d, True)
+        return patterns.mine(d, res, [b[1] for b in bars], "dólar", True)
+
+    def test_planted_pattern_is_found_and_confirmed(self):
+        out = self._data(True)
+        hit = [p for p in out["padroes"] if p["condicoes"] == ["3 quedas seguidas"] and p["alvo"] == "fech"]
+        self.assertTrue(hit, "o padrão plantado deveria ser confirmado")
+        self.assertEqual(hit[0]["direcao"], "alta")
+        self.assertGreater(hit[0]["chance"], 0.7)
+
+    def test_pure_noise_confirms_almost_nothing(self):
+        out = self._data(False)
+        self.assertGreater(out["testados"], 50)
+        self.assertLessEqual(out["confirmados"], 3)          # ruído puro: no máximo um punhado por acaso

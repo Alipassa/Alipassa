@@ -155,6 +155,11 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
 </section>
 
 <section class="card">
+  <h2>Padrões descobertos no histórico — <span id="patName"></span></h2>
+  <div id="patterns"></div>
+</section>
+
+<section class="card">
   <h2>Quadro de probabilidades — <span id="boardName"></span></h2>
   <div class="board" id="board"></div>
   <div class="small muted" style="margin-top:8px">Clique num horizonte para ver no destaque. “Validado” = o modelo acertou acima do acaso em previsões fora da amostra; sem validação, a probabilidade fica colada na taxa-base (~50%) de propósito.</div>
@@ -316,6 +321,7 @@ function render(){
       ${V.comprovado?"":'<span class="chip">⚪ sinal sem vantagem comprovada no histórico: use só como descrição do momento</span><br>'}<span class="muted">Sinal medido: em ${h30.n} reversões do histórico o preço foi na direção do sinal em <b>${h30.acerto==null?"—":nf(h30.acerto*100,0)+"%"}</b> das vezes em 30 min (média ${pct(h30.media_pct,3)}) e ${h60.acerto==null?"—":nf(h60.acerto*100,0)+"%"} em 1 h.</span>`+
       (V.recentes.length?'<br><span class="muted">Últimos sinais: '+V.recentes.slice(-5).map(r=>`<span class="chip"><span class="${r.lado>0?"up":"down"}">${r.lado>0?"▲":"▼"}</span> ${hhmm(r.ts)} · ${nf(r.preco,d)}</span>`).join("")+"</span>":"");
   }else $("rev").innerHTML='<span class="muted">sem barras intraday</span>';
+  renderPatterns(A);
   // ---- quadro
   $("boardName").textContent=A.nome;
   $("board").innerHTML=rows.map(r=>`<button class="hz ${r.horizonte===hz?"sel":""}" data-h="${esc(r.horizonte)}"><div class="t">${esc(r.horizonte)}</div><div class="a">${esc(r.alvo)}</div>
@@ -379,6 +385,19 @@ function renderAgenda(){
       <td class="l">${e.impacto==="muito alto"?"🔴 muito alto":"🟠 "+esc(e.impacto)}</td></tr>`).join("")+"</table></div>":'<span class="muted">Sem eventos de alto impacto nos próximos 60 dias (ou fontes indisponíveis).</span>')+
     (H?`<div class="small" style="margin-top:8px">📊 Medido em ${H.n} decisões do Fed desde 2021: o mini índice oscilou em média <b>${nf(H.abs_dia,2)}%</b> no dia e <b>${nf(H.abs_seguinte,2)}%</b> no seguinte, contra ${nf(H.abs_normal,2)}% num dia comum; fechou em alta em ${nf(H.pct_alta_dia*100,0)}% dos dias de decisão. Extremos: ${pct(H.maior_queda)} e ${pct(H.maior_alta)}.</div>`:"")+
     '<div class="small muted" style="margin-top:6px">Para acrescentar outros eventos (CPI, PCE, IPCA, balanços), copie <code>dados/agenda.exemplo.json</code> para <code>dados/agenda.json</code>.</div>';
+}
+function renderPatterns(A){
+  $("patName").textContent=A.nome; const P=A.padroes;
+  if(!P){$("patterns").innerHTML='<span class="muted">sem dados</span>';return}
+  const row=x=>`<tr><td style="white-space:normal"><b>${x.ativo?"🟢 ATIVO AGORA":x.aguarda_abertura?"⏳ depende da abertura":"—"}</b></td>
+    <td class="l" style="white-space:normal">${x.condicoes.map(esc).join(" <b>+</b> ")}</td><td class="l" style="white-space:normal">${esc(x.alvo_nome)}</td>
+    <td><b class="${x.lado>0?"up":"down"}">${x.lado>0?"▲ alta":"▼ queda"} em ${nf(x.chance*100,0)}%</b></td><td class="num">${x.n}</td>
+    <td class="num">${nf(Math.max(x.p_descoberta,1-x.p_descoberta)*100,0)}% em ${x.n_descoberta}</td><td class="num">${nf((x.lado>0?x.base:1-x.base)*100,0)}%</td></tr>`;
+  const at=P.padroes.filter(x=>x.ativo).length;
+  $("patterns").innerHTML=`<div class="small" style="margin-bottom:8px">${nf(P.testados)} combinações de informações testadas em ${nf(P.pregoes)} pregões (e ${nf(P.pregoes_intraday)} com intraday): <b>${P.confirmados} se confirmaram</b> na parte do histórico que não foi usada para descobri-las${P.confirmados?` · <b>${at} ativo${at===1?"":"s"} agora</b>`:""}. Por puro acaso, o esperado era ~${nf(P.esperado_por_sorte,1)}.</div>`+
+    (P.padroes.length?`<div class="scroll" style="max-height:360px"><table><tr><th>Situação</th><th class="l">Quando acontece…</th><th class="l">o pregão…</th><th>Chance medida</th><th>Casos</th><th>Na descoberta</th><th>Sem o padrão</th></tr>${P.padroes.slice(0,20).map(row).join("")}</table></div>`
+     :'<div class="muted small">Nenhuma combinação se repetiu de forma confiável. Isso é informação: nestes dados, cruzar exterior, tendência, VIX, dólar, gap e dia da semana não dá uma chance melhor que a taxa-base — o painel não vai inventar um padrão.</div>')+
+    '<div class="small muted" style="margin-top:6px">Um padrão só entra aqui se aparecer nos primeiros 60% do histórico e se repetir nos 40% finais. “Chance medida” é a dos 40% finais.</div>';
 }
 function renderSynth(){
   const Y=S.sintese; if(!Y){$("synth").innerHTML='<span class="muted">sem dados</span>';return}

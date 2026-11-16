@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from . import alerts, market_b3, model as M, news_ai, opinion, stats as st, technical as T
+from . import alerts, market_b3, model as M, news_ai, opinion, patterns, stats as st, technical as T
 from .data import bcb, calendar as cal, focus, mt5 as mt5feed, news, tradingview as tv, yahoo
 from .data.http import DataError
 from .memory import Memory
@@ -238,6 +238,25 @@ class Engine:
                 eventos.append({**e, "dias": dias, "quando": "HOJE" if dias == 0 else "amanhã" if dias == 1 else f"em {dias} dias",
                                 "dia_semana": fmt_date(e["data"])})
         return {"eventos": eventos, "fomc_historico": estudo, "erros": cached.get("erros", [])}
+
+    def _patterns(self, k: str, bars15: list[tuple], is_open: bool) -> Optional[dict]:
+        """Padrões confirmados: os diários (refeitos quando o pregão muda) + os de dentro do pregão (a cada 20 min)."""
+        day = self._daily_cache.get("padroes", {}).get(k)
+        if day is None:
+            return None
+        ck = (k, int(time.time() // 1200), is_open)
+        cache = self._daily_cache.setdefault("padroes_sessao", {})
+        if ck not in cache:
+            try:
+                cache[ck] = patterns.mine_session(bars15, is_open)
+            except Exception:  # noqa: BLE001
+                cache[ck] = {"padroes": [], "testados": 0, "confirmados": 0, "esperado_por_sorte": 0.0, "amostra": 0}
+        ses = cache[ck]
+        lista = sorted(day["padroes"] + ses["padroes"], key=lambda x: (-x["ativo"], -x["aguarda_abertura"], -x["z"]))
+        return {"padroes": lista, "testados": day["testados"] + ses["testados"],
+                "confirmados": day.get("confirmados", 0) + ses.get("confirmados", 0),
+                "esperado_por_sorte": round(day["esperado_por_sorte"] + ses["esperado_por_sorte"], 1),
+                "pregoes": day.get("amostra", 0), "pregoes_intraday": ses.get("amostra", 0)}
 
     def _delay_text(self) -> str:
         late = sorted({f"{a.name} ({round(self.delays[a.tv] / 60)} min)" for a in ASSETS if self.delays.get(a.tv)})
@@ -582,7 +601,13 @@ class Engine:
             for k, d in dd.items():
                 cross = dd.get("WDO" if k == "WIN" else "WIN", d)
                 res[k] = M.build_daily(d, daily["VIX"], cross, complete)
-            self._daily_cache = {"key": dkey, "res": res}
+            pads = {}
+            for k, d in dd.items():
+                try:
+                    pads[k] = patterns.mine(d, res[k], [b[1] for b in daily[k]], "dólar" if k == "WIN" else "bolsa", complete)
+                except Exception as e:  # noqa: BLE001 — a mineração é um extra: falha não derruba o ciclo
+                    pads[k] = {"padroes": [], "testados": 0, "esperado_por_sorte": 0.0, "erro": str(e)}
+            self._daily_cache = {"key": dkey, "res": res, "padroes": pads}
         elif not complete:   # pregão aberto: mesmos modelos, mas o confronto e os fatores do dia mudam a cada ciclo
             for k, d in dd.items():
                 r = self._daily_cache["res"][k]
@@ -679,6 +704,7 @@ class Engine:
                 "max": bars[-1][2], "min": bars[-1][3], "abertura": bars[-1][1], "data": d.dates[-1],
                 "prob": rows, "confronto": conf, "niveis": lv, "intraday": self._intraday_read(intr[(k, "5")]),
                 "analogo": r["analog"], "sigma_dia_pct": sig_d * 100,
+                "padroes": self._patterns(k, intr[(k, "15")], is_open),
                 "tendencias": T.trends(bars, intr[(k, "5")]), "reversao": T.reversal_read(intr[(k, "5")]),
                 "candles": {"D1": [list(b[:5]) for b in bars[-180:]],
                             "M15": [list(b[:5]) for b in intr[(k, "15")][-160:]],

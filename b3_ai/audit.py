@@ -117,6 +117,15 @@ def run(engine: Engine) -> str:
         L += [f"| {k} | {nomes[j]} | {b['n']} | **{(b['acerto'] or 0) * 100:.1f}%** | {(b['acerto2'] or 0) * 100:.1f}% em {b['n2']} |" for j, b in enumerate(e["bins"])]
         if e.get("devolve"):
             L.append(f"| {k} | depois de gap grande, pregão fechou CONTRA o gap | {e['devolve']['n']} | **{e['devolve']['pct'] * 100:.0f}%** | — |")
+    L += ["", "## 3c. Padrões descobertos (cruzamento das informações, com confirmação fora da amostra)", ""]
+    for k, a_ in s["ativos"].items():
+        P = a_.get("padroes") or {}
+        L.append(f"**{k}**: {P.get('testados', 0)} combinações testadas, {P.get('confirmados', 0)} confirmadas "
+                 f"(esperado por acaso: ~{P.get('esperado_por_sorte', 0)}).")
+        for x in (P.get("padroes") or [])[:10]:
+            L.append(f"- {' + '.join(x['condicoes'])} → {x['alvo_nome']}: **{x['direcao']} em {x['chance'] * 100:.0f}%** de {x['n']} casos "
+                     f"(na descoberta {max(x['p_descoberta'], 1 - x['p_descoberta']) * 100:.0f}% de {x['n_descoberta']}; "
+                     f"sem o padrão {(x['base'] if x['lado'] > 0 else 1 - x['base']) * 100:.0f}%)" + (" — ATIVO AGORA" if x["ativo"] else ""))
     L += ["", "## 4. Sinal de reversão nos extremos (5 min)", "",
           "| Ativo | Sinais | Acerto em 30 min | Intervalo 95% | Conclusão | Acerto em 1 h | Ganho médio em 30 min |", "| --- | ---: | ---: | --- | --- | ---: | ---: |"]
     for k, a in s["ativos"].items():

@@ -89,6 +89,14 @@ def _asset_view(a: dict, dec: int) -> tuple[str, list[str]]:
     c = a["confronto"]
     L.append(c["leitura"] + (f" Depois do fechamento da B3 o exterior já implica {c['pos_fechamento_total']:+.2f}% para a abertura."
                               if c.get("pos_fechamento") and abs(c["pos_fechamento_total"]) >= 0.05 else ""))
+    pads = a.get("padroes") or {}
+    ativos = [x for x in pads.get("padroes", []) if x["ativo"]]
+    for x in ativos[:3]:
+        L.append(f"Padrão confirmado ativo: quando **{' + '.join(x['condicoes'])}**, o pregão {x['alvo_nome']} — "
+                 f"**{x['direcao']} em {x['chance'] * 100:.0f}%** de {x['n']} casos fora da amostra.")
+    if pads.get("testados") and not pads.get("confirmados"):
+        L.append(f"Padrões: {pads['testados']} combinações de informações testadas e nenhuma se repetiu de forma confiável — "
+                 "não há atalho estatístico nos cruzamentos diários.")
     rv = a.get("reversao")
     if rv and (rv["estado"] or rv["sinal"]):
         h = rv["historico"]["30 min"]

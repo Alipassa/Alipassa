@@ -111,6 +111,18 @@ ruído. Por isso o alerta de reversão só dispara quando o sinal prova vantagem
 Prever a DIREÇÃO do mini índice a partir de agora com 80 % de acerto não é alcançável de forma honesta. O que o painel faz é
 separar o que é confiável (abertura, choques, faixas) do que é cara-ou-coroa, e avisar quando algo raro e forte acontece.
 
+## Descoberta de padrões (`patterns.py`)
+
+O painel cruza as informações duas a duas — exterior, descolamento Brasil × exterior, momento, RSI, distância da média, VIX,
+dólar/bolsa, volatilidade, dia forte, sequências, dia da semana, gap de abertura, primeira hora — e procura combinações que
+mudem a chance de o pregão fechar em alta. Para não confundir coincidência com padrão: a combinação precisa aparecer nos
+primeiros 60 % do histórico (≥ 40 casos, ≥ 7 pontos acima ou abaixo da taxa-base) e se repetir nos 40 % finais, que a busca não
+viu. Só os confirmados aparecem, com a chance medida na confirmação, marcados como "ativo agora" quando as condições valem. O
+bloco informa quantas combinações foram testadas e quantas passariam por puro acaso.
+
+Com os dados públicos (16/11/2026): 239 combinações testadas, nenhuma confirmada. Refaça com `--fonte mt5` para usar o
+histórico do MetaTrader, que também habilita os padrões de dentro do pregão (gap × primeira hora → resto do dia).
+
 ## Opinião sobre os dados (sem custo)
 
 Dois botões no painel, os dois usando só o que já está na tela:
