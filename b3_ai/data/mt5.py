@@ -199,6 +199,22 @@ class MT5Feed:
         self._stock_pos = (self._stock_pos + done) % n
         return self._stocks
 
+    def series(self, symbol: str, tf: str = "15", n: int = 12000) -> list[tuple]:
+        """Barras de um símbolo qualquer do terminal (ações, índice cheio...), no mesmo formato das demais. [] se não houver."""
+        with self.lock:
+            if not self.connected:
+                self.connect()
+            try:
+                self.mt5.symbol_select(symbol, True)
+                rates = self.mt5.copy_rates_from_pos(symbol, getattr(self.mt5, TF[tf]), 0, n)
+            except Exception:  # noqa: BLE001
+                return []
+            if rates is None or len(rates) == 0:
+                return []
+            shift = self.offset_h * 3600
+            return [(float(r["time"]) - shift, float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
+                     float(r["real_volume"]) or float(r["tick_volume"])) for r in rates]
+
     def sp_intraday(self) -> dict[str, list[tuple]]:
         """Micro S&P 500 da B3 (WSP) em tempo real, 5 e 15 min: líder do exterior no intraday, no mesmo relógio do WIN."""
         forced = self.env.get("MT5_WSP")

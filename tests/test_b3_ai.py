@@ -634,3 +634,18 @@ class GapFiltersTest(unittest.TestCase):
         self.assertEqual(F["escolhido"], "abriu FORA da faixa da véspera")
         self.assertTrue(F["melhorou"])
         self.assertGreater(F["resultado"]["acerto_bruto"], 0.9)
+
+
+class GapAssetsTest(unittest.TestCase):
+    def test_portfolio_counts_days_not_trades(self):
+        """Dez ações com o mesmo resultado no mesmo dia valem como UM dia, não como dez operações independentes."""
+        from b3_ai import simulate
+        day = lambda i: {"ts": i * 86400.0, "dia": i, "ret": 0.01 if i % 2 else -0.01, "ctx": 2}   # noqa: E731
+        assets = [{"custo": 0.1, "corte": 0.0, "rows": [day(i) for i in range(40)]} for _ in range(10)]
+        p = simulate.portfolio(assets, lambda c: c == 2)
+        self.assertEqual((p["dias"], p["ops"]), (40, 400))
+        self.assertAlmostEqual(p["liq"], -0.1, places=6)                 # média zero menos o custo
+        self.assertIn("não distinguível", p["veredito"])
+        r = simulate.summarize_pct("x", [0.01] * 40, 0.1)
+        self.assertAlmostEqual(r["liq"], 0.9)
+        self.assertEqual(simulate.portfolio([], lambda c: True)["dias"], 0)

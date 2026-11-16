@@ -583,3 +583,129 @@ def run_gap(engine: "Engine") -> str:
           "- A simulação entra exatamente no preço de abertura com 1 tick de escorregamento; na prática o primeiro negócio pode sair pior.",
           "- Resultado passado não garante resultado futuro.", ""]
     return "\n".join(L)
+
+
+# ============================================================================= devolução de gap em outros ativos
+COST_PCT_STOCK = float(os.environ.get("B3AI_CUSTO_ACAO_PCT", "0.10"))      # % por operação completa em ações (taxas + 1 tick por lado)
+FUTURES = {"IND": (["IND@", "IND$N", "IND$"], "BMFBOVESPA:IND1!", "Índice cheio (IND)", 0.01),
+           "WSP": (["WSP@", "WSP$N", "WSP$"], "BMFBOVESPA:WSP1!", "Micro S&P 500 (WSP)", 0.02),
+           "WIN": (["WIN@", "WIN$N", "WIN$"], "BMFBOVESPA:WIN1!", "Mini índice (WIN) — referência", 0.0075)}
+
+
+def summarize_pct(name: str, rets: list[float], cost_pct: float) -> dict:
+    """Como `summarize`, mas em % do preço (para comparar ativos de tamanhos diferentes). rets em fração (0,01 = 1 %)."""
+    n = len(rets)
+    if not n:
+        return {"nome": name, "n": 0}
+    net = [r * 100 - cost_pct for r in rets]
+    mean, sd = st.mean(net), st.std(net)
+    se = sd / math.sqrt(n) if n > 1 else 0.0
+    lo, hi = mean - 1.96 * se, mean + 1.96 * se
+    return {"nome": name, "n": n, "acerto": sum(1 for r in rets if r > 0) / n, "liq": mean, "ic": (lo, hi), "total": sum(net),
+            "veredito": "✅ lucro comprovado" if lo > 0 and n >= 30 else "❌ prejuízo comprovado" if hi < 0 and n >= 30 else "⚪ não distinguível de zero"}
+
+
+def asset_gap_rows(name: str, bars: list[tuple], cost_pct: float) -> Optional[dict]:
+    """Fichas de gap de um ativo, com o resultado em % e o contexto (0, 1 ou 2)."""
+    T = gap_trades(bars)
+    if len(T) < 20:
+        return None
+    rows = [{"ts": t["ts"], "dia": int(t["ts"] // 86400), "ret": gap_result(t) / t["op"], "ctx": gap_context(t)} for t in T]
+    half = rows[len(rows) // 2]["ts"]
+    out = {"nome": name, "custo": cost_pct, "rows": rows, "corte": half}
+    for key, f in (("todos", lambda c: True), ("forte", lambda c: c == 2), ("fraco", lambda c: c == 1), ("nenhum", lambda c: c == 0)):
+        out[key] = summarize_pct(name, [r["ret"] for r in rows if f(r["ctx"])], cost_pct)
+        out[key + "_1a"] = summarize_pct(name, [r["ret"] for r in rows if f(r["ctx"]) and r["ts"] < half], cost_pct)
+        out[key + "_2a"] = summarize_pct(name, [r["ret"] for r in rows if f(r["ctx"]) and r["ts"] >= half], cost_pct)
+    return out
+
+
+def portfolio(assets: list[dict], pick, second_half_only: bool = False) -> dict:
+    """Junta as operações de vários ativos. Vários ativos abrem com gap no MESMO dia e andam juntos, então a estatística é
+    feita por DIA (média das operações do dia) — senão o intervalo de confiança sairia estreito demais."""
+    by_day: dict[int, list[float]] = {}
+    n_ops = 0
+    for a in assets:
+        for r in a["rows"]:
+            if pick(r["ctx"]) and (not second_half_only or r["ts"] >= a["corte"]):
+                by_day.setdefault(r["dia"], []).append(r["ret"] * 100 - a["custo"])
+                n_ops += 1
+    days = [st.mean(v) for _, v in sorted(by_day.items())]
+    n = len(days)
+    if not n:
+        return {"dias": 0, "ops": 0}
+    mean, sd = st.mean(days), st.std(days)
+    se = sd / math.sqrt(n) if n > 1 else 0.0
+    lo, hi = mean - 1.96 * se, mean + 1.96 * se
+    return {"dias": n, "ops": n_ops, "acerto_dias": sum(1 for d in days if d > 0) / n, "liq": mean, "ic": (lo, hi),
+            "veredito": "✅ lucro comprovado" if lo > 0 and n >= 30 else "❌ prejuízo comprovado" if hi < 0 and n >= 30 else "⚪ não distinguível de zero"}
+
+
+def run_gap_assets(engine: "Engine", n_stocks: int = 30) -> str:
+    """Devolução de gap nas ações mais negociadas, no índice cheio e no micro S&P — com o MetaTrader (--fonte mt5) ou a série pública."""
+    from .data import tradingview as tv
+    s = engine.cycle()
+    liquid = sorted((p for p in engine.b3.get("papeis", []) if p["k"] == "Ação" and p["c"] is not None), key=lambda p: -p["v"])[:n_stocks]
+    tickers = [p["t"] for p in liquid]
+    series: list[tuple[str, list[tuple], float]] = []
+    fonte = "MetaTrader 5" if engine.mt5 is not None and engine.rt else "série pública (15 min de atraso; ~180 pregões)"
+    if engine.mt5 is not None and engine.rt:
+        for key, (cands, _tv, nome, c) in FUTURES.items():
+            for sym in cands:
+                b = engine.mt5.series(sym, "15")
+                if len(b) > 2000:
+                    series.append((nome, b, c))
+                    break
+        for tk in tickers:
+            b = engine.mt5.series(tk, "15")
+            if len(b) > 2000:
+                series.append((tk, b, COST_PCT_STOCK))
+    else:
+        reqs = [(v[1], "15", 5000) for v in FUTURES.values()] + [(f"BMFBOVESPA:{tk}", "15", 5000) for tk in tickers]
+        h = tv.fetch_history(reqs)
+        for key, (_c, sym, nome, c) in FUTURES.items():
+            if len(h.get((sym, "15"), [])) > 2000:
+                series.append((nome, h[(sym, "15")], c))
+        for tk in tickers:
+            b = h.get((f"BMFBOVESPA:{tk}", "15"), [])
+            if len(b) > 2000:
+                series.append((tk, b, COST_PCT_STOCK))
+    A = [x for x in (asset_gap_rows(nm, b, c) for nm, b, c in series) if x]
+    when = datetime.fromtimestamp(s["atualizado"], tz=BRT).strftime("%d/%m/%Y %H:%M")
+    f2 = lambda v: "—" if v is None else f"{v:+.3f}%".replace(".", ",")  # noqa: E731
+    L = ["# Devolução de gap em outros ativos", "", f"Gerado em {when} (Brasília) · fonte das barras: {fonte}", "",
+         "Mesma regra do mini índice: gap grande na abertura (≥ 0,75 desvio dos 40 pregões anteriores) → entra contra o gap, sai no "
+         f"fechamento. Resultado em % do preço por operação, já com custo (ações {COST_PCT_STOCK:.2f}% por operação completa — ajuste em "
+         "B3AI_CUSTO_ACAO_PCT; futuros conforme o tick). \"Forte\" = abriu fora da faixa de ontem E ontem fechou na direção do gap.", "",
+         f"{len(A)} ativos com histórico suficiente (de {len(series)} lidos).", "",
+         "## Por ativo", "",
+         "| Ativo | Gaps | Acerto | Média (todos) | Sinal forte: nº | Acerto | Média | 1ª metade | 2ª metade | Sem contexto: média |",
+         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    for a in sorted(A, key=lambda a: -(a["forte"].get("liq") or -9)):
+        t, fz, nn = a["todos"], a["forte"], a["nenhum"]
+        L.append(f"| {a['nome']} | {t['n']} | {t['acerto'] * 100:.0f}% | {f2(t['liq'])} | {fz.get('n', 0)} | "
+                 + (f"{fz['acerto'] * 100:.0f}% | **{f2(fz['liq'])}**" if fz.get("n") else "— | —")
+                 + f" | {f2(a['forte_1a'].get('liq'))} | {f2(a['forte_2a'].get('liq'))} | {f2(nn.get('liq'))} |")
+    stocks = [a for a in A if a["custo"] == COST_PCT_STOCK]
+    L += ["", "## Carteira de ações (estatística por dia, para não contar em dobro dias em que várias ações abrem com gap)", "",
+          "| Regra | Dias com operação | Operações | Dias no lucro | Média por dia | Intervalo 95% | Conclusão |", "| --- | ---: | ---: | ---: | ---: | --- | --- |"]
+    for nome, pick in (("todo gap grande", lambda c: True), ("sinal forte (os dois contextos)", lambda c: c == 2),
+                       ("sinal fraco (um contexto)", lambda c: c == 1), ("sem contexto", lambda c: c == 0)):
+        P = portfolio(stocks, pick)
+        L.append(f"| {nome} | {P['dias']} | {P['ops']} | " + (f"{P['acerto_dias'] * 100:.0f}% | **{f2(P['liq'])}** | {f2(P['ic'][0])} a {f2(P['ic'][1])} | {P['veredito']} |"
+                                                              if P["dias"] else "— | — | — | sem operações |"))
+    # escolha na 1ª metade → conferência na 2ª
+    chosen = [a for a in stocks if a["forte_1a"].get("n", 0) >= 5 and a["forte_1a"]["liq"] > 0]
+    P2 = portfolio(chosen, lambda c: c == 2, second_half_only=True)
+    Pall = portfolio(stocks, lambda c: c == 2, second_half_only=True)
+    L += ["", "## Teste honesto: ações escolhidas na 1ª metade, resultado na 2ª", "",
+          f"Ações em que o sinal forte deu lucro na 1ª metade do histórico (≥ 5 operações): {', '.join(a['nome'] for a in chosen) or 'nenhuma'}.", ""]
+    for nome, P in (("essas ações, só na 2ª metade", P2), ("todas as ações, sinal forte, só na 2ª metade", Pall)):
+        L.append(f"- **{nome}**: " + (f"{P['dias']} dias, {P['ops']} operações, {P['acerto_dias'] * 100:.0f}% dos dias no lucro, média de {f2(P['liq'])} por dia "
+                                      f"(intervalo {f2(P['ic'][0])} a {f2(P['ic'][1])}) — {P['veredito']}" if P["dias"] else "sem operações"))
+    L += ["", "## Como ler", "",
+          "- Em ações, 0,10% de 1 lote de R$ 4.500 são R$ 4,50: compare a média em % com esse custo e com o seu capital.",
+          "- Data ex-dividendo cria um gap de queda que NÃO devolve; essas ocorrências estão misturadas aqui e pesam contra a estratégia.",
+          "- Com dezenas de ativos testados, alguns vão parecer bons por sorte. Vale a carteira e o teste da 2ª metade, não a melhor linha.",
+          "- Resultado passado não garante resultado futuro.", ""]
+    return "\n".join(L)

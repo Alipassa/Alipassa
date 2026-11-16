@@ -129,6 +129,18 @@ def cmd_gap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gap_ativos(args: argparse.Namespace) -> int:
+    from . import simulate
+    text = simulate.run_gap_assets(_engine(args), args.acoes)
+    os.makedirs(args.saida, exist_ok=True)
+    path = os.path.join(args.saida, "gap_ativos_" + datetime.now(tz=BRT).strftime("%Y%m%d_%H%M") + ".md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text)
+    print(f"\nestudo gravado em {path}")
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -169,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
     gp = sub.add_parser("gap", help="estudo de uso da estratégia de devolução de gap (tamanho, direção, saída, stop, entrada)")
     gp.add_argument("--saida", default="relatorios")
     gp.set_defaults(func=cmd_gap)
+    ga = sub.add_parser("gap-ativos", help="testa a devolução de gap nas ações mais negociadas, no índice cheio e no micro S&P")
+    ga.add_argument("--saida", default="relatorios")
+    ga.add_argument("--acoes", type=int, default=30, help="quantas ações (as mais negociadas)")
+    ga.set_defaults(func=cmd_gap_ativos)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)
