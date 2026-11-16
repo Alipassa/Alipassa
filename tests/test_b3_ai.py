@@ -456,7 +456,7 @@ class SimulationTest(unittest.TestCase):
         rnd = random.Random(71)
         bars, px, t = [], 100000.0, 1_700_000_000
         for day in range(80):
-            big = day >= 45 and day % 5 == 0
+            big = day % 5 == 0                                        # sempre há gaps grandes na janela: os pequenos ficam de fora
             op = px * (1 + (0.02 if big else rnd.gauss(0, 0.001)))           # gap grande para cima...
             cl = op * (1 - 0.01) if big else op * (1 + rnd.gauss(0, 0.002))  # ...que devolve metade até o fechamento
             for i in range(8):
