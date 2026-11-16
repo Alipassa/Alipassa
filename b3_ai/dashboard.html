@@ -88,8 +88,10 @@ canvas{width:100%;height:100%;display:block}
 #tip{position:fixed;pointer-events:none;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:12px;display:none;z-index:9;box-shadow:0 4px 14px rgba(0,0,0,.3)}
 input,select{font:inherit;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
 .warnbox{background:var(--surface);border:1px solid var(--warn);color:var(--warn);border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:13px}
-.alert{border-radius:12px;padding:12px 14px;margin-bottom:10px;border:2px solid;display:flex;gap:12px;align-items:center}
-.alert .ic{font-size:28px;line-height:1} .alert b{font-size:16px} .alert .small{opacity:.9}
+.alert{border-radius:10px;padding:7px 12px;margin-bottom:6px;border:1px solid;display:flex;gap:10px;align-items:flex-start}
+.alert .ic{font-size:18px;line-height:1.3} .alert b{font-size:14px} .alert .small{opacity:.9}
+.alert details{flex:1;min-width:0} .alert summary{cursor:pointer;list-style:none} .alert summary::-webkit-details-marker{display:none}
+.alert summary::after{content:" ▸ detalhes";font-size:11px;color:var(--muted);font-weight:400} .alert details[open] summary::after{content:" ▾"}
 .alert.d{border-color:var(--down);background:var(--down-bg)} .alert.u{border-color:var(--up);background:var(--up-bg)}
 .alert.n{border-color:var(--warn);background:var(--surface)}
 .alert.hot{animation:pulse 1.2s ease-in-out infinite} @keyframes pulse{50%{box-shadow:0 0 0 6px var(--down-bg)}}
@@ -393,7 +395,8 @@ let seenAlerts=new Set(),notifOn=false;
 function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=880;g.gain.value=.15;o.start();setTimeout(()=>{o.frequency.value=660},250);setTimeout(()=>{o.stop();c.close()},600)}catch(e){}}
 function renderAlerts(){
   const A=S.alertas||[],L=S.limiares||{alerta:.9,atencao:.75};
-  $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${a.nivel==="ALERTA"?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":a.nivel==="ESTRATÉGIA"?"🎯":"⚠️"}</span><div><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></div></div>`).join("");
+  const open=new Set([...document.querySelectorAll("#alerts details[open]")].map(e=>e.dataset.k));
+  $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${a.nivel==="ALERTA"||a.nivel==="ESTRATÉGIA"?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":a.nivel==="ESTRATÉGIA"?"🎯":"⚠️"}</span><details data-k="${esc(a.chave)}" ${open.has(a.chave)||a.nivel==="ESTRATÉGIA"?"open":""}><summary><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b></summary><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></details></div>`).join("");
   document.title=(A.some(a=>a.nivel==="ALERTA")?"🚨 ALERTA · ":"")+"B3 AI — Mini Índice";
   A.filter(a=>(a.nivel==="ALERTA"||a.nivel==="REVERSÃO"||a.nivel==="ESTRATÉGIA")&&!seenAlerts.has(a.chave)).forEach(a=>{seenAlerts.add(a.chave);if(notifOn){beep();try{if(Notification.permission==="granted")new Notification("B3 AI — "+a.nivel,{body:a.titulo})}catch(e){}}});
   $("btnNotif").title=`Alerta a partir de ${Math.round(L.alerta*100)}% · atenção a partir de ${Math.round(L.atencao*100)}%`+(L.telegram?" · Telegram ativo":" · Telegram não configurado");
@@ -552,7 +555,7 @@ function paintLive(){
   const age=Date.now()/1000-LIVE.lido; if(age>10){$("pxLive").textContent="";return}
   const d=dec(),ref=A.fech_ant; $("px").textContent=nf(t.ultimo,d);
   if(ref)$("pxChg").innerHTML=chg((t.ultimo/ref-1)*100);
-  $("pxLive").innerHTML=`<span class="up">●</span> ao vivo ${new Date(LIVE.lido*1000).toLocaleTimeString("pt-BR")} · compra ${nf(t.bid,d)} · venda ${nf(t.ask,d)}`;
+  $("pxLive").innerHTML=`<span class="up">●</span> ao vivo ${new Date(LIVE.lido*1000).toLocaleTimeString("pt-BR")}`+(t.bid>0&&t.ask>0?` · compra ${nf(t.bid,d)} · venda ${nf(t.ask,d)}`:"");
 }
 async function loadTick(){
   if(!S||!S.tempo_real)return;

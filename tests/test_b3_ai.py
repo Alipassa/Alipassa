@@ -223,8 +223,15 @@ class NewFeaturesTest(unittest.TestCase):
 
     def test_alert_fires_only_above_threshold(self):
         from b3_ai import alerts
-        mk = lambda p: {"WIN": {"nome": "Mini Índice", "data": "2026-11-13", "prob": [  # noqa: E731
-            {"p_alta": 1 - p, "p_queda": p, "horizonte": "Fecho de hoje", "alvo": "a", "confianca": "c", "nota": ""}]}}
+        mk = lambda p, tipo="abertura": {"WIN": {"nome": "Mini Índice", "data": "2026-11-13", "prob": [  # noqa: E731
+            {"p_alta": 1 - p, "p_queda": p, "horizonte": "Abertura", "tipo": tipo, "alvo": "a", "confianca": "c", "nota": ""}]}}
+        self.assertEqual(alerts.from_rows(mk(0.95, "sessao")), [])            # "Fecho de hoje" não vira aviso no topo
+        many = [{"ativo": "WIN", "prob": 0.84, "titulo": "Mini Índice: emergentes em queda — x", "texto": "t."},
+                {"ativo": "WIN", "prob": 0.93, "titulo": "Mini Índice: dólar disparando — y", "texto": "t."},
+                {"ativo": "WDO", "prob": 0.88, "titulo": "Mini Dólar: emergentes em queda — z", "texto": "t."}]
+        best = alerts.strongest_shock(many)
+        self.assertEqual(sorted((b["ativo"], b["prob"]) for b in best), [("WDO", 0.88), ("WIN", 0.93)])
+        self.assertIn("emergentes em queda", next(b for b in best if b["ativo"] == "WIN")["texto"])
         self.assertEqual(alerts.from_rows(mk(0.60)), [])
         self.assertEqual(alerts.from_rows(mk(0.80))[0]["nivel"], "ATENÇÃO")
         a = alerts.from_rows(mk(0.93))[0]

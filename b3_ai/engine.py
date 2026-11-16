@@ -799,8 +799,10 @@ class Engine:
             dd["WIN"].x["CROSS"] = [cm.get(x, 0.0) for x in dd["WIN"].dates]
         al = alerts.from_rows(ativos)
         ev_cache = self._daily_cache.setdefault("shocks", {})
+        shocks: list[dict] = []
         for k, d in dd.items():
-            al += alerts.from_shocks(k, TARGETS[k].name, d, is_open or bool(d.fresh), ev_cache)
+            shocks += alerts.from_shocks(k, TARGETS[k].name, d, is_open or bool(d.fresh), ev_cache)
+        al += alerts.strongest_shock(shocks)
         for k, a in ativos.items():
             rv = a.get("reversao")
             h = rv["historico"]["30 min"] if rv else None

@@ -37,6 +37,8 @@ def from_rows(ativos: dict) -> list[dict]:
     out = []
     for k, a in ativos.items():
         for r in a["prob"]:
+            if r.get("tipo") == "sessao":
+                continue      # "Fecho de hoje" só repete que o dia já andou; fica no quadro, não vira aviso no topo
             p, lado = (r["p_alta"], 1) if r["p_alta"] >= r["p_queda"] else (r["p_queda"], -1)
             lv = level(p)
             if not lv:
@@ -79,6 +81,22 @@ def from_shocks(key: str, nome: str, d: "M.DailyData", live: bool, cache: dict, 
                              f"{ev['seguinte_media']:+.2f}% no seguinte (alta em {ev['seguinte_pct_alta'] * 100:.0f}% deles).",
                     "chave": f"{key}|choque|{fk}|{direction}|{d.dates[-1]}"})
     return out
+
+
+def strongest_shock(items: list[dict]) -> list[dict]:
+    """Vários choques costumam dizer a mesma coisa (dólar, VIX e emergentes andam juntos): fica só o mais forte por ativo,
+    com os demais citados em uma linha."""
+    best: dict[str, dict] = {}
+    rest: dict[str, list[str]] = {}
+    for x in sorted(items, key=lambda x: -x["prob"]):
+        if x["ativo"] not in best:
+            best[x["ativo"]] = dict(x)
+        else:
+            rest.setdefault(x["ativo"], []).append(x["titulo"].split(": ", 1)[-1].split(" — ")[0])
+    for k, x in best.items():
+        if rest.get(k):
+            x["texto"] += " Também: " + "; ".join(rest[k]) + "."
+    return list(best.values())
 
 
 def telegram_config() -> tuple[str, str]:
