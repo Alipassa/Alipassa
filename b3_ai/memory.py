@@ -73,7 +73,7 @@ class Memory:
     def recent(self, limit: int = 30) -> list[dict]:
         with self.lock:
             rows = self.db.execute("SELECT asset, horizon, made_ts, due_key, ref, p_up, outcome, final FROM forecasts "
-                                   "WHERE horizon IN ('Diário','Semanal') ORDER BY made_ts DESC LIMIT ?", (limit,)).fetchall()
+                                   "WHERE horizon IN ('Diário','Semanal','Devolução de gap') ORDER BY made_ts DESC LIMIT ?", (limit,)).fetchall()
         return [{"ativo": r[0], "horizonte": r[1], "feita": r[2], "alvo": r[3], "ref": r[4], "p_up": r[5],
                  "resultado": r[6], "final": r[7]} for r in rows]
 

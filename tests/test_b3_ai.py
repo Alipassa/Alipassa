@@ -498,3 +498,24 @@ class PatternsTest(unittest.TestCase):
         out = self._data(False)
         self.assertGreater(out["testados"], 50)
         self.assertLessEqual(out["confirmados"], 3)          # ruído puro: no máximo um punhado por acaso
+
+
+class GapStateTest(unittest.TestCase):
+    def test_gap_today_and_fade_side(self):
+        from b3_ai import simulate
+        rnd = random.Random(91)
+        bars, px, t = [], 100000.0, 1_700_000_000
+        for day in range(60):
+            op = px * (1 + rnd.gauss(0, 0.002))
+            for i in range(8):
+                c = op * (1 + rnd.gauss(0, 0.001))
+                bars.append((t + day * 86400 + i * 900, op if i == 0 else c, max(op, c), min(op, c), c, 1.0))
+            px = bars[-1][4]
+        today = bars + [(t + 60 * 86400, px * 1.02, px * 1.021, px * 1.019, px * 1.02, 1.0)]     # hoje abriu 2 % acima
+        g = simulate.gap_state(today, True)
+        self.assertTrue(g["grande"])
+        self.assertEqual(g["lado"], -1)                               # gap de alta → devolução = venda
+        self.assertAlmostEqual(g["gap_pct"], 2.0, places=1)
+        self.assertIsNone(simulate.gap_state(bars, False))            # pregão fechado: não há gap de hoje
+        calm = bars + [(t + 60 * 86400, px * 1.0001, px * 1.0002, px, px * 1.0001, 1.0)]
+        self.assertEqual(simulate.gap_state(calm, True)["lado"], 0)   # gap pequeno: sem operação

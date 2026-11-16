@@ -140,6 +140,8 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
     <div class="kv" id="pxKv"></div>
     <h3>Tendência — dia · semana · mês</h3>
     <div id="trend"></div>
+    <h3>Estratégia: devolução de gap na abertura</h3>
+    <div class="small" id="gapBox"></div>
     <h3>Extremos de compra e venda (5 min)</h3>
     <div class="small" id="rev"></div>
     <div class="small muted" id="intraRead" style="margin-top:6px"></div>
@@ -322,6 +324,14 @@ function render(){
       (V.recentes.length?'<br><span class="muted">Últimos sinais: '+V.recentes.slice(-5).map(r=>`<span class="chip"><span class="${r.lado>0?"up":"down"}">${r.lado>0?"▲":"▼"}</span> ${hhmm(r.ts)} · ${nf(r.preco,d)}</span>`).join("")+"</span>":"");
   }else $("rev").innerHTML='<span class="muted">sem barras intraday</span>';
   renderPatterns(A);
+  const G=A.gap, money2=v=>v==null?"—":"R$ "+nf(v,2);
+  if(G&&G.historico&&G.historico.n){const H=G.historico,T2=G.hoje;
+    $("gapBox").innerHTML=(T2?(T2.grande?`<b class="${T2.lado>0?"up":"down"}">${T2.lado>0?"▲ COMPRA":"▼ VENDA"} contra o gap</b> — abriu com gap de ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio${Math.abs(T2.z)>=2?"s":""}); saída no fechamento.`
+        :`Gap de hoje: ${pct(T2.gap_pct)} (${nf(Math.abs(T2.z),1)} desvio) — abaixo do limite de 0,75, <b>sem operação</b>.`)
+      :'<span class="muted">Aguardando a abertura do pregão para medir o gap.</span>')+
+      `<br><span class="muted">Simulação com custos: ${H.n} operações · ${nf(H.acerto_bruto*100,0)}% de acerto · média <b class="${cls(H.liq_medio)}">${money2(H.liq_medio)}</b> por contrato (intervalo ${money2(H.ic[0])} a ${money2(H.ic[1])}) · pior queda ${money2(H.pior_queda)} · ${esc(H.veredito)}</span>`+
+      (G.comprovado?"":'<br><span class="chip">⚪ sem lucro comprovado neste ativo: não gera sinal</span>');
+  }else $("gapBox").innerHTML='<span class="muted">histórico intraday insuficiente para simular</span>';
   // ---- quadro
   $("boardName").textContent=A.nome;
   $("board").innerHTML=rows.map(r=>`<button class="hz ${r.horizonte===hz?"sel":""}" data-h="${esc(r.horizonte)}"><div class="t">${esc(r.horizonte)}</div><div class="a">${esc(r.alvo)}</div>
@@ -372,9 +382,9 @@ let seenAlerts=new Set(),notifOn=false;
 function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=880;g.gain.value=.15;o.start();setTimeout(()=>{o.frequency.value=660},250);setTimeout(()=>{o.stop();c.close()},600)}catch(e){}}
 function renderAlerts(){
   const A=S.alertas||[],L=S.limiares||{alerta:.9,atencao:.75};
-  $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${a.nivel==="ALERTA"?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":"⚠️"}</span><div><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></div></div>`).join("");
+  $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${a.nivel==="ALERTA"?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":a.nivel==="ESTRATÉGIA"?"🎯":"⚠️"}</span><div><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></div></div>`).join("");
   document.title=(A.some(a=>a.nivel==="ALERTA")?"🚨 ALERTA · ":"")+"B3 AI — Mini Índice";
-  A.filter(a=>(a.nivel==="ALERTA"||a.nivel==="REVERSÃO")&&!seenAlerts.has(a.chave)).forEach(a=>{seenAlerts.add(a.chave);if(notifOn){beep();try{if(Notification.permission==="granted")new Notification("B3 AI — "+a.nivel,{body:a.titulo})}catch(e){}}});
+  A.filter(a=>(a.nivel==="ALERTA"||a.nivel==="REVERSÃO"||a.nivel==="ESTRATÉGIA")&&!seenAlerts.has(a.chave)).forEach(a=>{seenAlerts.add(a.chave);if(notifOn){beep();try{if(Notification.permission==="granted")new Notification("B3 AI — "+a.nivel,{body:a.titulo})}catch(e){}}});
   $("btnNotif").title=`Alerta a partir de ${Math.round(L.alerta*100)}% · atenção a partir de ${Math.round(L.atencao*100)}%`+(L.telegram?" · Telegram ativo":" · Telegram não configurado");
 }
 function renderAgenda(){

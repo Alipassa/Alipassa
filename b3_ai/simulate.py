@@ -17,9 +17,13 @@ import math
 import os
 from datetime import datetime
 
+from typing import TYPE_CHECKING, Optional
+
 from . import model as M, stats as st
-from .engine import Engine
 from .model import BRT
+
+if TYPE_CHECKING:
+    from .engine import Engine
 
 POINT = {"WIN": 0.20, "WDO": 10.0}
 TICK = {"WIN": 5.0, "WDO": 0.5}
@@ -113,7 +117,25 @@ def gap_fade(bars: list[tuple], stop_sigma: float = 0.0, min_sessions: int = 40)
     return out
 
 
-def run(engine: Engine) -> str:
+GAP_LIMIAR = 0.75        # gap "grande": ≥ 0,75 desvio dos gaps dos 40 pregões anteriores
+
+
+def gap_state(bars15: list[tuple], is_open: bool, min_sessions: int = 40) -> Optional[dict]:
+    """Gap do pregão de hoje (se aberto) em relação ao histórico recente, e o lado da operação de devolução."""
+    ss = [x for x in M.sessions_gap(bars15, 2 * 3600) if len(x) >= 1]
+    done = [x for x in (ss[:-1] if is_open else ss) if len(x) >= 5]
+    if not is_open or len(done) < min_sessions or not ss:
+        return None
+    gaps = [done[j][0][1] / done[j - 1][-1][4] - 1 for j in range(len(done) - min_sessions + 2, len(done))]
+    gsd = st.std(gaps) or 1e-9
+    op, prev = ss[-1][0][1], done[-1][-1][4]
+    gap = op / prev - 1
+    z = gap / gsd
+    return {"gap_pct": gap * 100, "z": z, "abertura": op, "fech_ant": prev, "grande": abs(z) >= GAP_LIMIAR,
+            "lado": (-1 if gap > 0 else 1) if abs(z) >= GAP_LIMIAR else 0, "barras_hoje": len(ss[-1])}
+
+
+def run(engine: "Engine") -> str:
     s = engine.cycle()
     dres, ires, intr = engine._daily_cache["res"], engine._intra_cache["res"], engine._sim_intr
     rows = []
@@ -294,7 +316,7 @@ def extremes_study(asset: str, bars: list[tuple]) -> list[dict]:
     ]
 
 
-def run_extremes(engine: Engine) -> str:
+def run_extremes(engine: "Engine") -> str:
     s = engine.cycle()
     intr = engine._sim_intr
     when = datetime.fromtimestamp(s["atualizado"], tz=BRT).strftime("%d/%m/%Y %H:%M")

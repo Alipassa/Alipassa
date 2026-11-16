@@ -111,6 +111,25 @@ ruído. Por isso o alerta de reversão só dispara quando o sinal prova vantagem
 Prever a DIREÇÃO do mini índice a partir de agora com 80 % de acerto não é alcançável de forma honesta. O que o painel faz é
 separar o que é confiável (abertura, choques, faixas) do que é cara-ou-coroa, e avisar quando algo raro e forte acontece.
 
+## Simulação com custos e estratégia de devolução de gap
+
+`python -m b3_ai simulacao` transforma cada previsão em operações de 1 mini contrato, com 2 ticks de escorregamento e custo fixo.
+Medido em 16/11/2026 com o histórico do MetaTrader da XP:
+
+| Estratégia | Operações | Acerto | Ganho médio líquido | Conclusão |
+| --- | ---: | ---: | ---: | --- |
+| Mini índice — devolução de gap grande, sem stop (entra na abertura contra o gap, sai no fechamento) | 99 | 61,6 % | R$ 82,80 (R$ 9,56 a R$ 156,03) | ✅ lucro com evidência; pior queda R$ 1.510,80 |
+| Mini índice — idem com stop de 0,5 desvio diário | 99 | 44,4 % | R$ 36,11 | não distinguível de zero |
+| Mini dólar — diário com convicção | 162 | 59,3 % | R$ 45,28 (R$ −35,44 a R$ 126,01) | não distinguível de zero |
+| Mini dólar — 5 min com convicção | 487 | 56,1 % | R$ −9,27 | ❌ prejuízo: o custo come a vantagem |
+| Mini dólar — devolução de gap | 107 | 49,5 % | R$ −17,62 | não distinguível de zero |
+
+A devolução de gap do mini índice é a única com evidência de lucro; o painel mostra o gap do dia, dispara o alerta 🎯 ESTRATÉGIA
+quando ele é grande e registra cada ocorrência como operação de papel no placar ao vivo. Ressalvas: ~14 meses de histórico,
+várias estratégias testadas (uma pode passar por sorte), abertura com escorregamento maior que o simulado e, sem stop, perda
+grande num dia de tendência. `python -m b3_ai extremos` testa os extremos de compra e venda com filtros (dia lateral, fora da
+faixa, S2/R2), escolhendo o parâmetro na 1ª metade do histórico e medindo na 2ª.
+
 ## Descoberta de padrões (`patterns.py`)
 
 O painel cruza as informações duas a duas — exterior, descolamento Brasil × exterior, momento, RSI, distância da média, VIX,

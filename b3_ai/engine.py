@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from . import alerts, market_b3, model as M, news_ai, opinion, patterns, stats as st, technical as T
+from . import alerts, market_b3, model as M, news_ai, opinion, patterns, simulate, stats as st, technical as T
 from .data import bcb, calendar as cal, focus, mt5 as mt5feed, news, tradingview as tv, yahoo
 from .data.http import DataError
 from .memory import Memory
@@ -238,6 +238,33 @@ class Engine:
                 eventos.append({**e, "dias": dias, "quando": "HOJE" if dias == 0 else "amanhã" if dias == 1 else f"em {dias} dias",
                                 "dia_semana": fmt_date(e["data"])})
         return {"eventos": eventos, "fomc_historico": estudo, "erros": cached.get("erros", [])}
+
+    def _gap(self, k: str, bars15: list[tuple], is_open: bool, d: "M.DailyData", complete: bool) -> Optional[dict]:
+        """Estratégia de devolução de gap: resultado histórico com custos (refeito 1× por pregão), gap de hoje e registro de
+        cada ocorrência na memória (operação de papel), conferida no fechamento."""
+        cache = self._daily_cache.setdefault("gap", {})
+        if k not in cache:
+            try:
+                cache[k] = simulate.summarize("devolução de gap grande", k, simulate.gap_fade(bars15))
+            except Exception:  # noqa: BLE001
+                cache[k] = {"n": 0}
+        hist = cache[k]
+        out: dict = {"historico": {x: hist.get(x) for x in ("n", "acerto_bruto", "liq_medio", "ic", "total", "pior_queda", "seq_perdas", "veredito")},
+                     "comprovado": bool(hist.get("n") and "lucro comprovado" in (hist.get("veredito") or "")), "hoje": None}
+        try:
+            st_now = simulate.gap_state(bars15, is_open)
+        except Exception:  # noqa: BLE001
+            st_now = None
+        if st_now:
+            out["hoje"] = st_now
+            if st_now["grande"]:           # registra a operação de papel uma vez por pregão: entrada = abertura, lado = contra o gap
+                self.mem.record(k, "Devolução de gap", d.dates[-1], st_now["abertura"], 0.75 if st_now["lado"] > 0 else 0.25)
+        closes = dict(zip(d.dates, d.close))
+        last_done = d.dates[-1] if complete else d.dates[-2]
+        for due, ref, _p in self.mem.pending(k, "Devolução de gap"):
+            if due in closes and due <= last_done:
+                self.mem.resolve(k, "Devolução de gap", due, closes[due], ref)
+        return out
 
     def _patterns(self, k: str, bars15: list[tuple], is_open: bool) -> Optional[dict]:
         """Padrões confirmados: os diários (refeitos quando o pregão muda) + os de dentro do pregão (a cada 20 min)."""
@@ -705,6 +732,7 @@ class Engine:
                 "prob": rows, "confronto": conf, "niveis": lv, "intraday": self._intraday_read(intr[(k, "5")]),
                 "analogo": r["analog"], "sigma_dia_pct": sig_d * 100,
                 "padroes": self._patterns(k, intr[(k, "15")], is_open),
+                "gap": self._gap(k, intr[(k, "15")], is_open, d, complete),
                 "tendencias": T.trends(bars, intr[(k, "5")]), "reversao": T.reversal_read(intr[(k, "5")]),
                 "candles": {"D1": [list(b[:5]) for b in bars[-180:]],
                             "M15": [list(b[:5]) for b in intr[(k, "15")][-160:]],
@@ -747,6 +775,18 @@ class Engine:
                            "texto": f"RSI {rv['rsi']:.0f}, {rv['vwap_z']:+.1f} desvios do VWAP. Nos últimos {h['n']} sinais iguais, o preço foi na "
                                     f"direção do sinal em {(h['acerto'] or 0) * 100:.0f}% das vezes em 30 min.",
                            "chave": f"{k}|rev|{int(rv['ultimo_ts']) // 1800}"})
+        for k, a in ativos.items():
+            g = a.get("gap") or {}
+            hoje, hs = g.get("hoje"), g.get("historico") or {}
+            if hoje and hoje["grande"] and g.get("comprovado"):
+                lado = hoje["lado"]
+                al.append({"nivel": "ESTRATÉGIA", "lado": lado, "ativo": k, "prob": hs.get("acerto_bruto") or 0.0, "horizonte": "devolução de gap",
+                           "titulo": f"{a['nome']}: gap grande de {hoje['gap_pct']:+.2f}% na abertura — devolução de gap aponta "
+                                     f"{'COMPRA' if lado > 0 else 'VENDA'} até o fechamento",
+                           "texto": f"Abriu em {hoje['abertura']:,.0f} contra {hoje['fech_ant']:,.0f} do fechamento anterior. Na simulação com custos: "
+                                    f"{hs['n']} operações, {hs['acerto_bruto'] * 100:.0f}% de acerto, média de R$ {hs['liq_medio']:,.2f} por contrato, "
+                                    f"pior queda acumulada de R$ {hs['pior_queda']:,.2f}. Sem stop, a perda num dia de tendência pode ser grande.",
+                           "chave": f"{k}|gapfade|{a['data']}"})
         agenda = self._agenda(dd["WIN"])
         notes += agenda["erros"][:2]
         for e in agenda["eventos"]:
@@ -760,7 +800,7 @@ class Engine:
                                     "do quadro tendem a ser estreitas demais nesse dia." + extra,
                            "chave": f"agenda|{e['tipo']}|{e['data']}"})
         state["agenda"] = agenda
-        al.sort(key=lambda x: (x["nivel"] != "ALERTA", x["nivel"] != "AGENDA", -x["prob"]))
+        al.sort(key=lambda x: (x["nivel"] not in ("ALERTA", "ESTRATÉGIA"), x["nivel"] != "AGENDA", -x["prob"]))
         for x in al:
             if x["nivel"] == "ALERTA" and x["chave"] not in self._alerts_sent:
                 self._alerts_sent.add(x["chave"])
