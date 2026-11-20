@@ -1,6 +1,6 @@
 """Banco Central e movimentos bruscos: alerta e registro (nunca envia ordens).
 
-1. COMUNICADO DO BANCO CENTRAL: a cada 3 min lê fontes públicas (Google Notícias numa busca dedicada e o feed de mercados
+1. COMUNICADO DO BANCO CENTRAL: a cada 5 min lê fontes públicas (Google Notícias numa busca dedicada e o feed de mercados
    do InfoMoney) atrás de manchetes de intervenção no câmbio — leilão de dólar à vista, swap, linha, compra de dólar — e
    classifica o tipo e o efeito esperado no dólar. Fontes públicas chegam DEPOIS dos terminais profissionais (Sisbacen,
    Broadcast, Bloomberg): o registro guarda o horário da notícia e o da detecção, para medir esse atraso.
@@ -26,7 +26,7 @@ from . import stats as st
 
 Z_TRIGGER = 4.0                     # desvios de 1 min (escalados por √minutos) para "movimento brusco"
 COOLDOWN = 600                      # um alerta de movimento brusco por ativo a cada 10 min
-NEWS_EVERY, NEWS_BACKOFF = 180, 900
+NEWS_EVERY, NEWS_BACKOFF = 300, 900
 NEWS_MAX_AGE = 45 * 60              # notícia mais velha que isso na primeira leitura não vira evento (o movimento já passou)
 CLUSTER = 24 * 3600                 # janela de leitura das manchetes; o agrupamento é por DIA (horário de Brasília)
 
@@ -159,11 +159,13 @@ class Watcher:
         errs = []
         try:
             for scope, url, src in feeds:
+                if "news.google.com" in url and not news.google_ok():
+                    continue                     # o Google recusou há pouco: espera a pausa, usa só o InfoMoney
                 try:
                     items = news.parse_rss(news.fetch(url, timeout=10, retries=0), scope, src)
                 except DataError as e:
                     errs.append(str(e))
-                    if "429" in str(e):
+                    if news.google_refused(e):
                         self.news_next = now + NEWS_BACKOFF
                     continue
                 for it in sorted(items, key=lambda x: x["ts"]):

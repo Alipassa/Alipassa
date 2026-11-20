@@ -24,13 +24,33 @@ DIRECT = [("BR", "https://www.infomoney.com.br/mercados/feed/", "InfoMoney"),
           ("BR", "https://g1.globo.com/rss/g1/economia/", "G1 Economia")]
 
 
+# Google Notícias recusa rajadas (HTTP 429). A pausa vale para TODO o painel (notícias gerais e monitor do Banco Central).
+GOOGLE_PAUSE = 15 * 60
+_google_until = 0.0
+
+
+def google_ok() -> bool:
+    import time as _t
+    return _t.time() >= _google_until
+
+
+def google_refused(err: object) -> bool:
+    """Marca a pausa se o erro for recusa do Google. Devolve True se foi."""
+    global _google_until
+    import time as _t
+    if "429" in str(err):
+        _google_until = _t.time() + GOOGLE_PAUSE
+        return True
+    return False
+
+
 def _feeds() -> list[tuple[str, str, str]]:
-    out = []
+    out = list(DIRECT)                   # feeds diretos primeiro: chegam rápido e não sofrem com as recusas do Google
     for q in QUERIES_BR:
         out.append(("BR", GN.format(q=urllib.parse.quote(q + " when:7d"), hl="pt-BR", gl="BR", ceid="BR:pt-419"), ""))
     for q in QUERIES_INT:
         out.append(("INT", GN.format(q=urllib.parse.quote(q + " when:7d"), hl="en-US", gl="US", ceid="US:en"), ""))
-    return out + DIRECT
+    return out
 
 
 def _tag(block: str, name: str) -> str:
@@ -84,17 +104,16 @@ def fetch_news(max_age_days: float = 7.0, previous: list[dict] | None = None, pa
     import time as _time
     errors: list[str] = []
     items: list[dict] = list(previous or [])
-    google_blocked = False
     for scope, url, src in _feeds():
         is_google = "news.google.com" in url
-        if is_google and google_blocked:
+        if is_google and not google_ok():
             continue
         try:
             items += parse_rss(fetch(url, timeout=12, retries=0), scope, src)
         except DataError as e:
             errors.append(str(e))
-            if is_google and "429" in str(e):
-                google_blocked = True
+            if is_google:
+                google_refused(e)
         _time.sleep(pause if is_google else 0.1)
     for it in items:
         it.pop("_cls", None)              # classificação é refeita sobre o conjunto mesclado

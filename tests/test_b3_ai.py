@@ -792,3 +792,31 @@ class DistantOpeningAlertTest(unittest.TestCase):
         self.assertIn("(seg 23/11)", a["titulo"])
         row["nota"] = "x"
         self.assertEqual(alerts.from_rows({"WIN": {"nome": "Mini Índice (WIN)", "data": "d", "prob": [row]}})[0]["nivel"], "ALERTA")
+
+
+class GooglePauseTest(unittest.TestCase):
+    def test_refusal_pauses_google_for_everyone_and_direct_feeds_go_first(self):
+        from b3_ai.data import news as N
+        from b3_ai.data.http import DataError
+        self.assertIn("infomoney", N._feeds()[0][1])                          # diretos primeiro
+        calls = []
+
+        def fake(url, **kw):
+            calls.append(url)
+            if "news.google.com" in url:
+                raise DataError("HTTP 429 em https://news.google.com/rss/search")
+            from email.utils import formatdate
+            return ("<rss><channel><item><title>Ibovespa sobe 1 por cento - Valor</title><link>https://x</link>"
+                    "<pubDate>" + formatdate() + "</pubDate></item></channel></rss>")
+
+        orig, N._google_until = N.fetch, 0.0
+        N.fetch = fake
+        try:
+            items, _ = N.fetch_news(pause=0)
+            self.assertTrue(items)                                            # os feeds diretos responderam
+            self.assertFalse(N.google_ok())                                   # pausa global ligada pelo 429
+            n = len(calls)
+            N.fetch_news(pause=0)
+            self.assertFalse(any("news.google.com" in c for c in calls[n:]))  # durante a pausa, nada vai para o Google
+        finally:
+            N.fetch, N._google_until = orig, 0.0

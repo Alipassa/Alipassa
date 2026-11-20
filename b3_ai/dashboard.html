@@ -431,7 +431,7 @@ function renderPatterns(A){
 }
 function renderBC(){
   const E=S.bc_eventos||[],R=S.bc_resumo||[],p2=v=>v==null?"—":`<span class="${cls(v)}">${v>0?"+":""}${nf(v*100,2)}%</span>`;
-  const head=`<div class="small muted" style="margin-bottom:8px">O painel procura a cada 3 min comunicados de intervenção do Banco Central no câmbio (Google Notícias e InfoMoney) e, com o MetaTrader, verifica a cada segundo se o mini índice ou o mini dólar andou 4 desvios em 1 a 3 minutos. Cada evento é gravado com o que o ativo fez depois. <b>Nenhuma ordem é enviada.</b></div>`;
+  const head=`<div class="small muted" style="margin-bottom:8px">O painel procura a cada 5 min comunicados de intervenção do Banco Central no câmbio (Google Notícias e InfoMoney) e, com o MetaTrader, verifica a cada segundo se o mini índice ou o mini dólar andou 4 desvios em 1 a 3 minutos. Cada evento é gravado com o que o ativo fez depois. <b>Nenhuma ordem é enviada.</b></div>`;
   const sum=R.length?"<table><tr><th class='l'>Origem</th><th>Eventos</th><th>+1 min</th><th>+5 min</th><th>+15 min</th><th>+60 min</th><th>Atraso da notícia</th></tr>"+R.map(r=>{const c=x=>x&&x.n?`${x.media>0?"+":""}${nf(x.media,2)}% <span class="faint">(${nf(x.a_favor*100,0)}% a favor, ${x.n})</span>`:"—";
       return `<tr><td class="l">${esc(r.origem)}</td><td class="num">${r.n}</td><td>${c(r.d1)}</td><td>${c(r.d5)}</td><td>${c(r.d15)}</td><td>${c(r.d60)}</td><td class="num">${r.atraso_min==null?"—":nf(r.atraso_min,0)+" min"}</td></tr>`}).join("")+
       "</table><div class='small muted'>Movimento DEPOIS da detecção, na direção esperada (para notícia: o efeito do tipo de leilão; para movimento brusco: a direção do próprio movimento). Só com algumas dezenas de eventos a média diz alguma coisa.</div>":"";

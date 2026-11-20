@@ -151,7 +151,7 @@ faixa, S2/R2), escolhendo o parâmetro na 1ª metade do histórico e medindo na 
 
 ## Banco Central e movimentos bruscos (`bc_watch.py`)
 
-Alerta e registro — **nunca envia ordens**. A cada 3 minutos o painel procura, em fontes públicas (Google Notícias e InfoMoney),
+Alerta e registro — **nunca envia ordens**. A cada 5 minutos o painel procura, em fontes públicas (Google Notícias e InfoMoney),
 manchetes de intervenção do Banco Central no câmbio e classifica o tipo: venda de dólar à vista, swap cambial, leilão de linha
 (dólar tende a cair), compra de dólar ou swap reverso (dólar tende a subir). Várias matérias sobre o mesmo episódio viram um único
 evento por dia. Com o MetaTrader, verifica a cada segundo se o mini índice ou o mini dólar andou 4 desvios da volatilidade de 1

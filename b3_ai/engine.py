@@ -150,18 +150,20 @@ class Engine:
             return None, []
         ts, cached, _errs = self._news_cache
         now = time.time()
-        if (cached is None or now - self._news_try > 1800) and not self._news_busy:
+        every = 1800 if cached is not None else 300          # sem nenhuma notícia ainda: tenta de novo em 5 min, não em 30
+        if now - self._news_try > every and not self._news_busy:
             self._news_busy, self._news_try = True, now
-            first = cached is None
+            first = cached is None and not self._news_items
             th = threading.Thread(target=self._news_refresh, name="b3-ai-noticias", daemon=True)
             th.start()
             if first:
-                th.join(40)                   # só a primeira leitura espera (para o painel já abrir com notícias)
+                th.join(25)                   # só a primeira leitura espera um pouco (para o painel já abrir com notícias)
             ts, cached, _errs = self._news_cache
         notes = []
-        if cached is None:
-            notes.append("notícias ainda indisponíveis (a fonte recusou os pedidos; nova tentativa em 30 min)")
-        elif now - ts > 3 * 3600:
+        if cached is None and not self._news_busy:
+            wait = max(1, round((self._news_try + every - now) / 60))
+            notes.append(f"notícias indisponíveis no momento (as fontes não responderam); nova tentativa em {wait} min")
+        elif cached is not None and now - ts > 3 * 3600:
             notes.append(f"notícias desatualizadas: última leitura há {(now - ts) / 3600:.0f} h (a fonte está recusando os pedidos)")
         return cached, notes
 
