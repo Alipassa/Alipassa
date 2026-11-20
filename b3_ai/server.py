@@ -47,6 +47,9 @@ class Service:
                 t = feed.ticks()
                 if t:
                     self.live = {"ativos": t, "lido": time.time()}
+                    for k, q in t.items():                       # movimento brusco: checado a cada segundo
+                        if self.engine.bc.on_tick(k, q.get("ultimo")):
+                            self.wake.set()                      # recalcula o painel já, para o alerta aparecer
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(1.0)

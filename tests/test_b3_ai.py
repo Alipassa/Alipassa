@@ -700,3 +700,68 @@ class NewsThrottleTest(unittest.TestCase):
             N.fetch = orig
         self.assertEqual([i["title"] for i in items], ["Ibovespa sobe 1%"])          # a leitura anterior não se perde
         self.assertEqual(sum("news.google.com" in c for c in calls), 1)              # parou no primeiro 429 do Google
+
+
+class BCWatchTest(unittest.TestCase):
+    def _mem(self):
+        d = tempfile.mkdtemp()
+        return Memory(os.path.join(d, "t.db"))
+
+    def test_classify_headlines(self):
+        from b3_ai import bc_watch as B
+        self.assertEqual(B.classify("Banco Central fará leilão de venda de dólar à vista de US$ 2 bi")["efeito"], -1)
+        self.assertEqual(B.classify("BC anuncia leilão de swap cambial tradicional")["tipo"], "swap cambial")
+        self.assertEqual(B.classify("BC fará leilão de swap reverso")["efeito"], 1)
+        self.assertEqual(B.classify("Banco Central faz leilão de linha com compromisso de recompra")["efeito"], -1)
+        self.assertEqual(B.classify("Banco Central anuncia compra de dólares no mercado à vista")["efeito"], 1)
+        self.assertIsNone(B.classify("Copom mantém Selic em 13,75%"))
+        self.assertIsNone(B.classify("Dólar sobe com cenário fiscal"))
+        self.assertEqual(B.classify("Dólar dispara e Banco Central faz leilão de dólares")["efeito"], -1)
+        self.assertEqual(B.classify("BC intervém, mas dólar fica acima de R$ 5,90")["efeito"], 0)
+
+    def test_sudden_move_triggers_once_and_is_recorded(self):
+        from b3_ai import bc_watch as B
+        m = self._mem()
+        w = B.Watcher(m)
+        w.set_sigma("WDO", 0.0005)                       # 0,05 % por barra de 5 min → ~0,022 % por minuto
+        t0 = 1_800_000_000.0
+        rnd = random.Random(5)
+        for i in range(400):                             # ruído normal: nada dispara
+            self.assertIsNone(w.on_tick("WDO", 5700 * (1 + rnd.gauss(0, 0.00003)), t0 + i))
+        ev = None
+        for j in range(60):                              # queda de 0,3 % em 1 minuto (~13 desvios)
+            ev = ev or w.on_tick("WDO", 5700 * (1 - 0.003 * (j + 1) / 60), t0 + 400 + j)
+        self.assertIsNotNone(ev)
+        self.assertEqual((ev["efeito"], ev["ativo"]), (-1, "WDO"))
+        self.assertIsNone(w.on_tick("WDO", 5600, t0 + 470))                       # cooldown: não repete
+        for j in range(200):                                                       # +1 e +3 min preenchidos pelos ticks
+            w.on_tick("WDO", 5682.9, t0 + 470 + j)
+        rec = m.bc_events()[0]
+        self.assertIsNotNone(rec["d1"])
+        self.assertIsNotNone(rec["d3"])
+        m.close()
+
+    def test_news_event_dedupe_and_bar_followup(self):
+        from b3_ai import bc_watch as B
+        m = self._mem()
+        w = B.Watcher(m)
+        now = 1_800_000_000.0
+        w.set_price("WDO", 5700.0)
+        it = {"title": "Banco Central fará leilão de venda de dólar à vista", "ts": now - 120, "source": "Valor", "link": "x"}
+        w._news_event(it, B.classify(it["title"]), now)
+        w._news_event(it, B.classify(it["title"]), now + 180)                      # mesma notícia lida de novo
+        later = {"title": "Dólar sobe mesmo com intervenção do BC", "ts": now + 3600, "source": "G1", "link": "y"}
+        w._news_event(later, B.classify(later["title"]), now + 3700)               # outra matéria do mesmo episódio
+        self.assertEqual(len(m.bc_events()), 1)
+        old = {"title": "BC vende US$ 1 bilhão em leilão à vista", "ts": now - 30 * 3600, "source": "x", "link": "z"}
+        w._news_event(old, B.classify(old["title"]), now)                          # notícia velha: não vira evento
+        self.assertEqual(len(m.bc_events()), 1)
+        bars = [(now - 600 + i * 300, 5700, 5701, 5650, 5700 - 5 * i, 1.0) for i in range(30)]
+        w.fill_from_bars({"WDO": bars})
+        ev = m.bc_events()[0]
+        self.assertLess(ev["d15"], 0)                                              # o dólar caiu depois
+        s = B.summary(m.bc_events())[0]
+        self.assertGreater(s["d15"]["media"], 0)                                   # a favor do efeito esperado (queda)
+        self.assertAlmostEqual(s["atraso_min"], 2.0)
+        self.assertIn("Banco Central", B.report(m.bc_events()))
+        m.close()

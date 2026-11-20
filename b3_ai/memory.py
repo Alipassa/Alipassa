@@ -19,6 +19,9 @@ class Memory:
                                              PRIMARY KEY (sym, tf, ts));
             CREATE TABLE IF NOT EXISTS forecasts (asset TEXT, horizon TEXT, made_ts REAL, due_key TEXT, ref REAL, p_up REAL,
                                                   outcome INTEGER, final REAL, PRIMARY KEY (asset, horizon, due_key));
+            CREATE TABLE IF NOT EXISTS bc_events (chave TEXT PRIMARY KEY, ts REAL, ts_pub REAL, origem TEXT, ativo TEXT, tipo TEXT,
+                                                  efeito INTEGER, titulo TEXT, link TEXT, fonte TEXT, preco REAL, antes5 REAL, z REAL,
+                                                  d1 REAL, d3 REAL, d5 REAL, d15 REAL, d30 REAL, d60 REAL);
         """)
 
     # ------------------------------------------------------------------ barras
@@ -76,6 +79,36 @@ class Memory:
                                    "WHERE horizon IN ('Diário','Semanal','Devolução de gap','Gap com contexto','Gap sinal forte') ORDER BY made_ts DESC LIMIT ?", (limit,)).fetchall()
         return [{"ativo": r[0], "horizonte": r[1], "feita": r[2], "alvo": r[3], "ref": r[4], "p_up": r[5],
                  "resultado": r[6], "final": r[7]} for r in rows]
+
+    # ------------------------------------------------------------------ Banco Central e movimentos bruscos
+    BC_COLS = ("chave", "ts", "ts_pub", "origem", "ativo", "tipo", "efeito", "titulo", "link", "fonte", "preco", "antes5", "z",
+               "d1", "d3", "d5", "d15", "d30", "d60")
+
+    def add_bc_event(self, ev: dict) -> bool:
+        """Grava o evento; False se a mesma chave já existia (a mesma notícia lida de novo)."""
+        cols = [c for c in self.BC_COLS if c in ev]
+        with self.lock:
+            cur = self.db.execute(f"INSERT OR IGNORE INTO bc_events ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                                  [ev[c] for c in cols])
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def set_bc(self, chave: str, col: str, value: float) -> None:
+        if col not in ("d1", "d3", "d5", "d15", "d30", "d60"):
+            raise ValueError(col)
+        with self.lock:
+            self.db.execute(f"UPDATE bc_events SET {col}=? WHERE chave=? AND {col} IS NULL", (value, chave))
+            self.db.commit()
+
+    def update_bc_type(self, chave: str, tipo: str, efeito: int) -> None:
+        with self.lock:
+            self.db.execute("UPDATE bc_events SET tipo=?, efeito=? WHERE chave=?", (tipo, efeito, chave))
+            self.db.commit()
+
+    def bc_events(self, limit: int = 50) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(f"SELECT {','.join(self.BC_COLS)} FROM bc_events ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(zip(self.BC_COLS, r)) for r in rows]
 
     def close(self) -> None:
         with self.lock:

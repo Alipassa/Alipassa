@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from . import alerts, market_b3, model as M, news_ai, opinion, patterns, simulate, stats as st, technical as T
+from . import alerts, bc_watch, market_b3, model as M, news_ai, opinion, patterns, simulate, stats as st, technical as T
 from .data import bcb, calendar as cal, focus, mt5 as mt5feed, news, tradingview as tv, yahoo
 from .data.http import DataError
 from .memory import Memory
@@ -59,6 +59,7 @@ class Engine:
         self._agenda_cache: tuple[float, dict] = (0.0, {})
         self._open_cache: tuple[float, dict] = (0.0, {})
         self.mem = Memory(f"{data_dir}/b3_ai.db")
+        self.bc = bc_watch.Watcher(self.mem)
         self.with_news = with_news
         self.lock = threading.Lock()
         self.state: dict = {"ok": False, "erro": "primeira leitura em andamento…"}
@@ -721,6 +722,19 @@ class Engine:
                     o = "WDO" if k == "WIN" else "WIN"
                     r["f"] = M.intraday_features(intr[(k, tf)], intr[("ES", tf)], intr[(o, tf)])
         ires = self._intra_cache["res"]
+        # Banco Central e movimentos bruscos: volatilidade de 1 min, preço atual, notícias e acompanhamento dos eventos
+        for k in TARGETS:
+            ir = ires.get((k, "5"))
+            if ir:
+                self.bc.set_sigma(k, ir["f"]["sigma"][-1])
+            if intr[(k, "5")]:
+                self.bc.set_price(k, ((self.rt.get("ticks") or {}).get(k) or {}).get("ultimo") or intr[(k, "5")][-1][4])
+        if self.with_news:
+            self.bc.poll_news()
+        try:
+            self.bc.fill_from_bars({k: intr[(k, "5")] for k in TARGETS})
+        except Exception:  # noqa: BLE001 — o registro é um extra
+            pass
 
         self._step("montando o quadro de probabilidades")
         opening = self._opening() if not is_open else {}
@@ -867,11 +881,34 @@ class Engine:
                                     "do quadro tendem a ser estreitas demais nesse dia." + extra,
                            "chave": f"agenda|{e['tipo']}|{e['data']}"})
         state["agenda"] = agenda
-        al.sort(key=lambda x: (x["nivel"] not in ("ALERTA", "ESTRATÉGIA"), x["nivel"] != "AGENDA", -x["prob"]))
         for x in al:
             if x["nivel"] == "ALERTA" and x["chave"] not in self._alerts_sent:
                 self._alerts_sent.add(x["chave"])
                 alerts.send_telegram(f"🚨 B3 AI — {x['titulo']}\n{x['texto']}\nProbabilidade histórica, não garantia.")
+        for ev in self.mem.bc_events(10):
+            age = now - ev["ts"]
+            if age > 15 * 60:
+                continue
+            lag = (ev["ts"] - ev["ts_pub"]) / 60 if ev.get("ts_pub") else 0
+            antes = f" O ativo já tinha andado {ev['antes5'] * 100:+.2f}% nos 5 minutos anteriores." if ev.get("antes5") is not None else ""
+            if ev["origem"].startswith("Banco Central"):
+                efe = {-1: "dólar tende a CAIR", 1: "dólar tende a SUBIR", 0: "efeito incerto"}[ev["efeito"] or 0]
+                al.append({"nivel": "BANCO CENTRAL", "lado": ev["efeito"] or 0, "ativo": "WDO", "prob": 1.0, "horizonte": "intervenção",
+                           "titulo": f"Mini Dólar (WDO): Banco Central — {ev['tipo']} ({efe})",
+                           "texto": f"“{ev['titulo']}”{' — ' + ev['fonte'] if ev.get('fonte') else ''}. Notícia publicada há {(now - ev['ts_pub']) / 60:.0f} min, "
+                                    f"detectada {lag:.0f} min depois.{antes} Fontes públicas chegam depois dos terminais profissionais: "
+                                    "parte do movimento pode já ter acontecido. Nenhuma ordem é enviada; o evento foi registrado.",
+                           "chave": ev["chave"]})
+            else:
+                al.append({"nivel": "MOVIMENTO BRUSCO", "lado": ev["efeito"], "ativo": ev["ativo"], "prob": 1.0, "horizonte": "preço",
+                           "titulo": ev["titulo"],
+                           "texto": f"Detectado às {brt(ev['ts']).strftime('%H:%M:%S')} pelo preço do MetaTrader.{antes} Pode ser intervenção do "
+                                    "Banco Central, notícia ou ordem grande. Nenhuma ordem é enviada; o evento foi registrado para medir o que acontece depois.",
+                           "chave": ev["chave"]})
+        prio = {"BANCO CENTRAL": 0, "MOVIMENTO BRUSCO": 0, "ESTRATÉGIA": 1, "ALERTA": 2, "AGENDA": 3}
+        al.sort(key=lambda x: (prio.get(x["nivel"], 4), -x["prob"]))
+        state["bc_eventos"] = self.mem.bc_events(15)
+        state["bc_resumo"] = bc_watch.summary(self.mem.bc_events(500))
         state["alertas"] = al
         state["limiares"] = {"alerta": alerts.ALERTA, "atencao": alerts.ATENCAO, "telegram": all(alerts.telegram_config())}
         state["sintese"] = self._synthesis(state)

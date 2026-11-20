@@ -141,6 +141,15 @@ def cmd_gap_ativos(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_leiloes(args: argparse.Namespace) -> int:
+    from . import bc_watch
+    e = _engine(args)
+    e.cycle()
+    text = bc_watch.report(e.mem.bc_events(500))
+    print(text)
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -185,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     ga.add_argument("--saida", default="relatorios")
     ga.add_argument("--acoes", type=int, default=30, help="quantas ações (as mais negociadas)")
     ga.set_defaults(func=cmd_gap_ativos)
+    lb = sub.add_parser("leiloes", help="registro de intervenções do Banco Central e movimentos bruscos, com o que o mercado fez depois")
+    lb.set_defaults(func=cmd_leiloes)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)

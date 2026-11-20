@@ -149,6 +149,20 @@ várias estratégias testadas (uma pode passar por sorte), abertura com escorreg
 grande num dia de tendência. `python -m b3_ai extremos` testa os extremos de compra e venda com filtros (dia lateral, fora da
 faixa, S2/R2), escolhendo o parâmetro na 1ª metade do histórico e medindo na 2ª.
 
+## Banco Central e movimentos bruscos (`bc_watch.py`)
+
+Alerta e registro — **nunca envia ordens**. A cada 3 minutos o painel procura, em fontes públicas (Google Notícias e InfoMoney),
+manchetes de intervenção do Banco Central no câmbio e classifica o tipo: venda de dólar à vista, swap cambial, leilão de linha
+(dólar tende a cair), compra de dólar ou swap reverso (dólar tende a subir). Várias matérias sobre o mesmo episódio viram um único
+evento por dia. Com o MetaTrader, verifica a cada segundo se o mini índice ou o mini dólar andou 4 desvios da volatilidade de 1
+minuto em 1, 2 ou 3 minutos — o sinal mais rápido, que não depende de notícia. Cada evento é gravado com o preço na detecção,
+quanto o ativo já tinha andado nos 5 minutos anteriores e o que fez em +1, +3, +5, +15, +30 e +60 minutos
+(`python -m b3_ai leiloes` mostra o registro). Fontes públicas chegam depois dos terminais profissionais (Sisbacen, Broadcast,
+Bloomberg); o registro mede esse atraso.
+
+Exemplo de 19/11/2026: o BC vendeu US$ 1 bilhão em leilão extraordinário à vista perto do meio-dia; o dólar "chegou a zerar a alta",
+mas fechou em alta de mais de 1 %, a R$ 5,93, o maior valor em 19 meses. As primeiras manchetes públicas saíram entre 12h15 e 12h35.
+
 ## Descoberta de padrões (`patterns.py`)
 
 O painel cruza as informações duas a duas — exterior, descolamento Brasil × exterior, momento, RSI, distância da média, VIX,

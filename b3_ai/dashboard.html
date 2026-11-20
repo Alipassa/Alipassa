@@ -80,6 +80,7 @@ td.l,th.l{text-align:left}
 .tile b{font-size:22px;font-weight:800;display:block;font-variant-numeric:tabular-nums}
 .tile>span{font-size:11.5px;color:var(--muted);display:block}
 ul.read{margin:0;padding-left:18px} ul.read li{margin:6px 0}
+#bcBox a{color:var(--text);text-decoration:underline;text-decoration-color:var(--faint)}
 .news li{margin:7px 0} .news a{color:var(--text);text-decoration:none} .news a:hover{text-decoration:underline}
 .theme{border-left:3px solid var(--border);padding:4px 0 4px 10px;margin:10px 0}
 .theme.u{border-color:var(--up)} .theme.d{border-color:var(--down)}
@@ -190,6 +191,11 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Notícias e deduções</h2><span class="sp"></span><div class="seg" id="newsSeg"></div></div>
     <div id="newsBody" style="margin-top:8px"></div>
   </div>
+</section>
+
+<section class="card">
+  <h2>Banco Central e movimentos bruscos — registro</h2>
+  <div id="bcBox"></div>
 </section>
 
 <section class="card">
@@ -363,7 +369,7 @@ function render(){
   // ---- leitura
   $("read").innerHTML=(S.leitura||[]).map(x=>`<li>${esc(x)}</li>`).join("");
   paintLive();
-  renderAlerts(); renderSynth(); renderAI(); renderAgenda(); renderAnalysts();
+  renderAlerts(); renderSynth(); renderAI(); renderBC(); renderAgenda(); renderAnalysts();
   renderNews(); renderIntl(); renderB3Summary();
   $("foot").textContent=S.aviso_legal;
 }
@@ -396,9 +402,9 @@ function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)
 function renderAlerts(){
   const A=S.alertas||[],L=S.limiares||{alerta:.9,atencao:.75};
   const open=new Set([...document.querySelectorAll("#alerts details[open]")].map(e=>e.dataset.k));
-  $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${a.nivel==="ALERTA"||a.nivel==="ESTRATÉGIA"?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":a.nivel==="ESTRATÉGIA"?"🎯":"⚠️"}</span><details data-k="${esc(a.chave)}" ${open.has(a.chave)||a.nivel==="ESTRATÉGIA"?"open":""}><summary><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b></summary><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></details></div>`).join("");
+  $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${["ALERTA","ESTRATÉGIA","BANCO CENTRAL","MOVIMENTO BRUSCO"].includes(a.nivel)?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":a.nivel==="ESTRATÉGIA"?"🎯":a.nivel==="BANCO CENTRAL"?"🏦":a.nivel==="MOVIMENTO BRUSCO"?"⚡":"⚠️"}</span><details data-k="${esc(a.chave)}" ${open.has(a.chave)||a.nivel==="ESTRATÉGIA"?"open":""}><summary><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b></summary><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></details></div>`).join("");
   document.title=(A.some(a=>a.nivel==="ALERTA")?"🚨 ALERTA · ":"")+"B3 AI — Mini Índice";
-  A.filter(a=>(a.nivel==="ALERTA"||a.nivel==="REVERSÃO"||a.nivel==="ESTRATÉGIA")&&!seenAlerts.has(a.chave)).forEach(a=>{seenAlerts.add(a.chave);if(notifOn){beep();try{if(Notification.permission==="granted")new Notification("B3 AI — "+a.nivel,{body:a.titulo})}catch(e){}}});
+  A.filter(a=>["ALERTA","REVERSÃO","ESTRATÉGIA","BANCO CENTRAL","MOVIMENTO BRUSCO"].includes(a.nivel)&&!seenAlerts.has(a.chave)).forEach(a=>{seenAlerts.add(a.chave);if(notifOn){beep();try{if(Notification.permission==="granted")new Notification("B3 AI — "+a.nivel,{body:a.titulo})}catch(e){}}});
   $("btnNotif").title=`Alerta a partir de ${Math.round(L.alerta*100)}% · atenção a partir de ${Math.round(L.atencao*100)}%`+(L.telegram?" · Telegram ativo":" · Telegram não configurado");
 }
 function renderAgenda(){
@@ -422,6 +428,17 @@ function renderPatterns(A){
     (P.padroes.length?`<div class="scroll" style="max-height:360px"><table><tr><th>Situação</th><th class="l">Quando acontece…</th><th class="l">o pregão…</th><th>Chance medida</th><th>Casos</th><th>Na descoberta</th><th>Sem o padrão</th></tr>${P.padroes.slice(0,20).map(row).join("")}</table></div>`
      :'<div class="muted small">Nenhuma combinação se repetiu de forma confiável. Isso é informação: nestes dados, cruzar exterior, tendência, VIX, dólar, gap e dia da semana não dá uma chance melhor que a taxa-base — o painel não vai inventar um padrão.</div>')+
     '<div class="small muted" style="margin-top:6px">Um padrão só entra aqui se aparecer nos primeiros 60% do histórico e se repetir nos 40% finais. “Chance medida” é a dos 40% finais.</div>';
+}
+function renderBC(){
+  const E=S.bc_eventos||[],R=S.bc_resumo||[],p2=v=>v==null?"—":`<span class="${cls(v)}">${v>0?"+":""}${nf(v*100,2)}%</span>`;
+  const head=`<div class="small muted" style="margin-bottom:8px">O painel procura a cada 3 min comunicados de intervenção do Banco Central no câmbio (Google Notícias e InfoMoney) e, com o MetaTrader, verifica a cada segundo se o mini índice ou o mini dólar andou 4 desvios em 1 a 3 minutos. Cada evento é gravado com o que o ativo fez depois. <b>Nenhuma ordem é enviada.</b></div>`;
+  const sum=R.length?"<table><tr><th class='l'>Origem</th><th>Eventos</th><th>+1 min</th><th>+5 min</th><th>+15 min</th><th>+60 min</th><th>Atraso da notícia</th></tr>"+R.map(r=>{const c=x=>x&&x.n?`${x.media>0?"+":""}${nf(x.media,2)}% <span class="faint">(${nf(x.a_favor*100,0)}% a favor, ${x.n})</span>`:"—";
+      return `<tr><td class="l">${esc(r.origem)}</td><td class="num">${r.n}</td><td>${c(r.d1)}</td><td>${c(r.d5)}</td><td>${c(r.d15)}</td><td>${c(r.d60)}</td><td class="num">${r.atraso_min==null?"—":nf(r.atraso_min,0)+" min"}</td></tr>`}).join("")+
+      "</table><div class='small muted'>Movimento DEPOIS da detecção, na direção esperada (para notícia: o efeito do tipo de leilão; para movimento brusco: a direção do próprio movimento). Só com algumas dezenas de eventos a média diz alguma coisa.</div>":"";
+  const list=E.length?"<h3>Últimos eventos</h3><div class='scroll' style='max-height:320px'><table><tr><th class='l'>Detectado</th><th class='l'>Origem</th><th class='l'>Evento</th><th>Preço</th><th>5 min antes</th><th>+1</th><th>+5</th><th>+15</th><th>+60</th></tr>"+
+      E.map(e=>`<tr><td class="l">${hhmm(e.ts)}</td><td class="l">${esc(e.origem)}</td><td class="l" style="white-space:normal">${e.link?`<a href="${esc(safeUrl(e.link))}" target="_blank" rel="noopener noreferrer">${esc(e.titulo)}</a>`:esc(e.titulo)} <span class="chip">${esc(e.tipo)}</span></td><td class="num">${e.preco==null?"—":nf(e.preco,e.ativo==="WIN"?0:1)}</td><td>${p2(e.antes5)}</td><td>${p2(e.d1)}</td><td>${p2(e.d5)}</td><td>${p2(e.d15)}</td><td>${p2(e.d60)}</td></tr>`).join("")+"</table></div>"
+      :'<div class="muted small">Nenhum evento registrado ainda. Eles aparecem aqui conforme acontecem.</div>';
+  $("bcBox").innerHTML=head+sum+list;
 }
 function renderSynth(){
   const Y=S.sintese; if(!Y){$("synth").innerHTML='<span class="muted">sem dados</span>';return}
