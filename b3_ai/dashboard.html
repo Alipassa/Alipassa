@@ -43,6 +43,8 @@ section{margin-top:12px}
 .side.u{background:var(--up-bg);border:1px solid var(--up)} .side.d{background:var(--down-bg);border:1px solid var(--down)}
 .side .lbl{font-size:13px;font-weight:800;letter-spacing:1px}
 .side .big{font-size:clamp(54px,9vw,104px);font-weight:800;line-height:1;font-variant-numeric:tabular-nums;margin:4px 0}
+.hz .n.rng{flex-direction:column;align-items:flex-start;gap:0} .hz .n.rng b{font-size:17px;line-height:1.3}
+.side .big.range{font-size:clamp(34px,4.6vw,62px);margin:14px 0 10px}
 .side.u .lbl,.side.u .big{color:var(--up)} .side.d .lbl,.side.d .big{color:var(--down)}
 .split{display:flex;height:10px;border-radius:99px;overflow:hidden;margin-top:12px;gap:2px}
 .split i{display:block;height:100%} .split .a{background:var(--up)} .split .b{background:var(--down)}
@@ -127,8 +129,8 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
       <div class="seg" id="hzSeg"></div>
     </div>
     <div class="probbox">
-      <div class="side u"><div class="lbl">▲ PROBABILIDADE DE ALTA</div><div class="big" id="pUp">—</div></div>
-      <div class="side d"><div class="lbl">▼ PROBABILIDADE DE QUEDA</div><div class="big" id="pDown">—</div></div>
+      <div class="side u"><div class="lbl" id="lblUp">▲ PROBABILIDADE DE ALTA</div><div class="big" id="pUp">—</div></div>
+      <div class="side d"><div class="lbl" id="lblDown">▼ PROBABILIDADE DE QUEDA</div><div class="big" id="pDown">—</div></div>
     </div>
     <div class="split"><i class="a" id="splitA" style="width:50%"></i><i class="b" id="splitB" style="width:50%"></i></div>
     <div class="verdict"><span class="tag" id="sinal">—</span><span id="conf" class="muted"></span></div>
@@ -264,9 +266,9 @@ const bp=(v,d=1)=>v==null?"—":`<span class="${cls(v)} num">${arrow(v)}${v>0?"+
 const money=v=>v==null?"—":v>=1e9?"R$ "+nf(v/1e9,2)+" bi":v>=1e6?"R$ "+nf(v/1e6,1)+" mi":"R$ "+nf(v/1e3,0)+" mil";
 const hhmm=ts=>new Date(ts*1000).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
 const safeUrl=u=>/^https?:\/\//i.test(u||"")?u:"#";
-let S=null,B3=[],asset="WIN",hz="Diário",tf="D1",newsWin="diario",sortKey="v",sortDir=-1,page=0;
+let S=null,B3=[],asset="WIN",hz="Diário",hzManual=false,tf="D1",newsWin="diario",sortKey="v",sortDir=-1,page=0;
 const PER=60;
-try{asset=localStorage.getItem("b3ai.asset")||asset;hz=localStorage.getItem("b3ai.hz")||hz;tf=localStorage.getItem("b3ai.tf")||tf}catch(e){}
+try{asset=localStorage.getItem("b3ai.asset")||asset;tf=localStorage.getItem("b3ai.tf")||tf}catch(e){}
 const save=(k,v)=>{try{localStorage.setItem("b3ai."+k,v)}catch(e){}};
 const dec=()=>asset==="WIN"?0:1;
 
@@ -288,13 +290,30 @@ function render(){
   const A=S.ativos[asset]; if(!A)return;
   seg($("assetSeg"),keys.map(k=>[k,S.ativos[k].nome]),asset,v=>{asset=v;save("asset",v);render();drawChart()});
   const rows=A.prob; if(!rows.find(r=>r.horizonte===hz))hz=(rows.find(r=>r.horizonte==="Diário")||rows[0]).horizonte;
-  seg($("hzSeg"),rows.map(r=>[r.horizonte,r.horizonte]),hz,v=>{hz=v;save("hz",v);render()});
+  if(!hzManual){const pref=S.mercado_aberto?["Fecho de hoje","Diário"]:["Abertura","Diário"];hz=(pref.find(h=>rows.some(r=>r.horizonte===h))||hz)}
+  if(!rows.find(r=>r.horizonte===hz))hz=(rows.find(r=>r.horizonte==="Diário")||rows[0]).horizonte;
+  seg($("hzSeg"),rows.map(r=>[r.horizonte,r.horizonte]),hz,v=>{hz=v;hzManual=true;render()});
   const R=rows.find(r=>r.horizonte===hz);
   // ---- destaque
-  $("pUp").textContent=Math.round(R.p_alta*100)+"%"; $("pDown").textContent=Math.round(R.p_queda*100)+"%";
-  $("splitA").style.width=(R.p_alta*100)+"%"; $("splitB").style.width=(R.p_queda*100)+"%";
-  const sg=$("sinal"); sg.textContent=(R.p_alta>=.55?"▲ ":R.p_alta<=.45?"▼ ":"■ ")+R.sinal; sg.className="tag "+(R.p_alta>=.55?"u":R.p_alta<=.45?"d":"");
-  $("conf").textContent=(R.validado?"✔ ":"⚪ ")+R.confianca+(R.nota?" · "+R.nota:"");
+  // 5 min a 1 hora: a direção é cara ou coroa (48–50 % de acerto medido), mas a faixa de 80 % acerta ~80 %.
+  // Nesses horizontes o destaque mostra a FAIXA (máximo e mínimo prováveis), que serve para alvo e stop.
+  const faixa=R.tipo==="intraday"&&Math.abs(R.p_alta-.5)<.05&&R.f80_min!=null;
+  const dd=asset==="WIN"?0:1;
+  $("pUp").classList.toggle("range",faixa); $("pDown").classList.toggle("range",faixa);
+  if(faixa){
+    $("lblUp").textContent=`▲ MÁXIMO PROVÁVEL EM ${R.horizonte.toUpperCase()}`; $("lblDown").textContent=`▼ MÍNIMO PROVÁVEL EM ${R.horizonte.toUpperCase()}`;
+    $("pUp").textContent=nf(R.f80_max,dd); $("pDown").textContent=nf(R.f80_min,dd);
+    const px=A.preco,pos=Math.max(0,Math.min(1,(px-R.f80_min)/((R.f80_max-R.f80_min)||1)));
+    $("splitA").style.width=((1-pos)*100)+"%"; $("splitB").style.width=(pos*100)+"%";
+    const sg=$("sinal"); sg.textContent="■ DIREÇÃO SEM VANTAGEM — USE A FAIXA"; sg.className="tag";
+    $("conf").textContent=`Em ${R.f80_n?nf(R.f80_n,0):"milhares de"} casos fora da amostra, o preço ficou dentro desta faixa em ${R.f80_cobertura!=null?nf(R.f80_cobertura*100,0):"~80"}% das vezes (a ±${nf((R.f80_max-R.f80_min)/2,dd)} pontos do preço atual). Use para alvo e stop. A direção nos próximos ${R.horizonte} acertou só ${R.oos_acerto!=null?nf(R.oos_acerto*100,0):"~50"}%: cara ou coroa.`+(R.nota?" · "+R.nota:"");
+  }else{
+    $("lblUp").textContent="▲ PROBABILIDADE DE ALTA"; $("lblDown").textContent="▼ PROBABILIDADE DE QUEDA";
+    $("pUp").textContent=Math.round(R.p_alta*100)+"%"; $("pDown").textContent=Math.round(R.p_queda*100)+"%";
+    $("splitA").style.width=(R.p_alta*100)+"%"; $("splitB").style.width=(R.p_queda*100)+"%";
+    const sg=$("sinal"); sg.textContent=(R.p_alta>=.55?"▲ ":R.p_alta<=.45?"▼ ":"■ ")+R.sinal; sg.className="tag "+(R.p_alta>=.55?"u":R.p_alta<=.45?"d":"");
+    $("conf").textContent=(R.validado?"✔ ":"⚪ ")+R.confianca+(R.nota?" · "+R.nota:"");
+  }
   const f=R.faixas, d=dec();
   $("heroKv").innerHTML=[
     [esc(R.alvo),"alvo da previsão"],
@@ -353,9 +372,12 @@ function render(){
   // ---- quadro
   $("boardName").textContent=A.nome;
   $("board").innerHTML=rows.map(r=>`<button class="hz ${r.horizonte===hz?"sel":""}" data-h="${esc(r.horizonte)}"><div class="t">${esc(r.horizonte)}</div><div class="a">${esc(r.alvo)}</div>
-    <div class="n"><b class="up">▲${Math.round(r.p_alta*100)}%</b><b class="down">▼${Math.round(r.p_queda*100)}%</b></div>
-    <div class="s">${esc(r.sinal)} · ${r.validado?"✔ validado":"⚪ não validado"}${r.oos_acerto!=null?" · acerto "+nf(r.oos_acerto*100,0)+"%":""}</div></button>`).join("");
-  $("board").querySelectorAll(".hz").forEach(b=>b.onclick=()=>{hz=b.dataset.h;save("hz",hz);render();window.scrollTo({top:0,behavior:"smooth"})});
+    ${r.tipo==="intraday"&&Math.abs(r.p_alta-.5)<.05&&r.f80_min!=null
+      ?`<div class="n rng"><b class="up">▲ ${nf(r.f80_max,dec())}</b><b class="down">▼ ${nf(r.f80_min,dec())}</b></div>
+        <div class="s">faixa de 80% · acertou ${r.f80_cobertura!=null?nf(r.f80_cobertura*100,0):"~80"}% · direção 50/50</div>`
+      :`<div class="n"><b class="up">▲${Math.round(r.p_alta*100)}%</b><b class="down">▼${Math.round(r.p_queda*100)}%</b></div>
+        <div class="s">${esc(r.sinal)} · ${r.validado?"✔ validado":"⚪ não validado"}${r.oos_acerto!=null?" · acerto "+nf(r.oos_acerto*100,0)+"%":""}</div>`}</button>`).join("");
+  $("board").querySelectorAll(".hz").forEach(b=>b.onclick=()=>{hz=b.dataset.h;hzManual=true;render();window.scrollTo({top:0,behavior:"smooth"})});
   // ---- confronto
   const C=A.confronto;
   $("confTiles").innerHTML=[[pct(C.implicito),"exterior implicava",C.implicito],[pct(C.realizado),"o ativo fez",C.realizado],[pct(C.descolamento),"descolamento ("+(C.descolamento_sigma>0?"+":"")+nf(C.descolamento_sigma,1)+"σ)",C.descolamento],[nf(C.r2*100,0)+"%","da variação diária explicada pelo exterior",0]]
