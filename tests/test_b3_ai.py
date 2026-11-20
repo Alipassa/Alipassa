@@ -780,3 +780,15 @@ class HolidayTest(unittest.TestCase):
         self.assertEqual(next_sessions("2026-11-19", 1), "2026-11-23")      # quinta → pula o feriado de sexta e o fim de semana
         self.assertEqual(next_sessions("2026-11-19", 5), "2026-11-27")
         self.assertNotIn("2023-11-20", cal.b3_holidays(2023))      # feriado nacional só a partir de 2024
+
+
+class DistantOpeningAlertTest(unittest.TestCase):
+    def test_opening_days_away_is_softened_and_dated(self):
+        from b3_ai import alerts
+        row = {"p_alta": 0.03, "p_queda": 0.97, "horizonte": "Abertura", "tipo": "abertura", "alvo": "abertura de seg 23/11 × fechamento anterior",
+               "confianca": "c", "nota": "x. ATENÇÃO: a próxima abertura é só em seg 23/11 (fim de semana ou feriado)"}
+        a = alerts.from_rows({"WIN": {"nome": "Mini Índice (WIN)", "data": "2026-11-19", "prob": [row]}})[0]
+        self.assertEqual(a["nivel"], "ATENÇÃO")
+        self.assertIn("(seg 23/11)", a["titulo"])
+        row["nota"] = "x"
+        self.assertEqual(alerts.from_rows({"WIN": {"nome": "Mini Índice (WIN)", "data": "d", "prob": [row]}})[0]["nivel"], "ALERTA")

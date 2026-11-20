@@ -41,11 +41,15 @@ def from_rows(ativos: dict) -> list[dict]:
                 continue      # "Fecho de hoje" só repete que o dia já andou; fica no quadro, não vira aviso no topo
             p, lado = (r["p_alta"], 1) if r["p_alta"] >= r["p_queda"] else (r["p_queda"], -1)
             lv = level(p)
+            distante = "a próxima abertura é só em" in (r.get("nota") or "")
+            if distante and lv == "ALERTA":
+                lv = "ATENÇÃO"           # abertura daqui a dias: o exterior ainda vai andar, o número vai mudar
             if not lv:
                 continue
             verbo = "ALTA" if lado > 0 else "QUEDA"
             out.append({"nivel": lv, "lado": lado, "ativo": k, "prob": p, "horizonte": r["horizonte"],
-                        "titulo": f"{a['nome']}: {p * 100:.0f}% de chance de {verbo} — {r['horizonte']}",
+                        "titulo": f"{a['nome']}: {p * 100:.0f}% de chance de {verbo} — {r['horizonte']}"
+                                  + (f" ({r['alvo'].split(' × ')[0].replace('abertura de ', '')})" if r.get("tipo") == "abertura" else ""),
                         "texto": f"{r['alvo']}. {r['confianca']}." + (f" {r['nota']}." if r.get("nota") else ""),
                         "chave": f"{k}|{r['horizonte']}|{lado}|{a['data']}"})
     return out
