@@ -827,7 +827,8 @@ class MT5CalendarTest(unittest.TestCase):
     def _csv(self, now):
         rows = [f"gerado_utc;{int(now)}",
                 "utc;pais;moeda;importancia;nome;divulgado;esperado;anterior;anterior_revisado;impacto;unidade;multiplicador;evento_id;valor_id",
-                f"{int(now + 1200)};US;USD;3;CPI m/m;;0.300000;0.400000;;0;1;0;840010001;9001",                  # daqui a 20 min
+                f"{int(now + 1200)};US;USD;3;CPI m/m;;0.300000;0.400000;;0;1;0;840010001;9001",
+                f"{int(now + 2 * 86400)};US;USD;3;EUA - Confiança do Consumidor;;91.5;91.7;;0;0;0;840030003;9006",                  # daqui a 20 min
                 f"{int(now - 300)};US;USD;3;Nonfarm Payrolls;250.000000;180.000000;150.000000;;1;0;3;840020002;9002",  # saiu há 5 min, forte
                 f"{int(now - 480)};BR;BRL;3;IPCA m/m;0.200000;0.350000;0.400000;;1;1;0;76001;9003",                # saiu, abaixo (bom p/ BRL)
                 f"{int(now + 5 * 86400)};EU;EUR;3;ECB Interest Rate Decision;;2.000000;2.000000;;0;1;0;999;9004",
@@ -839,7 +840,7 @@ class MT5CalendarTest(unittest.TestCase):
         now = 1_800_000_000.0
         out = C.parse(self._csv(now))
         self.assertEqual(out["gerado"], now)
-        self.assertEqual(len(out["eventos"]), 5)
+        self.assertEqual(len(out["eventos"]), 6)
         nfp = next(e for e in out["eventos"] if e["nome"] == "Nonfarm Payrolls")
         self.assertEqual((nfp["divulgado"], nfp["esperado"]), (250.0, 180.0))
         self.assertEqual(C.effect_on(nfp), {"WDO": 1, "WIN": -1})          # bom para o USD → dólar ▲, índice ▼
@@ -866,8 +867,10 @@ class MT5CalendarTest(unittest.TestCase):
             e._merge_calendar(agenda, calm, now)
             nomes = [x["evento"] for x in agenda["eventos"]]
             self.assertIn("CPI m/m", nomes)
+            self.assertTrue(all(x.get("tipo") != "payroll" for x in agenda["eventos"]))
             self.assertIn("ECB Interest Rate Decision", nomes)
-            self.assertNotIn("Moderate thing", nomes)                          # só importância alta entra na agenda
+            self.assertNotIn("Moderate thing", nomes)
+            self.assertIn("Confiança do Consumidor", nomes)                      # prefixo do país repetido removido                          # só importância alta entra na agenda
             self.assertFalse(any(x.get("tipo") == "payroll" for x in agenda["eventos"]))   # estimativa trocada pelo calendário
             al = e._calendar_alerts(calm, now)
             niveis = sorted((a["nivel"], a["lado"]) for a in al)

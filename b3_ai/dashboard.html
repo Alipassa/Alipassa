@@ -409,8 +409,8 @@ function renderAlerts(){
 }
 function renderAgenda(){
   const G=S.agenda||{},E=G.eventos||[],H=G.fomc_historico;
-  $("agenda").innerHTML=(E.length?"<div class='scroll' style='max-height:none'><table><tr><th>Quando</th><th class='l'>Data</th><th class='l'>Hora (Brasília)</th><th class='l'>Evento</th><th class='l'>Impacto</th></tr>"+
-    E.slice(0,12).map(e=>`<tr><td><b class="${e.dias<=1?"down":""}">${esc(e.quando)}</b></td><td class="l">${esc(e.dia_semana)}</td><td class="l">${esc(e.hora||"—")}</td>
+  $("agenda").innerHTML=(E.length?"<div class='scroll' style='max-height:560px'><table><tr><th>Quando</th><th class='l'>Data</th><th class='l'>Hora (Brasília)</th><th class='l'>Evento</th><th class='l'>Impacto</th></tr>"+
+    E.slice(0,60).map(e=>`<tr><td><b class="${e.dias<=1?"down":""}">${esc(e.quando)}</b></td><td class="l">${esc(e.dia_semana)}</td><td class="l">${esc(e.hora||"—")}</td>
       <td class="l" style="white-space:normal"><b>${esc(e.pais)}: ${esc(e.evento)}</b>${e.estimada?' <span class="chip">data estimada</span>':""}<div class="small muted">${esc(e.porque||"")} <span class="faint">Fonte: ${esc(e.fonte)}.</span></div></td>
       <td class="l">${e.impacto==="muito alto"?"🔴 muito alto":"🟠 "+esc(e.impacto)}</td></tr>`).join("")+"</table></div>":'<span class="muted">Sem eventos de alto impacto nos próximos 60 dias (ou fontes indisponíveis).</span>')+
     (H?`<div class="small" style="margin-top:8px">📊 Medido em ${H.n} decisões do Fed desde 2021: o mini índice oscilou em média <b>${nf(H.abs_dia,2)}%</b> no dia e <b>${nf(H.abs_seguinte,2)}%</b> no seguinte, contra ${nf(H.abs_normal,2)}% num dia comum; fechou em alta em ${nf(H.pct_alta_dia*100,0)}% dos dias de decisão. Extremos: ${pct(H.maior_queda)} e ${pct(H.maior_alta)}.</div>`:"")+

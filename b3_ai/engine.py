@@ -272,7 +272,7 @@ class Engine:
                 continue
             dt = brt(e["ts"])
             data = dt.strftime("%Y-%m-%d")
-            nome = e["nome"]
+            nome = re.sub(rf"^({re.escape(e['pais_nome'])}|{re.escape(e['pais'])})\s*[-–:]\s*", "", e["nome"])   # "EUA - Confiança..." → "Confiança..."
             low = nome.lower()
             if re.search(r"interest rate decision|fomc|fed funds|selic", low) and ((data, "fomc") in oficiais or (data, "copom") in oficiais):
                 continue
