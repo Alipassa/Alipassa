@@ -106,6 +106,8 @@ def first_fridays(start: date, months: int = 3) -> list[str]:
     for _ in range(months):
         d = date(y, m, 1)
         d += timedelta(days=(4 - d.weekday()) % 7)
+        if d.month == 1 and d.day == 1:
+            d += timedelta(days=7)         # 1º de janeiro é feriado nos EUA: o payroll sai na sexta seguinte
         if d >= start:
             out.append(d.isoformat())
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)

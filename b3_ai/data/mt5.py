@@ -215,6 +215,14 @@ class MT5Feed:
             return [(float(r["time"]) - shift, float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
                      float(r["real_volume"]) or float(r["tick_volume"])) for r in rates]
 
+    def paths(self) -> dict:
+        """Pastas do terminal: dados (MQL5\\Experts), comum (calendário exportado) e instalação (metaeditor64.exe)."""
+        with self.lock:
+            if not self.connected:
+                self.connect()
+            ti = self.mt5.terminal_info()
+        return {"dados": getattr(ti, "data_path", None), "comum": getattr(ti, "commondata_path", None), "instalacao": getattr(ti, "path", None)}
+
     def sp_intraday(self) -> dict[str, list[tuple]]:
         """Micro S&P 500 da B3 (WSP) em tempo real, 5 e 15 min: líder do exterior no intraday, no mesmo relógio do WIN."""
         forced = self.env.get("MT5_WSP")

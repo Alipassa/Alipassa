@@ -150,6 +150,26 @@ def cmd_leiloes(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_instalar_calendario(args: argparse.Namespace) -> int:
+    from .data import mt5 as mt5feed, mt5_calendar as mcal
+    feed = mt5feed.MT5Feed()
+    try:
+        feed.connect()
+        p = feed.paths()
+    except Exception as e:  # noqa: BLE001
+        print(f"não consegui falar com o MetaTrader: {e}")
+        return 1
+    for m in mcal.install(p.get("dados"), p.get("instalacao")):
+        print("-", m)
+    print("\nFalta um passo, no MetaTrader: na janela Navegador, em Consultor Expert (Experts), clique com o botão direito e escolha")
+    print("'Atualizar'; depois arraste B3AI_Calendario para qualquer gráfico e clique OK. No canto do gráfico deve aparecer")
+    print("'B3 AI - calendario exportado: N eventos'. O robô só lê o calendário: não envia ordens.")
+    r = mcal.read(p.get("comum"))
+    print(f"\nArquivo do calendário: {r['caminho']} — " + (f"{len(r['eventos'])} eventos" if r["ok"] else r["erro"]))
+    feed.close()
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -196,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
     ga.set_defaults(func=cmd_gap_ativos)
     lb = sub.add_parser("leiloes", help="registro de intervenções do Banco Central e movimentos bruscos, com o que o mercado fez depois")
     lb.set_defaults(func=cmd_leiloes)
+    ic = sub.add_parser("instalar-calendario", help="copia e compila no MetaTrader o robô que exporta o calendário econômico")
+    ic.set_defaults(func=cmd_instalar_calendario)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)

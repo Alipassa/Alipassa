@@ -21,7 +21,7 @@ gold-ai = "gold_ai.cli:main"
 include = ["gold_ai*", "b3_ai*"]
 
 [tool.setuptools.package-data]
-b3_ai = ["dashboard.html"]
+b3_ai = ["dashboard.html", "mql5/*.mq5"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

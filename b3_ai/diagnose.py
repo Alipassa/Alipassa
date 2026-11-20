@@ -78,6 +78,13 @@ def run(data_dir: str = "dados") -> str:
                                  + "; ".join(time.strftime('%d/%m/%y', time.gmtime(float(x['time']))) + f" {float(x['close']):.2f}" for x in (r if r is not None else [])))
                 except Exception as e:  # noqa: BLE001
                     add(False, "ações da B3 pelo MetaTrader", f"{type(e).__name__}: {e}")
+                try:
+                    from .data import mt5_calendar as mcal
+                    r = mcal.read(getattr(mt5.terminal_info(), "commondata_path", None))
+                    add(r["ok"] and not r["erro"], "calendário econômico (robô B3AI_Calendario)",
+                        (f"{len(r['eventos'])} eventos · atualizado há {r['idade_s'] / 60:.0f} min · {r['caminho']}" if r["ok"] else r["erro"]))
+                except Exception as e:  # noqa: BLE001
+                    add(False, "calendário econômico", f"{type(e).__name__}: {e}")
                 for word in ("FERRO", "IRON", "MINERIO", "WSP", "IBOV", "DI1"):
                     names = [s.name for s in (mt5.symbols_get(group=f"*{word}*") or [])]
                     if names:

@@ -149,6 +149,22 @@ várias estratégias testadas (uma pode passar por sorte), abertura com escorreg
 grande num dia de tendência. `python -m b3_ai extremos` testa os extremos de compra e venda com filtros (dia lateral, fora da
 faixa, S2/R2), escolhendo o parâmetro na 1ª metade do histórico e medindo na 2ª.
 
+## Calendário econômico do MetaTrader (`mql5/B3AI_Calendario.mq5`, `data/mt5_calendar.py`)
+
+A aba "Notícias" do MetaTrader não tem acesso por programa (nem pela biblioteca Python, nem pela MQL5). O calendário econômico
+tem: o robô `B3AI_Calendario` roda dentro do terminal — **somente leitura, não envia ordens** — e grava a cada 30 s o arquivo
+`b3ai_calendario.csv` na pasta comum dos terminais (`Terminal\Common\Files`), com os eventos de importância moderada e alta de
+EUA, Brasil, Zona do Euro e China: horário, valor esperado, anterior e, depois da divulgação, o divulgado.
+
+Instalação: `python -m b3_ai instalar-calendario` (ou `instalar_calendario.bat`) copia o robô para a pasta de dados do terminal e
+o compila com o MetaEditor; depois, no MetaTrader, Navegador → Consultor Expert → Atualizar, e arrastar `B3AI_Calendario` para
+qualquer gráfico.
+
+No painel: os eventos de alta importância entram na agenda (substituindo a data estimada do payroll); 30 minutos antes de cada um
+aparece o aviso 📅 com o valor esperado; na divulgação, o aviso 📊 DADO DIVULGADO mostra divulgado × esperado e a direção típica
+para o mini dólar e o mini índice (pelo impacto que o calendário atribui à moeda: USD forte → dólar ▲, índice ▼; BRL forte → dólar ▼,
+índice ▲). Cada divulgação de EUA e Brasil entra no registro, para medir o que o mercado faz depois.
+
 ## Banco Central e movimentos bruscos (`bc_watch.py`)
 
 Alerta e registro — **nunca envia ordens**. A cada 5 minutos o painel procura, em fontes públicas (Google Notícias e InfoMoney),

@@ -244,6 +244,7 @@ class NewFeaturesTest(unittest.TestCase):
                      '<div class="fomc-meeting__date">30-1</div><h4>2027 FOMC Meetings</h4>')
         self.assertEqual(cal.parse_fomc(html_text), [{"data": "2026-05-01", "projecoes": False}, {"data": "2026-12-09", "projecoes": True}])
         self.assertEqual(cal.first_fridays(__import__("datetime").date(2026, 11, 15), 2), ["2026-12-04"])
+        self.assertEqual(cal.first_fridays(__import__("datetime").date(2026, 12, 20), 2), ["2027-01-08"])     # 01/01 é feriado
 
     def test_analyst_and_company_headlines(self):
         v = news_ai.analyst_view({"title": "BTG eleva recomendação de Vale (VALE3) para compra", "source": "Valor", "link": "", "ts": 0})
@@ -820,3 +821,73 @@ class GooglePauseTest(unittest.TestCase):
             self.assertFalse(any("news.google.com" in c for c in calls[n:]))  # durante a pausa, nada vai para o Google
         finally:
             N.fetch, N._google_until = orig, 0.0
+
+
+class MT5CalendarTest(unittest.TestCase):
+    def _csv(self, now):
+        rows = [f"gerado_utc;{int(now)}",
+                "utc;pais;moeda;importancia;nome;divulgado;esperado;anterior;anterior_revisado;impacto;unidade;multiplicador;evento_id;valor_id",
+                f"{int(now + 1200)};US;USD;3;CPI m/m;;0.300000;0.400000;;0;1;0;840010001;9001",                  # daqui a 20 min
+                f"{int(now - 300)};US;USD;3;Nonfarm Payrolls;250.000000;180.000000;150.000000;;1;0;3;840020002;9002",  # saiu há 5 min, forte
+                f"{int(now - 480)};BR;BRL;3;IPCA m/m;0.200000;0.350000;0.400000;;1;1;0;76001;9003",                # saiu, abaixo (bom p/ BRL)
+                f"{int(now + 5 * 86400)};EU;EUR;3;ECB Interest Rate Decision;;2.000000;2.000000;;0;1;0;999;9004",
+                f"{int(now + 86400)};US;USD;2;Moderate thing;;;;;0;0;0;1;9005"]
+        return "\n".join(rows) + "\n"
+
+    def test_parse_effect_and_fmt(self):
+        from b3_ai.data import mt5_calendar as C
+        now = 1_800_000_000.0
+        out = C.parse(self._csv(now))
+        self.assertEqual(out["gerado"], now)
+        self.assertEqual(len(out["eventos"]), 5)
+        nfp = next(e for e in out["eventos"] if e["nome"] == "Nonfarm Payrolls")
+        self.assertEqual((nfp["divulgado"], nfp["esperado"]), (250.0, 180.0))
+        self.assertEqual(C.effect_on(nfp), {"WDO": 1, "WIN": -1})          # bom para o USD → dólar ▲, índice ▼
+        ipca = next(e for e in out["eventos"] if e["pais"] == "BR")
+        self.assertEqual(C.effect_on(ipca), {"WDO": -1, "WIN": 1})         # bom para o BRL → dólar ▼, índice ▲
+        self.assertEqual(C.effect_on(next(e for e in out["eventos"] if e["pais"] == "EU")), {"WDO": 0, "WIN": 0})
+        self.assertEqual(C.fmt(0.3, 1), "0,3%")
+        self.assertIsNone(C.parse("utc;x\n")["gerado"])
+
+    def test_engine_agenda_alerts_and_registry(self):
+        import time as _t
+        from b3_ai import engine as E
+        now = _t.time()
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "b3ai_calendario.csv")
+        open(path, "w", encoding="utf-8").write(self._csv(now))
+        os.environ["B3AI_CALENDARIO"] = path
+        try:
+            e = E.Engine(d, with_news=False)
+            e.bc.set_price("WDO", 5700.0)
+            calm = e._calendar()
+            self.assertTrue(calm["ok"])
+            agenda = {"eventos": [{"data": "2099-01-01", "tipo": "payroll", "hora": "10:30", "dias": 9, "impacto": "alto", "evento": "Payroll (estimado)"}]}
+            e._merge_calendar(agenda, calm, now)
+            nomes = [x["evento"] for x in agenda["eventos"]]
+            self.assertIn("CPI m/m", nomes)
+            self.assertIn("ECB Interest Rate Decision", nomes)
+            self.assertNotIn("Moderate thing", nomes)                          # só importância alta entra na agenda
+            self.assertFalse(any(x.get("tipo") == "payroll" for x in agenda["eventos"]))   # estimativa trocada pelo calendário
+            al = e._calendar_alerts(calm, now)
+            niveis = sorted((a["nivel"], a["lado"]) for a in al)
+            self.assertIn(("AGENDA", 0), niveis)                               # CPI em 20 min
+            self.assertIn(("DADO DIVULGADO", 1), niveis)                       # payroll forte → dólar ▲
+            self.assertIn(("DADO DIVULGADO", -1), niveis)                      # IPCA abaixo → dólar ▼
+            reg = {x["chave"]: x for x in e.mem.bc_events()}
+            self.assertIn("cal|9002", reg)                                     # registrado para medir o depois
+            self.assertEqual(reg["cal|9002"]["preco"], 5700.0)
+            self.assertIn("cal|9003", reg)
+            e.mem.close()
+        finally:
+            del os.environ["B3AI_CALENDARIO"]
+
+    def test_missing_file_is_reported_not_raised(self):
+        from b3_ai.data import mt5_calendar as C
+        os.environ["B3AI_CALENDARIO"] = "/nao/existe/b3ai_calendario.csv"
+        try:
+            r = C.read(None)
+            self.assertFalse(r["ok"])
+            self.assertIn("instalar_calendario", r["erro"])
+        finally:
+            del os.environ["B3AI_CALENDARIO"]

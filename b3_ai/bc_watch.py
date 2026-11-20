@@ -195,6 +195,20 @@ class Watcher:
             if self.mem.add_bc_event(ev) and p:
                 self.open_ticks.append(ev)
 
+    def record(self, chave: str, origem: str, ativo: str, tipo: str, efeito: int, titulo: str, ts_pub: float,
+               now: Optional[float] = None) -> bool:
+        """Registra um evento externo (ex.: dado econômico divulgado) com o preço atual do ativo, para medir o que vem depois."""
+        now = now or time.time()
+        with self.lock:
+            p = self.price.get(ativo)
+            p5 = self._price_ago(ativo, 300, now)
+            ev = {"chave": chave, "ts": now, "ts_pub": ts_pub, "origem": origem, "ativo": ativo, "tipo": tipo, "efeito": efeito,
+                  "titulo": titulo, "link": "", "preco": p, "antes5": (p / p5 - 1) if p and p5 else None, "z": None}
+            ok = self.mem.add_bc_event(ev)
+            if ok and p:
+                self.open_ticks.append(ev)
+            return ok
+
     # ------------------------------------------------------------------ acompanhamento por barras
     def fill_from_bars(self, bars: dict[str, list[tuple]]) -> None:
         """Completa +5, +15, +30 e +60 min dos eventos registrados com as barras de 5 min do ativo."""

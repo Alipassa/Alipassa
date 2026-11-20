@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 from . import alerts, bc_watch, market_b3, model as M, news_ai, opinion, patterns, simulate, stats as st, technical as T
-from .data import bcb, calendar as cal, focus, mt5 as mt5feed, news, tradingview as tv, yahoo
+from .data import bcb, calendar as cal, focus, mt5 as mt5feed, mt5_calendar as mcal, news, tradingview as tv, yahoo
 from .data.http import DataError
 from .memory import Memory
 from .universe import ASSETS, BY_KEY, FACTORS, TARGETS
@@ -60,6 +61,7 @@ class Engine:
         self._open_cache: tuple[float, dict] = (0.0, {})
         self.mem = Memory(f"{data_dir}/b3_ai.db")
         self.bc = bc_watch.Watcher(self.mem)
+        self._mt5_paths: Optional[dict] = None
         self.with_news = with_news
         self.lock = threading.Lock()
         self.state: dict = {"ok": False, "erro": "primeira leitura em andamento…"}
@@ -246,6 +248,77 @@ class Engine:
                "confianca": f"frequência histórica: abertura acompanhou o exterior em {hit * 100:.0f}% de {b['n']} casos desse tamanho"}
         row["sinal"] = "ABERTURA EM ALTA" if p >= 0.55 else "ABERTURA EM QUEDA" if p <= 0.45 else "ABERTURA INDEFINIDA"
         return row
+
+    def _calendar(self) -> dict:
+        """Calendário econômico exportado pelo robô B3AI_Calendario no MetaTrader (lido a cada ciclo; é só um arquivo)."""
+        if self.mt5 is not None and self._mt5_paths is None and self.rt:
+            try:
+                self._mt5_paths = self.mt5.paths()
+            except Exception:  # noqa: BLE001
+                self._mt5_paths = {}
+        return mcal.read((self._mt5_paths or {}).get("comum"))
+
+    def _merge_calendar(self, agenda: dict, calm: dict, now: float) -> None:
+        """Acrescenta à agenda os eventos de importância ALTA do calendário do MetaTrader (14 dias), sem repetir Fed/Copom."""
+        if not calm.get("ok"):
+            return
+        today = brt(now).date()
+        oficiais = {(e["data"], e["tipo"]) for e in agenda["eventos"]}
+        # com o calendário do MetaTrader cobrindo os EUA, ele é a fonte do payroll: a data estimada (1ª sexta) sai da agenda
+        tem_payroll = any(e["pais"] == "US" for e in calm["eventos"])
+        novos = []
+        for e in calm["eventos"]:
+            if e["importancia"] < 3 or e["ts"] < now - 60 or e["ts"] > now + 14 * 86400:
+                continue
+            dt = brt(e["ts"])
+            data = dt.strftime("%Y-%m-%d")
+            nome = e["nome"]
+            low = nome.lower()
+            if re.search(r"interest rate decision|fomc|fed funds|selic", low) and ((data, "fomc") in oficiais or (data, "copom") in oficiais):
+                continue
+            dias = (dt.date() - today).days
+            novos.append({"data": data, "hora": dt.strftime("%H:%M"), "pais": e["pais_nome"], "tipo": "mt5", "impacto": "muito alto",
+                          "evento": nome, "fonte": "MetaTrader (calendário)", "estimada": False, "ts": e["ts"], "dias": dias,
+                          "quando": "HOJE" if dias == 0 else "amanhã" if dias == 1 else f"em {dias} dias", "dia_semana": fmt_date(data),
+                          "porque": f"Esperado: {mcal.fmt(e['esperado'], e['unidade'])} · anterior: {mcal.fmt(e['anterior'], e['unidade'])}."})
+        if tem_payroll:
+            agenda["eventos"] = [x for x in agenda["eventos"] if not (x.get("tipo") == "payroll" and x.get("dias", 99) <= 21)]
+        agenda["eventos"] = sorted(agenda["eventos"] + novos, key=lambda x: (x["data"], x.get("hora", "")))
+        agenda["calendario_mt5"] = True
+
+    def _calendar_alerts(self, calm: dict, now: float) -> list[dict]:
+        """Aviso 30 min antes de cada evento de alta importância e, depois da divulgação, a surpresa (divulgado × esperado)."""
+        out = []
+        for e in calm.get("eventos", []):
+            if e["importancia"] < 3:
+                continue
+            u = e["unidade"]
+            base = f"{e['pais_nome']}: {e['nome']}"
+            if 0 < e["ts"] - now <= 1800 and e["divulgado"] is None:
+                out.append({"nivel": "AGENDA", "lado": 0, "ativo": "WDO", "prob": 0.0, "horizonte": "evento",
+                            "titulo": f"EM {max(1, round((e['ts'] - now) / 60))} MIN ({brt(e['ts']).strftime('%H:%M')}): {base}",
+                            "texto": f"Esperado {mcal.fmt(e['esperado'], u)}, anterior {mcal.fmt(e['anterior'], u)}. Evento de alto impacto: espere "
+                                     "movimento brusco na divulgação; o painel mostra a surpresa assim que o valor sair.",
+                            "chave": f"cal|antes|{e['valor_id']}"})
+            elif e["divulgado"] is not None and 0 <= now - e["ts"] <= 1800:
+                eff = mcal.effect_on(e)
+                sur = ""
+                if e["esperado"] is not None:
+                    diff = e["divulgado"] - e["esperado"]
+                    sur = "ACIMA do esperado" if diff > 0 else "ABAIXO do esperado" if diff < 0 else "IGUAL ao esperado"
+                seta = lambda v: "▲" if v > 0 else "▼" if v < 0 else "■"  # noqa: E731
+                efeito = (f" → mini dólar {seta(eff['WDO'])} · mini índice {seta(eff['WIN'])}" if eff["WDO"] else "")
+                out.append({"nivel": "DADO DIVULGADO", "lado": eff["WDO"], "ativo": "WDO", "prob": 1.0, "horizonte": "dado",
+                            "titulo": f"{base}: {mcal.fmt(e['divulgado'], u)} (esperado {mcal.fmt(e['esperado'], u)}){' — ' + sur if sur else ''}{efeito}",
+                            "texto": f"Divulgado às {brt(e['ts']).strftime('%H:%M')}; anterior {mcal.fmt(e['anterior'], u)}. "
+                                     + (f"Pelo calendário do MetaTrader, o resultado é {'positivo' if eff['WDO'] * (1 if e['moeda'] == 'USD' else -1) > 0 else 'negativo'} "
+                                        f"para a moeda {e['moeda']}. " if eff["WDO"] else "")
+                                     + "O mercado reage em segundos: a direção do aviso é a tendência típica, não uma garantia. Registrado para medir o que acontece depois.",
+                            "chave": f"cal|depois|{e['valor_id']}"})
+                if eff["WDO"] and now - e["ts"] <= 600:
+                    self.bc.record(f"cal|{e['valor_id']}", f"dado econômico ({e['pais_nome']})", "WDO", e["nome"], eff["WDO"],
+                                   f"{base}: {mcal.fmt(e['divulgado'], u)} vs {mcal.fmt(e['esperado'], u)} esperado", e["ts"], now)
+        return out
 
     def _agenda(self, d: "M.DailyData") -> dict:
         """Próximos eventos de alto impacto + o que o mini índice fez nos dias de decisão do Fed (medido)."""
@@ -887,8 +960,14 @@ class Engine:
                            "chave": f"{k}|gapfade|{a['data']}"})
         agenda = self._agenda(dd["WIN"])
         notes += agenda["erros"][:2]
+        calm = self._calendar()
+        self._merge_calendar(agenda, calm, now)
+        al += self._calendar_alerts(calm, now)
+        agenda["calendario"] = {"ok": calm.get("ok", False), "erro": calm.get("erro", ""), "n": len(calm.get("eventos", []))}
+        if self.mt5 is not None and calm.get("erro"):
+            notes.append(calm["erro"])
         for e in agenda["eventos"]:
-            if e["dias"] <= 1 and e["impacto"] == "muito alto":
+            if e["dias"] <= 1 and e["impacto"] == "muito alto" and e.get("tipo") in ("fomc", "copom"):
                 h = agenda["fomc_historico"] if e["tipo"] == "fomc" else None
                 extra = (f" Nos {h['n']} dias de decisão do Fed desde 2021, o mini índice oscilou em média {h['abs_dia']:.2f}% "
                          f"(contra {h['abs_normal']:.2f}% num dia comum).") if h else ""
@@ -904,8 +983,8 @@ class Engine:
                 alerts.send_telegram(f"🚨 B3 AI — {x['titulo']}\n{x['texto']}\nProbabilidade histórica, não garantia.")
         for ev in self.mem.bc_events(10):
             age = now - ev["ts"]
-            if age > 15 * 60:
-                continue
+            if age > 15 * 60 or ev["origem"].startswith("dado econômico"):
+                continue                       # dado econômico já tem o aviso 📊 DADO DIVULGADO; aqui fica só o registro
             lag = (ev["ts"] - ev["ts_pub"]) / 60 if ev.get("ts_pub") else 0
             antes = f" O ativo já tinha andado {ev['antes5'] * 100:+.2f}% nos 5 minutos anteriores." if ev.get("antes5") is not None else ""
             if ev["origem"].startswith("Banco Central"):
@@ -922,7 +1001,7 @@ class Engine:
                            "texto": f"Detectado às {brt(ev['ts']).strftime('%H:%M:%S')} pelo preço do MetaTrader.{antes} Pode ser intervenção do "
                                     "Banco Central, notícia ou ordem grande. Nenhuma ordem é enviada; o evento foi registrado para medir o que acontece depois.",
                            "chave": ev["chave"]})
-        prio = {"BANCO CENTRAL": 0, "MOVIMENTO BRUSCO": 0, "ESTRATÉGIA": 1, "ALERTA": 2, "AGENDA": 3}
+        prio = {"BANCO CENTRAL": 0, "MOVIMENTO BRUSCO": 0, "DADO DIVULGADO": 0, "ESTRATÉGIA": 1, "ALERTA": 2, "AGENDA": 3}
         al.sort(key=lambda x: (prio.get(x["nivel"], 4), -x["prob"]))
         state["bc_eventos"] = self.mem.bc_events(15)
         state["bc_resumo"] = bc_watch.summary(self.mem.bc_events(500))
