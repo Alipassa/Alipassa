@@ -894,3 +894,25 @@ class MT5CalendarTest(unittest.TestCase):
             self.assertIn("instalar_calendario", r["erro"])
         finally:
             del os.environ["B3AI_CALENDARIO"]
+
+
+class HorizonsTest(unittest.TestCase):
+    def test_rule_direction_chosen_on_first_half_and_planted_reversal_found(self):
+        """Série em que cada barra tende a devolver a anterior: a regra de momento deve ser escolhida 'ao contrário' e acertar."""
+        from b3_ai import horizons as Hz
+        rnd = random.Random(131)
+        bars, c, last = [], 100000.0, 0.0
+        for day in range(40):
+            for i in range(100):
+                r = -0.7 * last + rnd.gauss(0, 0.0005)
+                last = r
+                o = c
+                c *= 1 + r
+                bars.append((1_700_000_000 + day * 86400 + i * 300, o, max(o, c), min(o, c), c, 10.0))
+        rows = Hz.study("WIN", bars, [], {})
+        mom5 = next(r for r in rows if r["prazo"] == "5 min" and r["regra"] == "momento")
+        self.assertEqual(mom5["sentido"], "ao contrário (reversão)")
+        self.assertGreater(mom5["acerto"], 0.6)
+        self.assertIn("acima do acaso", mom5["veredito"])
+        ten = next(r for r in rows if r["prazo"] == "10 min" and r["regra"] == "momento")
+        self.assertEqual(ten["n"] <= mom5["n"], True)                         # sem sobreposição: menos previsões em prazos maiores

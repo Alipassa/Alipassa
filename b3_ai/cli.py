@@ -170,6 +170,18 @@ def cmd_instalar_calendario(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_horizontes(args: argparse.Namespace) -> int:
+    from . import horizons
+    text = horizons.run(_engine(args))
+    os.makedirs(args.saida, exist_ok=True)
+    path = os.path.join(args.saida, "horizontes_" + datetime.now(tz=BRT).strftime("%Y%m%d_%H%M") + ".md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text)
+    print(f"\nteste gravado em {path}")
+    return 0
+
+
 def cmd_opiniao(args: argparse.Namespace) -> int:
     e = _engine(args)
     e.cycle()
@@ -218,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
     lb.set_defaults(func=cmd_leiloes)
     ic = sub.add_parser("instalar-calendario", help="copia e compila no MetaTrader o robô que exporta o calendário econômico")
     ic.set_defaults(func=cmd_instalar_calendario)
+    hz = sub.add_parser("horizontes", help="qual prazo acerta mais: 5 min, 10 min, 30 min ou 1 hora")
+    hz.add_argument("--saida", default="relatorios")
+    hz.set_defaults(func=cmd_horizontes)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)
