@@ -69,6 +69,8 @@ class Engine:
         self._news_cache: tuple[float, Optional[dict], list[str]] = (0.0, None, [])
         self._news_items: list[dict] = []
         self._news_try, self._news_busy = 0.0, False
+        self._news_thread: Optional[threading.Thread] = None
+        self._news_first = True
         self._bcb_cache: tuple[float, dict] = (0.0, {})
         self.etapa, self.etapa_ts, self.ciclo_ts, self.ciclos = "iniciando", time.time(), time.time(), 0
         self._b3_ts = 0.0
@@ -148,17 +150,15 @@ class Engine:
         houver notícias de menos de 3 horas."""
         if not self.with_news:
             return None, []
+        self._news_kick()
         ts, cached, _errs = self._news_cache
         now = time.time()
-        every = 1800 if cached is not None else 300          # sem nenhuma notícia ainda: tenta de novo em 5 min, não em 30
-        if now - self._news_try > every and not self._news_busy:
-            self._news_busy, self._news_try = True, now
-            first = cached is None and not self._news_items
-            th = threading.Thread(target=self._news_refresh, name="b3-ai-noticias", daemon=True)
-            th.start()
-            if first:
-                th.join(25)                   # só a primeira leitura espera um pouco (para o painel já abrir com notícias)
+        if cached is None and self._news_thread is not None and self._news_first:
+            self._news_thread.join(max(0.0, self._news_try + 35 - now))   # 1ª leitura: espera até 35 s desde o início
+            self._news_first = False
             ts, cached, _errs = self._news_cache
+            now = time.time()
+        every = 1800 if cached is not None else 300
         notes = []
         if cached is None and not self._news_busy:
             wait = max(1, round((self._news_try + every - now) / 60))
@@ -166,6 +166,16 @@ class Engine:
         elif cached is not None and now - ts > 3 * 3600:
             notes.append(f"notícias desatualizadas: última leitura há {(now - ts) / 3600:.0f} h (a fonte está recusando os pedidos)")
         return cached, notes
+
+    def _news_kick(self) -> None:
+        """Dispara a busca de notícias em segundo plano se já é hora (30 min; 5 min enquanto não houver nenhuma)."""
+        if not self.with_news or self._news_busy:
+            return
+        every = 1800 if self._news_cache[1] is not None else 300
+        if time.time() - self._news_try > every:
+            self._news_busy, self._news_try = True, time.time()
+            self._news_thread = threading.Thread(target=self._news_refresh, name="b3-ai-noticias", daemon=True)
+            self._news_thread.start()
 
     def _news_refresh(self) -> None:
         try:
@@ -628,6 +638,7 @@ class Engine:
     def cycle(self) -> dict:
         t0 = self.ciclo_ts = time.time()
         notes: list[str] = []
+        self._news_kick()                      # notícias em paralelo com o download do histórico
         self._step("baixando histórico dos mercados internacionais")
         h, n1 = self._history()
         notes += n1
