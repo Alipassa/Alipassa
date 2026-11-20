@@ -572,7 +572,9 @@ function paintLive(){
   const age=Date.now()/1000-LIVE.lido; if(age>10){$("pxLive").textContent="";return}
   const d=dec(),ref=A.fech_ant; $("px").textContent=nf(t.ultimo,d);
   if(ref)$("pxChg").innerHTML=chg((t.ultimo/ref-1)*100);
-  $("pxLive").innerHTML=`<span class="up">●</span> ao vivo ${new Date(LIVE.lido*1000).toLocaleTimeString("pt-BR")}`+(t.bid>0&&t.ask>0?` · compra ${nf(t.bid,d)} · venda ${nf(t.ask,d)}`:"");
+  const stale=t.ts&&Date.now()/1000-t.ts>180;   // mercado fechado: o MetaTrader repete o último negócio, que pode ser de ontem
+  $("pxLive").innerHTML=stale?`<span class="faint">○ último negócio ${new Date(t.ts*1000).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}</span>`
+    :`<span class="up">●</span> ao vivo ${new Date(LIVE.lido*1000).toLocaleTimeString("pt-BR")}`+(t.bid>0&&t.ask>0?` · compra ${nf(t.bid,d)} · venda ${nf(t.ask,d)}`:"");
 }
 async function loadTick(){
   if(!S||!S.tempo_real)return;

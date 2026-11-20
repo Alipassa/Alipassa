@@ -32,11 +32,11 @@ def brt(ts: float) -> datetime:
 
 
 def next_sessions(last_date: str, n: int) -> str:
-    """Data do n-ésimo dia útil depois de `last_date` (feriados não são conhecidos — aproximação por dia útil)."""
+    """Data do n-ésimo pregão depois de `last_date`, pulando fins de semana e feriados da B3."""
     d = datetime.strptime(last_date, "%Y-%m-%d")
     while n > 0:
         d += timedelta(days=1)
-        if d.weekday() < 5:
+        if cal.is_b3_day(d.date()):
             n -= 1
     return d.strftime("%Y-%m-%d")
 
@@ -795,6 +795,10 @@ class Engine:
             if not is_open and bars5_ok(intr[(k, "5")]):
                 orow = self._open_row(k, opening, intr[(k, "5")][-1][0] + 300, intr[(k, "5")][-1][4], "abertura de " + fmt_date(nd) + " × fechamento anterior")
                 if orow:
+                    gap_days = (datetime.strptime(nd, "%Y-%m-%d").date() - brt(now).date()).days
+                    if gap_days > 1 or not cal.is_b3_day(brt(now).date()):
+                        orow["nota"] += (f". ATENÇÃO: a próxima abertura é só em {fmt_date(nd)} (fim de semana ou feriado); o exterior ainda vai "
+                                         "andar até lá e esta chance vai mudar — confira de novo antes da abertura")
                     rows.insert(0, orow)
             rows = [x for x in rows if x]
             # memória: grava previsões e resolve as vencidas

@@ -765,3 +765,18 @@ class BCWatchTest(unittest.TestCase):
         self.assertAlmostEqual(s["atraso_min"], 2.0)
         self.assertIn("Banco Central", B.report(m.bc_events()))
         m.close()
+
+
+class HolidayTest(unittest.TestCase):
+    def test_b3_calendar(self):
+        from datetime import date
+        from b3_ai.data import calendar as cal
+        from b3_ai.engine import next_sessions
+        h = cal.b3_holidays(2026)
+        for d in ("2026-11-20", "2026-02-16", "2026-02-17", "2026-04-03", "2026-06-04", "2026-12-24", "2026-12-31"):
+            self.assertIn(d, h)                                   # Consciência Negra, Carnaval, Sexta Santa, Corpus Christi, 24 e 31/12
+        self.assertFalse(cal.is_b3_day(date(2026, 11, 20)))
+        self.assertTrue(cal.is_b3_day(date(2026, 11, 19)))
+        self.assertEqual(next_sessions("2026-11-19", 1), "2026-11-23")      # quinta → pula o feriado de sexta e o fim de semana
+        self.assertEqual(next_sessions("2026-11-19", 5), "2026-11-27")
+        self.assertNotIn("2023-11-20", cal.b3_holidays(2023))      # feriado nacional só a partir de 2024

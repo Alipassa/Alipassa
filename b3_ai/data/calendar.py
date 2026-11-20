@@ -31,6 +31,39 @@ WHY = {
 }
 
 
+def _easter(y: int) -> date:
+    """Domingo de Páscoa (algoritmo gregoriano anônimo)."""
+    a, b, c = y % 19, y // 100, y % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l_ = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l_) // 451
+    month = (h + l_ - 7 * m + 114) // 31
+    return date(y, month, (h + l_ - 7 * m + 114) % 31 + 1)
+
+
+def b3_holidays(y: int) -> set[str]:
+    """Dias sem pregão na B3: feriados nacionais (inclui 20/11, Consciência Negra, desde 2024), Carnaval (segunda e terça),
+    Sexta-feira Santa, Corpus Christi, 24/12 e 31/12. Datas extras (ex.: feriado novo) em B3AI_FERIADOS=AAAA-MM-DD,AAAA-MM-DD.
+    Confira o calendário oficial da B3 para o ano: esta lista segue a regra geral."""
+    e = _easter(y)
+    days = {date(y, 1, 1), date(y, 4, 21), date(y, 5, 1), date(y, 9, 7), date(y, 10, 12), date(y, 11, 2), date(y, 11, 15),
+            date(y, 12, 25), date(y, 12, 24), date(y, 12, 31), e - timedelta(days=48), e - timedelta(days=47), e - timedelta(days=2),
+            e + timedelta(days=60)}
+    if y >= 2024:
+        days.add(date(y, 11, 20))
+    out = {d.isoformat() for d in days}
+    out |= {x.strip() for x in os.environ.get("B3AI_FERIADOS", "").split(",") if x.strip().startswith(str(y))}
+    return out
+
+
+def is_b3_day(d: date) -> bool:
+    return d.weekday() < 5 and d.isoformat() not in b3_holidays(d.year)
+
+
 def parse_fomc(html_text: str) -> list[dict]:
     """Datas de decisão (último dia de cada reunião) de todos os anos listados na página."""
     out = []
