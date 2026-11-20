@@ -679,3 +679,24 @@ class GapPreopenTest(unittest.TestCase):
         today = bars + [(t + 60 * 86400, p["gatilho"] * 1.0001, p["gatilho"] * 1.0002, p["gatilho"], p["gatilho"] * 1.0001, 1.0)]
         g = simulate.gap_state(today, True)
         self.assertTrue(g["grande"] and g["fora_da_faixa"] and g["vespera_na_direcao"])
+
+
+class NewsThrottleTest(unittest.TestCase):
+    def test_google_refusal_keeps_previous_news_and_stops_asking(self):
+        from b3_ai.data import news as N
+        from b3_ai.data.http import DataError
+        calls = []
+
+        def fake(url, **kw):
+            calls.append(url)
+            raise DataError("HTTP 429 em https://news.google.com/rss/search")
+
+        prev = [{"title": "Ibovespa sobe 1%", "source": "Valor", "link": "", "ts": __import__("time").time() - 3600, "scope": "BR"}]
+        orig = N.fetch
+        N.fetch = fake
+        try:
+            items, errs = N.fetch_news(previous=prev, pause=0)
+        finally:
+            N.fetch = orig
+        self.assertEqual([i["title"] for i in items], ["Ibovespa sobe 1%"])          # a leitura anterior não se perde
+        self.assertEqual(sum("news.google.com" in c for c in calls), 1)              # parou no primeiro 429 do Google

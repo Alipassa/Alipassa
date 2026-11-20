@@ -66,6 +66,8 @@ class Engine:
         self._daily_cache: dict = {}
         self._intra_cache: dict = {}
         self._news_cache: tuple[float, Optional[dict], list[str]] = (0.0, None, [])
+        self._news_items: list[dict] = []
+        self._news_try, self._news_busy = 0.0, False
         self._bcb_cache: tuple[float, dict] = (0.0, {})
         self.etapa, self.etapa_ts, self.ciclo_ts, self.ciclos = "iniciando", time.time(), time.time(), 0
         self._b3_ts = 0.0
@@ -140,19 +142,41 @@ class Engine:
         return h, notes
 
     def _news(self) -> tuple[Optional[dict], list[str]]:
+        """Notícias: devolve na hora a última leitura e, se ela tem mais de 30 min, dispara a busca em segundo plano (as
+        buscas vão uma a uma, com pausa, para o Google Notícias não recusar). Falha de feed não vira aviso no topo enquanto
+        houver notícias de menos de 3 horas."""
         if not self.with_news:
             return None, []
-        ts, cached, errs = self._news_cache
-        if cached is not None and time.time() - ts < 600:
-            return cached, errs
+        ts, cached, _errs = self._news_cache
+        now = time.time()
+        if (cached is None or now - self._news_try > 1800) and not self._news_busy:
+            self._news_busy, self._news_try = True, now
+            first = cached is None
+            th = threading.Thread(target=self._news_refresh, name="b3-ai-noticias", daemon=True)
+            th.start()
+            if first:
+                th.join(40)                   # só a primeira leitura espera (para o painel já abrir com notícias)
+            ts, cached, _errs = self._news_cache
+        notes = []
+        if cached is None:
+            notes.append("notícias ainda indisponíveis (a fonte recusou os pedidos; nova tentativa em 30 min)")
+        elif now - ts > 3 * 3600:
+            notes.append(f"notícias desatualizadas: última leitura há {(now - ts) / 3600:.0f} h (a fonte está recusando os pedidos)")
+        return cached, notes
+
+    def _news_refresh(self) -> None:
         try:
-            items, errs = news.fetch_news()
-            if items:
-                cached = news_ai.analyze(items)
-                self._news_cache = (time.time(), cached, errs)
-        except Exception as e:  # noqa: BLE001 — notícias nunca derrubam o ciclo
-            errs = [f"notícias: {e}"]
-        return cached, errs
+            items, errs = news.fetch_news(previous=self._news_items)
+            if items and len(items) > 0 and (len(errs) < 12 or not self._news_items):
+                self._news_items = items
+                self._news_cache = (time.time(), news_ai.analyze(items), errs)
+            elif items:                        # rodada quase toda recusada: mantém o que tinha, só acrescenta o novo
+                self._news_items = items
+                self._news_cache = (self._news_cache[0] or time.time(), news_ai.analyze(items), errs)
+        except Exception:  # noqa: BLE001 — notícias nunca derrubam o painel
+            pass
+        finally:
+            self._news_busy = False
 
     def _bcb(self) -> dict:
         ts, cached = self._bcb_cache
@@ -609,7 +633,7 @@ class Engine:
             notes += self.refresh_b3()
         self._step("lendo notícias")
         news_state, n2 = self._news()
-        notes += n2[:2]
+        notes += n2[:1]
 
         # MetaTrader 5: WIN e WDO em tempo real substituem as séries públicas (que continuam valendo para o exterior)
         self.rt = {}

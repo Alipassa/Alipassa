@@ -61,27 +61,41 @@ def parse_rss(text: str, scope: str, default_source: str = "") -> list[dict]:
     return items
 
 
-def fetch_news(max_age_days: float = 7.0) -> tuple[list[dict], list[str]]:
-    """Devolve (notícias deduplicadas, mais recentes primeiro; erros por feed)."""
-    errors: list[str] = []
-
-    def one(feed: tuple[str, str, str]) -> list[dict]:
-        scope, url, src = feed
-        try:
-            return parse_rss(fetch(url, timeout=12, retries=1), scope, src)
-        except DataError as e:
-            errors.append(str(e))
-            return []
-
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        chunks = list(ex.map(one, _feeds()))
+def dedupe(items: list[dict], max_age_days: float = 7.0) -> list[dict]:
     now = datetime.now(timezone.utc).timestamp()
     seen: set[str] = set()
     out: list[dict] = []
-    for it in sorted((i for c in chunks for i in c), key=lambda x: -x["ts"]):
+    for it in sorted(items, key=lambda x: -x["ts"]):
         key = re.sub(r"\W+", "", it["title"].lower())[:70]
         if key in seen or now - it["ts"] > max_age_days * 86400 or it["ts"] > now + 3600:
             continue
         seen.add(key)
         out.append(it)
-    return out, errors
+    return out
+
+
+def fetch_news(max_age_days: float = 7.0, previous: list[dict] | None = None, pause: float = 0.6) -> tuple[list[dict], list[str]]:
+    """Devolve (notícias deduplicadas, mais recentes primeiro; erros por feed).
+
+    As buscas vão UMA por vez, com pausa, porque o Google Notícias recusa rajadas (HTTP 429); ao primeiro 429 as buscas
+    restantes do Google são deixadas para a próxima rodada. `previous` (a leitura anterior) é mesclado ao resultado, então
+    uma rodada parcial não apaga o que já se tinha.
+    """
+    import time as _time
+    errors: list[str] = []
+    items: list[dict] = list(previous or [])
+    google_blocked = False
+    for scope, url, src in _feeds():
+        is_google = "news.google.com" in url
+        if is_google and google_blocked:
+            continue
+        try:
+            items += parse_rss(fetch(url, timeout=12, retries=0), scope, src)
+        except DataError as e:
+            errors.append(str(e))
+            if is_google and "429" in str(e):
+                google_blocked = True
+        _time.sleep(pause if is_google else 0.1)
+    for it in items:
+        it.pop("_cls", None)              # classificação é refeita sobre o conjunto mesclado
+    return dedupe(items, max_age_days), errors

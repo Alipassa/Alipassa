@@ -48,7 +48,7 @@ def check_sources(engine: Engine) -> list[tuple[str, bool, str]]:
     run("Histórico WIN (feed público)", lambda: f"{len(tv.fetch_one(TARGETS['WIN'].tv, '1D', 50) or [])} barras")
     run("Banco Central (Selic, PTAX, IPCA)", lambda: f"{len(bcb.snapshot())} séries")
     run("Boletim Focus", lambda: f"{len(focus.fetch_focus())} indicadores")
-    run("Notícias (RSS)", lambda: (lambda r: f"{len(r[0])} manchetes, {len(r[1])} feeds com erro")(news.fetch_news()))
+    run("Notícias (RSS)", lambda: (lambda r: f"{len(r[0])} manchetes, {len(r[1])} feeds com erro")(news.fetch_news(pause=0.3)))
     run("Agenda (Fed, Copom)", lambda: (lambda a: f"{len(a['eventos'])} eventos" + ("; " + "; ".join(a["erros"]) if a["erros"] else ""))(cal.build(engine.data_dir)))
     if engine.mt5 is not None:
         run("MetaTrader 5 (tempo real)", lambda: ", ".join(engine.mt5.snapshot()["simbolos"].values()))
