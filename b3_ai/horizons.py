@@ -4,7 +4,9 @@ Para cada prazo, compara o modelo do painel com regras simples, todas em barras 
 fechamento da barra:
   - momento:  aposta que o movimento das últimas barras continua;
   - S&P líder: aposta na direção do S&P das últimas barras (mini índice: mesmo lado; mini dólar: lado oposto);
-  - VWAP:     posição do preço em relação ao VWAP do dia.
+  - VWAP:     posição do preço em relação ao VWAP do dia;
+  - cruzamento de médias (EMA 9 × EMA 21) e MACD (12, 26, 9) cruzando a linha de sinal: sinal SÓ no candle do cruzamento,
+    calculados no gráfico de 5 min e no de 15 min. Depois de um sinal, o próximo só conta depois de encerrado o prazo.
 Cada regra pode funcionar "a favor" ou "ao contrário" (reversão): o sentido é ESCOLHIDO na 1ª metade do histórico e o
 resultado mostrado é o da 2ª metade, que a escolha não viu. As previsões são contadas sem sobreposição (uma a cada prazo)
 para o intervalo de confiança não sair estreito demais, e nunca atravessam a noite. Ao lado do acerto vai o ganho médio por
@@ -21,6 +23,25 @@ from . import model as M, simulate as SIM, stats as st
 from .model import BRT
 
 HORIZONTES = {"5 min": 1, "10 min": 2, "30 min": 6, "1 hora": 12}
+HORIZONTES_15 = {"15 min": 1, "30 min": 2, "1 hora": 4}
+EVENTOS = ("cruzamento EMA 9×21", "MACD × sinal")
+
+
+def _crosses(c: list[float]) -> dict[str, list[Optional[int]]]:
+    """+1/−1 só no candle em que a EMA 9 cruza a EMA 21 (ou o MACD cruza a linha de sinal), None nos demais."""
+    n = len(c)
+    e9, e21 = st.ema(c, 9), st.ema(c, 21)
+    macd = [a - b for a, b in zip(st.ema(c, 12), st.ema(c, 26))]
+    sig = st.ema(macd, 9)
+    out = {"cruzamento EMA 9×21": [None] * n, "MACD × sinal": [None] * n}
+    for i in range(35, n):
+        for name, a, b in (("cruzamento EMA 9×21", e9, e21), ("MACD × sinal", macd, sig)):
+            d0, d1 = a[i - 1] - b[i - 1], a[i] - b[i]
+            if d0 <= 0 < d1:
+                out[name][i] = 1
+            elif d0 >= 0 > d1:
+                out[name][i] = -1
+    return out
 
 
 def _align(ts: list[float], bars: list[tuple]) -> list[Optional[float]]:
@@ -62,7 +83,17 @@ def _signals(bars: list[tuple], lead: list[tuple], h: int, asset: str) -> dict[s
                 lid[i] = (s if asset == "WIN" else -s) if s else None
         if i - sess_start[i] >= 6:
             vw[i] = sg(c[i] - vwap[i])
-    return {"momento": mom, "S&P líder": lid, "VWAP": vw}
+    return {"momento": mom, "S&P líder": lid, "VWAP": vw, **_crosses(c)}
+
+
+def _event_idx(bars: list[tuple], sig: list[Optional[int]], h: int, span: int, lo: int, hi: int) -> list[int]:
+    """Candles de sinal entre lo e hi, sem sobreposição (o próximo só depois de h candles) e sem atravessar a noite."""
+    out, busy = [], -1
+    for i in range(max(lo, 1), min(hi, len(bars) - h)):
+        if sig[i] and i > busy and bars[i + h][0] - bars[i][0] <= h * span + 900:
+            out.append(i)
+            busy = i + h
+    return out
 
 
 def _evaluate(bars: list[tuple], sig: list[Optional[int]], h: int, asset: str, idx: list[int]) -> dict:
@@ -94,26 +125,36 @@ def _verdict(r: dict) -> str:
     return "✅ acima do acaso" if lo > 0.5 else "❌ abaixo do acaso" if hi < 0.5 else "⚪ não se distingue do acaso"
 
 
-def study(asset: str, bars: list[tuple], lead: list[tuple], model_eval: dict[str, dict]) -> list[dict]:
+def study(asset: str, bars: list[tuple], lead: list[tuple], model_eval: dict[str, dict],
+          horizontes: Optional[dict] = None, tf: int = 5, so_eventos: bool = False) -> list[dict]:
+    horizontes = horizontes or HORIZONTES
     rows = []
     n = len(bars)
     ts = [b[0] for b in bars]
-    for name, h in HORIZONTES.items():
-        ok = [i for i in range(0, n - h, h) if ts[i + h] - ts[i] <= h * 300 + 900]      # não atravessa a noite
-        half = len(ok) // 2
-        tr, te = ok[:half], ok[half:]
+    span = tf * 60
+    grafico = f"gráfico de {tf} min"
+    sigs = _signals(bars, lead, 1, asset) if so_eventos else None
+    for name, h in horizontes.items():
+        ok = [i for i in range(0, n - h, h) if ts[i + h] - ts[i] <= h * span + 900]      # não atravessa a noite
+        half_i = n // 2
+        tr, te = [i for i in ok if i < half_i], [i for i in ok if i >= half_i]
         me = model_eval.get(name)
-        if me:
-            rows.append({"ativo": asset, "prazo": name, "regra": "modelo do painel", "sentido": "—", **me})
-        for rule, sig in _signals(bars, lead, h, asset).items():
-            a = _evaluate(bars, sig, h, asset, tr)
+        if me and not so_eventos:
+            rows.append({"ativo": asset, "prazo": name, "regra": "modelo do painel", "sentido": "—", "grafico": grafico, **me})
+        for rule, sig in (sigs or _signals(bars, lead, h, asset)).items():
+            evento = rule in EVENTOS
+            if so_eventos and not evento:
+                continue
+            idx_tr = _event_idx(bars, sig, h, span, 0, half_i) if evento else tr
+            idx_te = _event_idx(bars, sig, h, span, half_i, n) if evento else te
+            a = _evaluate(bars, sig, h, asset, idx_tr)
             if not a.get("n"):
                 continue
             inv = a["acerto"] < 0.5                                   # escolhido na 1ª metade
             s2 = [(-x if (inv and x) else x) for x in sig]
-            r = _evaluate(bars, s2, h, asset, te)
-            rows.append({"ativo": asset, "prazo": name, "regra": rule, "sentido": "ao contrário (reversão)" if inv else "a favor",
-                         "acerto_1a": a["acerto"] if not inv else 1 - a["acerto"], **r})
+            r = _evaluate(bars, s2, h, asset, idx_te)
+            rows.append({"ativo": asset, "prazo": name, "regra": rule, "grafico": grafico,
+                         "sentido": "ao contrário (reversão)" if inv else "a favor", "acerto_1a": a["acerto"] if not inv else 1 - a["acerto"], **r})
     for r in rows:
         r["veredito"] = _verdict(r)
     return rows
@@ -129,6 +170,7 @@ def run(engine) -> str:
          "Previsões sem sobreposição e sem atravessar a noite; sentido de cada regra escolhido na 1ª metade, resultado da 2ª metade. "
          f"Custo por operação: mini índice {rp(SIM.cost('WIN'))}, mini dólar {rp(SIM.cost('WDO'))}.", ""]
     best: dict = {}
+    cross_rows: list[dict] = []
     for k in ("WIN", "WDO"):
         bars = intr.get((k, "5")) or []
         if len(bars) < 1000:
@@ -144,23 +186,33 @@ def run(engine) -> str:
                         half = 1.96 * math.sqrt(p * (1 - p) / nn) if nn else 0
                         model_eval[nm] = {"n": nn, "acerto": p, "ic": (p - half, p + half), "liq": None}
         rows = study(k, bars, intr.get(("ES", "5")) or [], model_eval)
+        b15 = intr.get((k, "15")) or []
+        if len(b15) > 500:
+            rows += study(k, b15, [], {}, HORIZONTES_15, tf=15, so_eventos=True)
         days = len({int(b[0] // 86400) for b in bars})
         L += [f"## {'Mini índice (WIN)' if k == 'WIN' else 'Mini dólar (WDO)'} — {len(bars)} barras de 5 min (~{days} pregões)", "",
-              "| Prazo | Regra | Sentido | Previsões (2ª metade) | Acerto | Intervalo 95% | Ganho líquido por operação | Conclusão |",
-              "| --- | --- | --- | ---: | ---: | --- | ---: | --- |"]
+              "| Prazo | Regra | Gráfico | Sentido | Previsões (2ª metade) | Acerto | Intervalo 95% | Ganho líquido por operação | Conclusão |",
+              "| --- | --- | --- | --- | ---: | ---: | --- | ---: | --- |"]
         for r in rows:
             if not r.get("n"):
                 continue
-            L.append(f"| {r['prazo']} | {r['regra']} | {r['sentido']} | {r['n']} | **{pc(r['acerto'])}** | {pc(r['ic'][0])} a {pc(r['ic'][1])} | "
+            L.append(f"| {r['prazo']} | {r['regra']} | {r['grafico'].replace('gráfico de ', '')} | {r['sentido']} | {r['n']} | **{pc(r['acerto'])}** | {pc(r['ic'][0])} a {pc(r['ic'][1])} | "
                      f"{rp(r.get('liq'))} | {r['veredito']} |")
+            if r["regra"] in EVENTOS:
+                cross_rows.append(r)
             b = best.setdefault((k, r["prazo"]), r)
             if r["acerto"] > b["acerto"]:
                 best[(k, r["prazo"])] = r
         L.append("")
-    L += ["## Melhor regra em cada prazo", "", "| Ativo | Prazo | Melhor regra | Acerto | Intervalo 95% | Ganho líquido | Conclusão |",
+    L += ["## Cruzamento de médias e MACD, por prazo", "", "| Ativo | Gráfico | Regra | Prazo | Previsões | Acerto | Ganho líquido | Conclusão |",
+          "| --- | --- | --- | --- | ---: | ---: | ---: | --- |"]
+    for r in sorted(cross_rows, key=lambda r: (r["ativo"], r["grafico"], r["regra"], r["prazo"])):
+        L.append(f"| {r['ativo']} | {r['grafico'].replace('gráfico de ', '')} | {r['regra']} ({'reversão' if 'contrário' in r['sentido'] else 'a favor'}) | "
+                 f"{r['prazo']} | {r['n']} | **{pc(r['acerto'])}** | {rp(r.get('liq'))} | {r['veredito']} |")
+    L += ["", "## Melhor regra em cada prazo", "", "| Ativo | Prazo | Melhor regra | Acerto | Intervalo 95% | Ganho líquido | Conclusão |",
           "| --- | --- | --- | ---: | --- | ---: | --- |"]
     for (k, prazo), r in best.items():
-        L.append(f"| {k} | {prazo} | {r['regra']}{' (' + r['sentido'] + ')' if r['sentido'] != '—' else ''} | **{pc(r['acerto'])}** | "
+        L.append(f"| {k} | {prazo} | {r['regra']}{' (' + r['sentido'] + ')' if r['sentido'] != '—' else ''}{', gráfico de 15 min' if r.get('grafico') == 'gráfico de 15 min' else ''} | **{pc(r['acerto'])}** | "
                  f"{pc(r['ic'][0])} a {pc(r['ic'][1])} | {rp(r.get('liq'))} | {r['veredito']} |")
     L += ["", "## Como ler", "",
           "- Só ✅ é acerto acima do acaso. Escolher a melhor linha entre muitas favorece a sorte: desconfie de vantagens pequenas.",
