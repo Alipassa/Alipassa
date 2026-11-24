@@ -1,0 +1,72 @@
+# TURBO IA — botão "Iniciar IA" que analisa o gráfico e opera no MetaTrader 5
+
+Painel local (navegador) no estilo de uma plataforma de trading: gráfico com SuperTrend, LSMA, Keltner, Parabolic SAR e CHoCH,
+configurações da IA à esquerda e modo manual à direita. Ao clicar em **Iniciar IA**, a sessão roda sozinha:
+
+```text
+candle fecha → análise (8 indicadores votam) → confluência ≥ mínimo do modo → ordem a mercado no MT5 com SL/TP
+            → acompanha a posição (SL/TP no servidor, saída por tempo opcional) → soma o resultado da sessão
+            → para sozinha ao bater a META, o LIMITE DE PERDA, a PROTEÇÃO DA SESSÃO ou o máximo de operações
+```
+
+## Como rodar (Windows + MT5)
+
+1. Instale o MetaTrader 5 da sua corretora, faça login numa conta **DEMO** e deixe o terminal aberto.
+   Em *Ferramentas → Opções → Expert Advisors*, marque **Permitir negociação algorítmica**.
+2. `pip install MetaTrader5`
+3. Na raiz do repositório: `python -m turbo_ia --broker mt5` (ou dê dois cliques em `scripts\rodar_turbo_ia.bat`).
+4. O navegador abre em `http://127.0.0.1:8765`. Escolha o mercado (o nome exato do símbolo no MT5, ex.: `Volatility 10 Index`
+   na Deriv, `XAUUSD`, `EURUSD`), o tempo gráfico, o modo e os limites, e clique em **Iniciar IA**.
+
+Sem MT5 (ou em Linux/Mac) rode `python -m turbo_ia --broker paper`: um simulador local gera o preço e executa as ordens,
+para testar o painel sem risco. `--broker auto` (padrão) tenta o MT5 e cai no simulador.
+
+Variáveis opcionais (as mesmas do resto do projeto): `MT5_PATH`, `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER`.
+
+## A análise
+
+| Indicador | Vota compra quando | Peso |
+| --- | --- | --- |
+| SuperTrend (10, 3) | tendência de alta | 2,0 |
+| CHoCH (ZigZag 5) | mudança de estrutura para cima nos últimos 30 candles | 1,5 |
+| LSMA 25 | preço acima e LSMA subindo | 1,0 |
+| Keltner (20, 1) | preço acima do meio / rompeu a banda superior | 1,0 |
+| Parabolic SAR (0,02 · 0,02 · 0,2) | SAR abaixo do preço | 1,0 |
+| EMA 9 × 21 | EMA 9 acima da 21 | 1,0 |
+| Momentum (5 candles) | subiu mais que 0,2 ATR | 1,0 |
+| RSI 14 | entre 52 e 70 | 0,5 |
+
+Venda é o espelho. A **confluência** é o peso a favor ÷ peso total.
+
+| Modo | Exige |
+| --- | --- |
+| ⚡ Veloz | confluência ≥ 55 % |
+| ⚖ Equilibrado | ≥ 65 %, SuperTrend a favor, RSI fora de exaustão (>75 / <25) |
+| 🎯 Preciso | ≥ 75 %, SuperTrend a favor, CHoCH ou LSMA a favor, RSI fora de exaustão |
+
+- **Stop**: logo além da linha do SuperTrend quando ela está entre 0,5 e 3 ATR; senão `Stop (ATR)` × ATR 14.
+  **Alvo** = `Risco:Retorno` × distância do stop. A corretora recebe SL/TP já ajustados ao stops level e ao spread.
+- A IA só analisa **candles fechados** (o candle em formação é ignorado) e os pivôs do CHoCH só valem depois de confirmados:
+  o sinal não "repinta".
+- Uma posição por vez. **Duração (velas)** > 0 fecha a posição após N candles — o equivalente mais próximo do Rise/Fall,
+  que não existe no MT5 (lá são CFDs com compra/venda).
+
+## Segurança
+
+- O servidor só escuta em `127.0.0.1` e recusa POSTs de outras origens.
+- Ordens em **conta real são bloqueadas**. Para liberar, conscientemente: `set TURBO_IA_ALLOW_REAL=1` antes de iniciar.
+- A IA só fecha/gerencia posições com o seu número mágico (`260611`); suas outras operações não são tocadas.
+- Nenhuma combinação de indicadores garante lucro. Rode em DEMO por semanas e compare o resultado antes de pensar em real.
+
+## Arquivos
+
+| Arquivo | O que faz |
+| --- | --- |
+| `indicators.py` | SuperTrend, LSMA, Keltner, SAR, ZigZag/CHoCH, EMA, RSI, ATR (sem dependências) |
+| `analysis.py` | votação, modos, SL/TP |
+| `broker.py` | `MT5Broker` (pacote oficial MetaTrader5) e `PaperBroker` (simulador) |
+| `engine.py` | sessão da IA: laço, meta, limite de perda, proteção, saída por tempo |
+| `server.py` | servidor HTTP local + API (`/api/chart`, `/api/ia/start`, `/api/ia/stop`, `/api/order`, `/api/close`) |
+| `static/index.html` | painel (gráfico TradingView Lightweight Charts) |
+
+Testes: `python -m pytest tests/test_turbo_ia.py`.

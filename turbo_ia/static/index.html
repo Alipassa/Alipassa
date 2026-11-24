@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TURBO IA · MT5</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root{--bg:#141418;--panel:#1c1c22;--panel2:#25252d;--line:#2e2e38;--txt:#e8e8ee;--mut:#9a9aa8;--pur:#8b5cf6;--pur2:#a78bfa;
+        --grn:#22c55e;--red:#ef4444;--yel:#f5c542;--blu:#3b82f6}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:#111115}
+  header .logo{font-weight:800;letter-spacing:.5px;font-size:20px}
+  header .logo b{color:var(--pur2)}
+  header .sp{flex:1}
+  .pill{padding:4px 10px;border-radius:999px;background:var(--panel2);font-size:12px;color:var(--mut)}
+  .pill.demo{color:#fff;background:#3b2a6b}.pill.real{color:#fff;background:#7f1d1d}
+  .bal{font-weight:700}
+  main{display:grid;min-height:0;grid-template-columns:330px 1fr 300px;gap:0;height:calc(100vh - 53px)}
+  aside{overflow:auto}
+  section{display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  #chartTab{flex:1;display:flex;flex-direction:column;min-height:0}
+  aside{background:var(--panel);padding:16px;border-right:1px solid var(--line)}
+  aside.right{border-right:0;border-left:1px solid var(--line)}
+  h3{margin:0 0 6px;font-size:17px;font-weight:600}
+  .pnl{font-size:26px;font-weight:800;color:var(--grn);margin:4px 0 14px}
+  .pnl.neg{color:var(--red)}
+  label{display:block;font-size:12px;font-weight:600;margin:12px 0 5px}
+  select,input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:9px 10px;font:inherit}
+  .row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .hint{font-size:11px;color:var(--pur2);margin-top:3px}
+  .card{background:var(--panel2);border-radius:10px;padding:12px;margin-top:12px}
+  .tog{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .tog input{width:auto}
+  .btn{width:100%;border:0;border-radius:10px;padding:13px;font-weight:700;font-size:16px;cursor:pointer;color:#fff}
+  .btn.ia{background:linear-gradient(90deg,#8b5cf6,#a78bfa);margin-top:16px}
+  .btn.ia.on{background:linear-gradient(90deg,#b91c1c,#ef4444)}
+  .btn.buy{background:var(--grn)}.btn.sell{background:var(--red)}
+  .btn.sec{background:var(--panel2);border:1px solid var(--line);font-size:13px;padding:9px}
+  .btn:disabled{opacity:.5;cursor:default}
+  .status{font-size:12px;color:var(--mut);margin-top:10px;min-height:16px}
+  .tabs{display:flex;gap:22px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .tabs a{color:var(--mut);cursor:pointer;text-decoration:none;font-size:13px;letter-spacing:.4px}
+  .tabs a.on{color:var(--pur2);border-bottom:2px solid var(--pur2);padding-bottom:6px}
+  .toolbar{display:flex;gap:6px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .toolbar button{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:4px 9px;cursor:pointer;font-size:12px}
+  .toolbar button.on{background:var(--pur);border-color:var(--pur)}
+  .legend{font-size:12px;color:var(--mut);padding:6px 12px;display:flex;gap:14px;flex-wrap:wrap}
+  .legend i{display:inline-block;width:10px;height:3px;margin-right:4px;vertical-align:middle}
+  #chartwrap{position:relative;flex:1;min-height:320px}
+  #chart{position:absolute;inset:0}
+  #toast{position:absolute;left:50%;bottom:30px;transform:translateX(-50%);background:#111115ee;border:1px solid var(--line);
+         border-radius:10px;padding:10px 14px;min-width:260px;font-size:13px;z-index:5;border-bottom:3px solid var(--pur)}
+  #toast .bars{display:inline-flex;gap:3px;margin:0 8px;vertical-align:middle}
+  #toast .bars span{width:16px;height:4px;border-radius:2px;background:#444}
+  #toast .bars span.f{background:var(--pur2)}
+  #toast small{color:var(--mut);display:block;margin-top:3px}
+  #logs{padding:12px 16px;font:12px/1.5 ui-monospace,Consolas,monospace;display:none;flex:1;overflow:auto}
+  .lg-trade{color:var(--pur2)}.lg-win{color:var(--grn)}.lg-loss,.lg-error{color:var(--red)}.lg-skip{color:var(--mut)}.lg-start,.lg-stop{color:var(--yel)}
+  .pos{display:flex;justify-content:space-between;align-items:center;background:var(--panel2);border-radius:8px;padding:8px 10px;margin-top:8px;font-size:12px}
+  .pos button{background:transparent;border:1px solid var(--line);color:var(--txt);border-radius:6px;cursor:pointer;padding:3px 8px}
+  .g{color:var(--grn)}.r{color:var(--red)}.m{color:var(--mut)}
+  .votes{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-size:12px;margin-top:6px}
+  .warn{font-size:11px;color:var(--mut);margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
+  @media (max-width:1100px){main{grid-template-columns:1fr;height:auto}#chartwrap{flex:none;height:60vh}aside{border:0}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">TURBO <b>IA</b></div>
+  <span class="pill" id="broker">conectando…</span>
+  <div class="sp"></div>
+  <span class="pill" id="acctype">—</span>
+  <span class="bal" id="balance">—</span>
+</header>
+
+<main>
+  <!-- ESQUERDA: configurações da IA -->
+  <aside>
+    <h3>Configurações da IA</h3>
+    <div class="pnl" id="sessPnl">0.00 (0 ops)</div>
+
+    <label>Mercado</label>
+    <select id="symbol"></select>
+
+    <div class="row2">
+      <div><label>Tempo gráfico</label>
+        <select id="tf"><option>M1</option><option>M5</option><option>M15</option><option>M30</option><option>H1</option></select></div>
+      <div><label>Modo de negociação</label>
+        <select id="mode">
+          <option value="veloz">⚡ Veloz</option>
+          <option value="equilibrado">⚖ Equilibrado</option>
+          <option value="preciso">🎯 Preciso</option>
+        </select></div>
+    </div>
+    <div class="hint" id="modeHint">Mais negociações, menos precisão</div>
+
+    <label>Estratégia</label>
+    <select disabled><option>Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH</option></select>
+
+    <div class="row">
+      <div><label>Lote</label><input id="volume" type="number" step="0.01" min="0.01" value="0.50"></div>
+      <div><label>Lucro alvo</label><input id="target" type="number" step="0.01" value="1"></div>
+      <div><label>Limite perda</label><input id="loss" type="number" step="0.01" value="100"></div>
+    </div>
+    <div class="row">
+      <div><label>Risco:Retorno</label><input id="rr" type="number" step="0.1" value="1.5"></div>
+      <div><label>Stop (ATR)</label><input id="slatr" type="number" step="0.1" value="1.5"></div>
+      <div><label>Duração (velas)</label><input id="dur" type="number" step="1" min="0" value="0"></div>
+    </div>
+    <div class="hint">Duração 0 = sai só por SL/TP · N = fecha após N velas (estilo Rise/Fall)</div>
+
+    <div class="card">
+      <div class="tog"><div><b>Proteção da sessão</b><div class="m" style="font-size:11px">Encerra se o lucro devolver até o valor protegido</div></div>
+        <input type="checkbox" id="protect" checked></div>
+      <div class="row2">
+        <div><label>Após lucrar</label><input id="pafter" type="number" step="0.01" value="0.70"></div>
+        <div><label>Proteger</label><input id="pkeep" type="number" step="0.01" value="0.14"></div>
+      </div>
+    </div>
+
+    <button class="btn ia" id="iaBtn">▶ Iniciar IA</button>
+    <div class="status" id="iaStatus">IA parada</div>
+
+    <div class="card" id="anaCard">
+      <b>Última análise</b> <span class="m" id="anaWhen"></span>
+      <div id="anaBody" class="m" style="font-size:12px;margin-top:4px">—</div>
+    </div>
+  </aside>
+
+  <!-- CENTRO: gráfico -->
+  <section>
+    <div class="tabs"><a class="on" data-tab="chart">GRÁFICO</a><a data-tab="logs">REGISTROS</a></div>
+    <div id="chartTab">
+      <div class="toolbar">
+        <button id="anaNow">🔍 Analisar agora</button>
+        <span class="m" style="font-size:12px;margin-left:8px">Indicadores:</span>
+        <button class="on" data-ind="st">SuperTrend</button><button class="on" data-ind="lsma">LSMA 25</button>
+        <button class="on" data-ind="kc">Keltner 20</button><button class="on" data-ind="sar">SAR</button><button class="on" data-ind="choch">CHoCH</button>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div id="chartwrap"><div id="chart"></div>
+        <div id="toast"><b id="tDir">—</b><span class="bars" id="tBars"><span></span><span></span><span></span><span></span></span><b id="tLbl"></b>
+          <small id="tSub">aguardando dados…</small></div>
+      </div>
+    </div>
+    <div id="logs"></div>
+  </section>
+
+  <!-- DIREITA: modo manual -->
+  <aside class="right">
+    <h3>Modo manual</h3>
+    <div class="m" style="font-size:12px" id="manSym">—</div>
+    <div style="font-size:22px;font-weight:700;margin:6px 0" id="price">—</div>
+    <label>Lote</label><input id="mVol" type="number" step="0.01" value="0.50">
+    <div class="row2"><div><label>Stop (ATR)</label><input id="mSl" type="number" step="0.1" value="1.5"></div>
+      <div><label>R:R</label><input id="mRr" type="number" step="0.1" value="1.5"></div></div>
+    <div class="row2" style="margin-top:14px">
+      <button class="btn buy" id="buyBtn">↗ Comprar</button>
+      <button class="btn sell" id="sellBtn">↘ Vender</button>
+    </div>
+    <label style="margin-top:18px">Posições abertas (IA)</label>
+    <div id="positions" class="m" style="font-size:12px">nenhuma</div>
+    <div class="warn">⚠ Nenhuma estratégia garante lucro. Use conta <b>DEMO</b>. Ordens em conta real ficam bloqueadas a menos que
+      <code>TURBO_IA_ALLOW_REAL=1</code> seja definido.</div>
+  </aside>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = async (path, body) => {
+  const r = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {});
+  return r.json();
+};
+const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
+const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação'};
+const show = {st:true, lsma:true, kc:true, sar:true, choch:true};
+let running = false, digits = 3, lastAnalysis = null;
+
+// ---------- gráfico
+const chart = LightweightCharts.createChart($('chart'), {
+  layout:{background:{color:'#18181d'}, textColor:'#c9c9d4'},
+  grid:{vertLines:{color:'#22222a'}, horzLines:{color:'#22222a'}},
+  rightPriceScale:{borderColor:'#2e2e38'}, timeScale:{borderColor:'#2e2e38', timeVisible:true, secondsVisible:false},
+  crosshair:{mode:0}, autoSize:true,
+});
+const candles = chart.addCandlestickSeries({upColor:'#22c55e', downColor:'#ef4444', borderVisible:false, wickUpColor:'#22c55e', wickDownColor:'#ef4444'});
+const line = (color, w=1, extra={}) => chart.addLineSeries({color, lineWidth:w, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, ...extra});
+const st = line('#16a34a', 2), lsma = line('#f5c542', 2);
+const kcU = line('#3b82f6'), kcM = line('#60a5fa', 1, {lineStyle:2}), kcL = line('#3b82f6');
+const sar = line('#a78bfa', 1, {lineVisible:false, pointMarkersVisible:true, pointMarkersRadius:2});
+let priceLines = [];
+
+function toLine(c, arr, filter) {
+  return c.map((k,i) => (arr[i] != null && (!filter || filter(i))) ? {time:k.time, value:arr[i]} : {time:k.time});
+}
+
+function renderChart(d) {
+  const c = d.candles, s = d.series;
+  digits = d.digits ?? 2;
+  candles.applyOptions({priceFormat:{type:'price', precision:digits, minMove:Math.pow(10,-digits)}});
+  candles.setData(c);
+  st.setData(show.st ? c.map((k,i) => s.supertrend[i] == null ? {time:k.time} :
+     {time:k.time, value:s.supertrend[i], color:s.supertrend_dir[i] > 0 ? '#16a34a' : '#b91c1c'}) : []);
+  lsma.setData(show.lsma ? toLine(c, s.lsma) : []);
+  kcU.setData(show.kc ? toLine(c, s.kc_up) : []); kcM.setData(show.kc ? toLine(c, s.kc_mid) : []); kcL.setData(show.kc ? toLine(c, s.kc_lo) : []);
+  sar.setData(show.sar ? toLine(c, s.sar) : []);
+  const t0 = c[0].time;
+  candles.setMarkers(show.choch ? s.choch.filter(e => e.time >= t0).map(e => ({time:e.time, position:e.dir>0?'belowBar':'aboveBar',
+     color:e.dir>0?'#22c55e':'#ef4444', shape:e.dir>0?'arrowUp':'arrowDown', text:'CHoCH '+(e.dir>0?'↑':'↓')})) : []);
+  priceLines.forEach(p => candles.removePriceLine(p)); priceLines = [];
+  for (const p of d.positions) {
+    priceLines.push(candles.createPriceLine({price:p.price_open, color:'#a78bfa', lineWidth:1, title:`${p.side} ${p.volume} (${fmt(p.profit)})`}));
+    if (p.sl) priceLines.push(candles.createPriceLine({price:p.sl, color:'#ef4444', lineStyle:2, lineWidth:1, title:'Stop'}));
+    if (p.tp) priceLines.push(candles.createPriceLine({price:p.tp, color:'#22c55e', lineStyle:2, lineWidth:1, title:'Objetivo'}));
+  }
+  const L = i => s[i] && s[i][s[i].length-1];
+  $('legend').innerHTML = `<span><b>${d.symbol}</b> · ${d.tf}</span>
+    <span><i style="background:#16a34a"></i>SuperTrend 10 3 ${fmt(L('supertrend'),digits)}</span>
+    <span><i style="background:#f5c542"></i>LSMA 25 ${fmt(L('lsma'),digits)}</span>
+    <span><i style="background:#3b82f6"></i>KC 20 1 ${fmt(L('kc_up'),digits)} ${fmt(L('kc_mid'),digits)} ${fmt(L('kc_lo'),digits)}</span>
+    <span><i style="background:#a78bfa"></i>SAR ${fmt(L('sar'),digits)}</span>`;
+  $('price').textContent = fmt(d.bid, digits);
+  $('manSym').textContent = `${d.symbol} · bid ${fmt(d.bid,digits)} / ask ${fmt(d.ask,digits)}`;
+  if (d.analysis) renderAnalysis(d.analysis, !running);
+}
+
+function renderAnalysis(a, toastOnly) {
+  const side = a.label.startsWith('Alta') ? 'Alta' : a.label.startsWith('Baixa') ? 'Baixa' : 'Neutro';
+  $('tDir').textContent = side; $('tDir').className = side==='Alta'?'g':side==='Baixa'?'r':'m';
+  const n = a.strength >= 75 ? 4 : a.strength >= 65 ? 3 : a.strength >= 55 ? 2 : 1;
+  [...$('tBars').children].forEach((b,i) => b.className = i < n ? 'f' : '');
+  $('tLbl').textContent = a.label.split('· ')[1] || '';
+  $('tSub').textContent = a.signal !== 'NONE' ? `Entrada ${a.signal==='BUY'?'COMPRA':'VENDA'} · força ${fmt(a.strength,0)}% · SL ${fmt(a.sl,digits)} · TP ${fmt(a.tp,digits)}`
+                                              : (a.blocked[0] || 'sem entrada');
+  if (toastOnly) return;
+  lastAnalysis = a;
+}
+
+function renderAnaCard(a) {
+  if (!a) return;
+  const name = {supertrend:'SuperTrend', lsma:'LSMA 25', keltner:'Keltner', sar:'Parabolic SAR', choch:'CHoCH', ema_cross:'EMA 9×21', rsi:'RSI 14', momentum:'Momentum'};
+  const v = Object.entries(a.votes).map(([k,x]) => `<span>${name[k]||k}</span><span class="${x>0?'g':x<0?'r':'m'}">${x>0?'▲ compra':x<0?'▼ venda':'· neutro'}</span>`).join('');
+  $('anaBody').innerHTML = `<div><b class="${a.signal==='BUY'?'g':a.signal==='SELL'?'r':'m'}">${a.signal==='NONE'?'SEM ENTRADA':a.signal==='BUY'?'COMPRA':'VENDA'}</b>
+    · ${a.label} · confluência ${fmt(a.strength,0)}% · ATR ${fmt(a.atr,digits)}</div>
+    <div class="votes">${v}</div>${a.blocked.length?`<div style="margin-top:6px">⛔ ${a.blocked.join('<br>⛔ ')}</div>`:''}`;
+}
+
+// ---------- estado
+async function loadSymbols() {
+  const {symbols} = await api('/api/symbols');
+  const pref = ['Volatility 10 Index','Volatility 75 Index','XAUUSD','EURUSD'];
+  symbols.sort((a,b) => (pref.indexOf(a)+1||99) - (pref.indexOf(b)+1||99));
+  $('symbol').innerHTML = symbols.map(s => `<option>${s}</option>`).join('');
+  try { const saved = localStorage.getItem('tia_symbol'); if (saved && symbols.includes(saved)) $('symbol').value = saved; } catch(e) {}
+}
+
+async function refreshChart() {
+  try {
+    const d = await api(`/api/chart?symbol=${encodeURIComponent($('symbol').value)}&tf=${$('tf').value}&mode=${$('mode').value}&n=300`);
+    if (d.error) { $('tSub').textContent = d.error; return; }
+    renderChart(d);
+  } catch(e) { $('tSub').textContent = 'servidor indisponível'; }
+}
+
+async function refreshStatus() {
+  let d; try { d = await api('/api/status'); } catch(e) { return; }
+  const a = d.account || {};
+  $('broker').textContent = a.error ? `${a.broker}: ${a.error}` : `${a.broker==='mt5'?'MetaTrader 5':'Simulador (paper)'} · ${a.login} · ${a.server}`;
+  $('acctype').textContent = a.demo ? 'Conta demo' : 'CONTA REAL'; $('acctype').className = 'pill ' + (a.demo ? 'demo' : 'real');
+  $('balance').textContent = a.balance != null ? `${a.currency||''} ${fmt(a.balance)} · equity ${fmt(a.equity)}` : '—';
+  const s = d.session;
+  running = s.running;
+  $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
+  $('iaBtn').classList.toggle('on', running);
+  ['symbol','tf','mode','volume','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
+  $('sessPnl').textContent = `${s.pnl>=0?'+':''}${fmt(s.pnl)} (${s.trades} ops · ${s.wins}G/${s.losses}P)`;
+  $('sessPnl').className = 'pnl' + (s.pnl < 0 ? ' neg' : '');
+  $('iaStatus').textContent = running ? `IA operando ${s.config.symbol} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}`
+                                      : (s.stopped_reason ? 'Parada: ' + s.stopped_reason : 'IA parada');
+  if (s.last_analysis) { renderAnaCard(s.last_analysis); $('anaWhen').textContent = '(IA)'; }
+  $('logs').innerHTML = s.log.slice().reverse().map(l => `<div class="lg-${l.kind}">${new Date(l.t*1000).toLocaleTimeString()} · ${l.msg}</div>`).join('') || '<span class="m">sem registros</span>';
+  $('positions').innerHTML = d.positions.length ? d.positions.map(p => `<div class="pos"><span><b class="${p.side==='BUY'?'g':'r'}">${p.side}</b> ${p.volume} ${p.symbol}<br>
+     <span class="m">@ ${p.price_open} · SL ${p.sl||'—'} · TP ${p.tp||'—'}</span></span><span class="${p.profit>=0?'g':'r'}">${fmt(p.profit)}</span>
+     <button data-close="${p.ticket}">✕</button></div>`).join('') : 'nenhuma';
+}
+
+// ---------- ações
+$('iaBtn').onclick = async () => {
+  $('iaBtn').disabled = true;
+  if (running) await api('/api/ia/stop', {});
+  else {
+    const r = await api('/api/ia/start', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value, volume:$('volume').value,
+      target_profit:$('target').value, loss_limit:$('loss').value, rr:$('rr').value, sl_atr:$('slatr').value, duration_candles:$('dur').value,
+      protect:$('protect').checked, protect_after:$('pafter').value, protect_keep:$('pkeep').value});
+    if (!r.ok) alert(r.error);
+  }
+  $('iaBtn').disabled = false; refreshStatus();
+};
+$('anaNow').onclick = async () => {
+  const a = await api('/api/analyze', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value});
+  if (a.error) return alert(a.error);
+  renderAnalysis(a); renderAnaCard(a); $('anaWhen').textContent = '(manual ' + new Date().toLocaleTimeString() + ')';
+};
+const manual = side => async () => {
+  const r = await api('/api/order', {symbol:$('symbol').value, timeframe:$('tf').value, side, volume:$('mVol').value, sl_atr:$('mSl').value, rr:$('mRr').value});
+  if (!r.ok) alert('Ordem não executada: ' + r.error);
+  refreshStatus(); refreshChart();
+};
+$('buyBtn').onclick = manual('BUY'); $('sellBtn').onclick = manual('SELL');
+$('positions').onclick = async e => { const t = e.target.dataset.close; if (t && confirm('Fechar posição #' + t + '?')) { await api('/api/close', {ticket:+t}); refreshStatus(); } };
+document.querySelectorAll('[data-ind]').forEach(b => b.onclick = () => { show[b.dataset.ind] = !show[b.dataset.ind]; b.classList.toggle('on'); refreshChart(); });
+document.querySelectorAll('.tabs a').forEach(a => a.onclick = () => {
+  document.querySelectorAll('.tabs a').forEach(x => x.classList.toggle('on', x === a));
+  $('chartTab').style.display = a.dataset.tab === 'chart' ? '' : 'none'; $('logs').style.display = a.dataset.tab === 'logs' ? 'block' : 'none';
+});
+$('mode').onchange = () => { $('modeHint').textContent = MODE_HINT[$('mode').value]; refreshChart(); };
+$('symbol').onchange = () => { try { localStorage.setItem('tia_symbol', $('symbol').value); } catch(e) {} refreshChart(); };
+$('tf').onchange = refreshChart;
+
+(async () => {
+  await loadSymbols(); await refreshStatus(); await refreshChart();
+  setInterval(refreshChart, 2000); setInterval(refreshStatus, 1500);
+})();
+</script>
+</body>
+</html>
