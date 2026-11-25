@@ -28,6 +28,8 @@ class App:
     def status(self) -> dict:
         with self.lock:
             self.broker.update()
+            if not self.session.st.running:          # com a IA parada, ainda confere as entradas pendentes do registro
+                self.session.forward.resolve(self.broker)
             try:
                 info = self.broker.info()
             except BrokerError as e:
@@ -41,7 +43,7 @@ class App:
             bid, ask = self.broker.tick(symbol)
             digits = self.broker.spec(symbol).get("digits", 2)
         s = series(candles)
-        a = analyze(candles[:-1], mode) if len(candles) > 1 else None
+        a = analyze(candles[:-1], mode, utc_offset=self.broker.utc_offset) if len(candles) > 1 else None
         return {"symbol": symbol, "tf": tf, "candles": candles, "series": s, "analysis": a.to_dict() if a else None,
                 "bid": bid, "ask": ask, "digits": digits, "positions": self.broker.positions(symbol)}
 
@@ -51,7 +53,7 @@ class App:
             return {"ok": False, "error": "side deve ser BUY ou SELL"}
         with self.lock:
             candles = self.broker.candles(symbol, d.get("timeframe", "M1"), 300)
-        a = analyze(candles[:-1], d.get("mode", "veloz"), float(d.get("rr", 1.5)), float(d.get("sl_atr", 1.5)))
+        a = analyze(candles[:-1], d.get("mode", "veloz"), float(d.get("rr", 1.5)), float(d.get("sl_atr", 1.5)), self.broker.utc_offset)
         price = candles[-1]["close"]
         dist = float(d.get("sl_atr", 1.5)) * (a.atr or 0)
         sl = (price - dist if side == "BUY" else price + dist) if dist else None
@@ -93,6 +95,8 @@ def make_handler(app: App):
                     self.wfile.write(body)
                 elif u.path == "/api/status":
                     self._json(app.status())
+                elif u.path == "/api/forward":
+                    self._json(app.session.forward.stats(q.get("mode") or None, app.broker.name))
                 elif u.path == "/api/symbols":
                     self._json({"symbols": app.broker.symbols()})
                 elif u.path == "/api/chart":
@@ -117,7 +121,7 @@ def make_handler(app: App):
                 elif p == "/api/analyze":
                     with app.lock:
                         candles = app.broker.candles(d["symbol"], d.get("timeframe", "M1"), 300)
-                    self._json(analyze(candles[:-1], d.get("mode", "veloz")).to_dict())
+                    self._json(analyze(candles[:-1], d.get("mode", "veloz"), utc_offset=app.broker.utc_offset).to_dict())
                 elif p == "/api/order":
                     self._json(app.manual_order(d))
                 elif p == "/api/close":

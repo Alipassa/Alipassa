@@ -93,12 +93,13 @@
           <option value="veloz">⚡ Veloz</option>
           <option value="equilibrado">⚖ Equilibrado</option>
           <option value="preciso">🎯 Preciso</option>
+          <option value="reversao">🧪 Reversão ouro (experimental)</option>
         </select></div>
     </div>
     <div class="hint" id="modeHint">Mais negociações, menos precisão</div>
 
     <label>Estratégia</label>
-    <select disabled><option>Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH</option></select>
+    <select disabled><option id="stratName">Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH</option></select>
 
     <div class="row">
       <div><label>Lote</label><input id="volume" type="number" step="0.01" min="0.01" value="0.50"></div>
@@ -123,6 +124,13 @@
 
     <button class="btn ia" id="iaBtn">▶ Iniciar IA</button>
     <div class="status" id="iaStatus">IA parada</div>
+
+    <div class="card" id="fwdCard">
+      <b>Registro de acerto (10 min)</b> <span class="m" id="fwdMode"></span>
+      <div style="font-size:24px;font-weight:800;margin:4px 0" id="fwdRate">—</div>
+      <div class="m" style="font-size:12px" id="fwdInfo">nenhuma operação conferida ainda</div>
+      <div style="font-size:12px;margin-top:6px" id="fwdVerdict"></div>
+    </div>
 
     <div class="card" id="anaCard">
       <b>Última análise</b> <span class="m" id="anaWhen"></span>
@@ -175,7 +183,18 @@ const api = async (path, body) => {
   return r.json();
 };
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
-const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação'};
+const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
+  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · sai em 10 min · 61% no histórico, ainda não comprovado'};
+
+async function refreshForward() {
+  let f; try { f = await api('/api/forward?mode=' + $('mode').value); } catch(e) { return; }
+  $('fwdMode').textContent = '(' + $('mode').selectedOptions[0].textContent.trim() + (f.broker === 'paper' ? ' · simulador' : '') + ')';
+  $('fwdRate').textContent = f.n ? (f.rate*100).toFixed(1) + '%' : '—';
+  $('fwdRate').className = !f.n ? '' : f.rate > f.breakeven ? 'g' : 'r';
+  $('fwdInfo').textContent = `${f.wins}/${f.n} acertos · faixa provável ${(f.ci[0]*100).toFixed(1)}–${(f.ci[1]*100).toFixed(1)}% · empate ${(f.breakeven*100).toFixed(1)}%` +
+                             (f.pending ? ` · ${f.pending} aguardando os 10 min` : '');
+  $('fwdVerdict').textContent = f.verdict;
+}
 const show = {st:true, lsma:true, kc:true, sar:true, choch:true};
 let running = false, digits = 3, lastAnalysis = null;
 
@@ -316,13 +335,23 @@ document.querySelectorAll('.tabs a').forEach(a => a.onclick = () => {
   document.querySelectorAll('.tabs a').forEach(x => x.classList.toggle('on', x === a));
   $('chartTab').style.display = a.dataset.tab === 'chart' ? '' : 'none'; $('logs').style.display = a.dataset.tab === 'logs' ? 'block' : 'none';
 });
-$('mode').onchange = () => { $('modeHint').textContent = MODE_HINT[$('mode').value]; refreshChart(); };
+$('mode').onchange = () => {
+  $('modeHint').textContent = MODE_HINT[$('mode').value];
+  $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (> 1 ATR) · 16h/20h UTC'
+                                                              : 'Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH';
+  if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
+    $('tf').value = 'M2'; $('dur').value = 5; $('slatr').value = 3; $('rr').value = 0;
+    const gold = [...$('symbol').options].find(o => /^(XAUUSD|GOLD)/i.test(o.value));
+    if (gold) $('symbol').value = gold.value;
+  }
+  refreshChart(); refreshForward();
+};
 $('symbol').onchange = () => { try { localStorage.setItem('tia_symbol', $('symbol').value); } catch(e) {} refreshChart(); };
 $('tf').onchange = refreshChart;
 
 (async () => {
   await loadSymbols(); await refreshStatus(); await refreshChart();
-  setInterval(refreshChart, 2000); setInterval(refreshStatus, 1500);
+  setInterval(refreshChart, 2000); setInterval(refreshStatus, 1500); refreshForward(); setInterval(refreshForward, 5000);
 })();
 </script>
 </body>

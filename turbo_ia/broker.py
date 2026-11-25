@@ -28,6 +28,7 @@ class PaperBroker:
     e execução local com SL/TP. Serve para ver o painel funcionando em qualquer sistema (Linux/Mac sem MT5)."""
 
     name = "paper"
+    utc_offset = 0.0
 
     def __init__(self, balance: float = 10_000.0, seed: Optional[int] = None, clock=time.time) -> None:
         self.clock = clock
@@ -181,6 +182,7 @@ class MT5Broker:
     """
 
     name = "mt5"
+    utc_offset = 0.0           # horas que o relógio do servidor está à frente do UTC (detectado no connect)
     TF = {"M1": "TIMEFRAME_M1", "M2": "TIMEFRAME_M2", "M5": "TIMEFRAME_M5", "M15": "TIMEFRAME_M15", "M30": "TIMEFRAME_M30", "H1": "TIMEFRAME_H1"}
 
     def __init__(self, mt5: Any = None, path: Optional[str] = None, login: Optional[int] = None, password: Optional[str] = None,
@@ -208,6 +210,25 @@ class MT5Broker:
             kw.update(login=self.login, password=self.password, server=self.server)
         if not self.mt5.initialize(**kw):
             raise BrokerError(f"MT5 initialize falhou: {self.mt5.last_error()} — abra o terminal, faça login e confira MT5_PATH")
+        self.utc_offset = self.detect_offset()
+
+    def detect_offset(self) -> float:
+        """Candles do MT5 vêm no horário do SERVIDOR. Compara o tick mais recente com o relógio UTC; TURBO_IA_UTC_OFFSET força."""
+        forced = os.environ.get("TURBO_IA_UTC_OFFSET") or os.environ.get("MT5_UTC_OFFSET_HOURS")
+        if forced not in (None, ""):
+            return float(forced)
+        ts = 0.0
+        for sym in ("EURUSD", "XAUUSD", "GBPUSD", "USDJPY", "Volatility 10 Index"):
+            try:
+                t = self.mt5.symbol_info_tick(sym)
+                ts = max(ts, float(getattr(t, "time", 0) or 0))
+            except Exception:  # noqa: BLE001
+                continue
+        if not ts:
+            return 0.0
+        raw = (ts - time.time()) / 3600
+        off = round(raw)
+        return float(off) if abs(raw - off) < 0.25 and abs(off) <= 14 else 0.0
 
     def update(self) -> None:
         pass

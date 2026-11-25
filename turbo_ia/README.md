@@ -73,6 +73,31 @@ Resultado em 60 dias reais (Yahoo, 25/11/2026), expiração 10 min, payout 78 % 
 
 M2 e M5 empatam dentro da margem estatística; nenhum chega perto dos 56,2 %. Os outros modos ficaram iguais ou piores.
 
+## 🧪 Modo experimental "Reversão ouro" — teste em DEMO
+
+Resultado da busca por vantagem (≈ 50 regras, escolhidas numa metade dos dados e conferidas na outra): a única que se
+sustentou foi **reversão à média no ouro, gráfico M2, só às 16h e 20h UTC (13h e 17h de Brasília)**.
+
+- Regra: no fechamento de cada candle M2, se o preço está a mais de 1 ATR(14) da média de 20, aposta na volta
+  (acima → VENDA, abaixo → COMPRA). Sai em 10 min (5 candles), sem alvo, stop de proteção em 3 ATR.
+- Histórico (GC=F, 60 dias): **61,2 % em 209 operações** (faixa provável 54,5–67,6 %), cerca de 6 por dia. No M5: 53,2 %, então só M2.
+- **Não está provado.** Os horários foram escolhidos entre 24, então parte desse acerto pode ser sorte. Precisa ficar acima de
+  **56,2 %** (empate com payout de 78 %) em operações NOVAS.
+
+Como testar: MT5 em conta demo → mercado `XAUUSD` (ou o nome do ouro na sua corretora) → modo **🧪 Reversão ouro** (o painel
+ajusta M2, duração 5, stop 3, R:R 0) → **Iniciar IA** e deixe rodando nos horários. O cartão **Registro de acerto (10 min)**
+confere cada entrada 10 min depois e grava em `~/turbo_ia_registro.jsonl` (ou `TURBO_IA_REGISTRO`); simulador e MT5 ficam
+separados. O veredito só sai a partir de 100 operações (≈ 3–4 semanas):
+
+| Veredito | Quando |
+| --- | --- |
+| VANTAGEM CONFIRMADA | até o pior caso da faixa supera 56,2 % |
+| SEM VANTAGEM — abandone | até o melhor caso fica abaixo de 56,2 % |
+| inconclusivo | a faixa contém 56,2 % — continue em demo |
+
+O fuso do servidor MT5 é detectado sozinho (os candles vêm no horário da corretora); se errar, defina `TURBO_IA_UTC_OFFSET`
+(ex.: `2`). Para refazer a conta do histórico: `python -m turbo_ia.backtest --source yahoo --symbols GC=F --tfs M2 --modes reversao`.
+
 ## Segurança
 
 - O servidor só escuta em `127.0.0.1` e recusa POSTs de outras origens.
@@ -88,6 +113,8 @@ M2 e M5 empatam dentro da margem estatística; nenhum chega perto dos 56,2 %. Os
 | `analysis.py` | votação, modos, SL/TP |
 | `broker.py` | `MT5Broker` (pacote oficial MetaTrader5) e `PaperBroker` (simulador) |
 | `engine.py` | sessão da IA: laço, meta, limite de perda, proteção, saída por tempo |
+| `forward.py` | registro de acerto em tempo real (teste em demo) |
+| `backtest.py` | teste de acerto no histórico |
 | `server.py` | servidor HTTP local + API (`/api/chart`, `/api/ia/start`, `/api/ia/stop`, `/api/order`, `/api/close`) |
 | `static/index.html` | painel (gráfico TradingView Lightweight Charts) |
 

@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 from .analysis import analyze
+from .forward import ForwardLog
 
 TF_SECONDS = {"M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
 
@@ -22,7 +23,7 @@ TF_SECONDS = {"M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, "H1": 360
 class IAConfig:
     symbol: str = "Volatility 10 Index"
     timeframe: str = "M1"
-    mode: str = "veloz"                 # veloz | equilibrado | preciso
+    mode: str = "veloz"                 # veloz | equilibrado | preciso | reversao (experimental: ouro M2, 16h/20h UTC)
     volume: float = 0.5                 # lote por operação
     rr: float = 1.5                     # alvo = rr × distância do stop
     sl_atr: float = 1.5                 # stop padrão em ATRs
@@ -33,6 +34,7 @@ class IAConfig:
     protect: bool = True                # proteção: depois de lucrar `protect_after`, não devolve mais que até `protect_keep`
     protect_after: float = 0.70
     protect_keep: float = 0.14
+    expiry_min: int = 10                # registro de acerto: confere o preço N minutos depois de cada entrada
 
     @classmethod
     def from_dict(cls, d: dict) -> "IAConfig":
@@ -63,8 +65,9 @@ class SessionState:
 
 
 class IASession:
-    def __init__(self, broker: Any, poll: float = 1.0) -> None:
+    def __init__(self, broker: Any, poll: float = 1.0, forward: Optional[ForwardLog] = None) -> None:
         self.broker = broker
+        self.forward = forward if forward is not None else ForwardLog()
         self.poll = poll
         self.cfg = IAConfig()
         self.st = SessionState()
@@ -82,6 +85,11 @@ class IASession:
         with self.lock:
             if self.st.running:
                 return {"ok": False, "error": "IA já está rodando"}
+            if cfg.mode == "reversao":          # aposta de direção em 10 min: sai por tempo, sem alvo, stop largo só de proteção
+                cfg.rr = 0.0
+                cfg.sl_atr = max(cfg.sl_atr, 3.0)
+                if cfg.duration_candles <= 0:
+                    cfg.duration_candles = max(1, cfg.expiry_min * 60 // TF_SECONDS.get(cfg.timeframe, 60))
             self.cfg = cfg
             self.st = SessionState(running=True, started_at=time.time())
             self._stop.clear()
@@ -118,6 +126,9 @@ class IASession:
         """Um ciclo da IA (público para testes)."""
         b, c = self.broker, self.cfg
         b.update()
+        for r in self.forward.resolve(b):
+            self.log(f"registro {r['expiry_min']} min: {r['side']} {r['symbol']} {r['entry']} → {r['exit']} = {'ACERTO' if r['win'] else 'ERRO'}",
+                     "win" if r["win"] else "loss")
         self._manage_open()
         if not self.st.running:
             return
@@ -135,7 +146,7 @@ class IASession:
             return
         self.st.last_bar = bar
         closed = candles[:-1]                     # só candles fechados: sem repintura
-        a = analyze(closed, c.mode, c.rr, c.sl_atr)
+        a = analyze(closed, c.mode, c.rr, c.sl_atr, getattr(b, "utc_offset", 0.0))
         with self.lock:
             self.st.last_analysis = a.to_dict()
         if self.st.open_ticket is not None:
@@ -149,6 +160,11 @@ class IASession:
             if "REAL" in str(res.get("error", "")):
                 self.stop("conta real bloqueada")
             return
+        try:
+            acct = str(b.info().get("login", ""))
+        except Exception:  # noqa: BLE001
+            acct = ""
+        self.forward.add(c.symbol, c.timeframe, c.mode, a.signal, int(closed[-1]["time"]), float(closed[-1]["close"]), c.expiry_min, acct, getattr(b, "name", ""))
         with self.lock:
             self.st.open_ticket, self.st.open_bar = res["ticket"], bar
             self.st.trades += 1

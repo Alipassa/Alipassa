@@ -64,7 +64,47 @@ def series(candles: list[dict]) -> dict:
     }
 
 
-def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5) -> Analysis:
+# ---------------------------------------------------------------------------------------------------- EXPERIMENTAL
+# Reversão à média no OURO, gráfico M2, expiração 10 min, só às 16h e 20h UTC.
+# Origem: busca em 60 dias de GC=F (Yahoo, nov/2026): nesses dois horários a regra acertou > 55 % nas DUAS metades dos dados,
+# 61,2 % em 209 operações (IC95 54,5–67,6 %). Foi escolhida entre 24 horários — o acerto real pode ser menor. Só vale depois
+# de confirmada em DEMO (registro de acerto do painel): precisa ficar acima de 56,2 % (payout 78 %) com centenas de operações.
+REVERSION_HOURS = (16, 20)
+REVERSION_Z = 1.0
+
+
+def analyze_reversion(candles: list[dict], hours=REVERSION_HOURS, z_thr: float = REVERSION_Z, sl_atr: float = 3.0,
+                      utc_offset: float = 0.0) -> Analysis:
+    """Preço esticado > z_thr ATR da média de 20 → aposta na volta. `utc_offset` = fuso do carimbo dos candles (MT5: servidor)."""
+    mode = "reversao"
+    if len(candles) < 40:
+        p = float(candles[-1]["close"]) if candles else 0.0
+        return Analysis("NONE", 0.0, p, 0.0, None, None, blocked=["poucos candles (mínimo 40)"], mode=mode, label="Dados insuficientes")
+    closes = [float(c["close"]) for c in candles]
+    price = closes[-1]
+    a = _last(ind.atr(candles, 14)) or 0.0
+    m = ind.sma(closes, 20)[-1]
+    z = (price - m) / a if a else 0.0
+    hour = int(((int(candles[-1]["time"]) - utc_offset * 3600) // 3600) % 24)
+    side = -1 if z > 0 else 1
+    votes = {"reversao_z": side if abs(z) > z_thr else 0}
+    blocked = []
+    if hours and hour not in hours:
+        blocked.append(f"fora do horário ({hour:02d}h UTC; opera só {', '.join(f'{h:02d}h' for h in hours)} UTC)")
+    if abs(z) <= z_thr:
+        blocked.append(f"preço só {z:+.2f} ATR da média (precisa > {z_thr})")
+    if a <= 0:
+        blocked.append("ATR zero")
+    signal = "NONE" if blocked else ("BUY" if side > 0 else "SELL")
+    sl = (price - sl_atr * a if side > 0 else price + sl_atr * a) if signal != "NONE" else None
+    reasons = [f"preço {z:+.2f} ATR {'acima' if z > 0 else 'abaixo'} da média 20 → reversão", f"{hour:02d}h UTC"]
+    return Analysis(signal, round(min(abs(z) / 3, 1) * 100, 1), price, a, sl, None, votes, reasons, blocked, mode,
+                    f"{'Alta' if side > 0 else 'Baixa'} · Reversão {'armada' if signal != 'NONE' else 'aguardando'}")
+
+
+def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5, utc_offset: float = 0.0) -> Analysis:
+    if mode == "reversao":
+        return analyze_reversion(candles, sl_atr=max(sl_atr, 3.0), utc_offset=utc_offset)
     mode = mode if mode in MODES else "veloz"
     cfg = MODES[mode]
     if len(candles) < 60:
@@ -143,7 +183,7 @@ def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: f
         if st_line is not None and 0.5 * a <= abs(price - st_line) <= 3 * a:
             dist = abs(price - st_line) + 0.1 * a          # stop logo além do SuperTrend quando ele está a uma distância sensata
         sl = price - dist if side > 0 else price + dist
-        tp = price + rr * dist if side > 0 else price - rr * dist
+        tp = (price + rr * dist if side > 0 else price - rr * dist) if rr > 0 else None
     label = ("Sinal forte" if conf >= 0.75 else "Sinal moderado" if conf >= 0.6 else "Sinal fraco")
     return Analysis(signal, round(conf * 100, 1), price, a, sl, tp, votes, reasons, blocked, mode,
                     f"{'Alta' if side > 0 else 'Baixa' if side < 0 else 'Neutro'} · {label}")

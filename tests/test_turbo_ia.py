@@ -6,6 +6,7 @@ from turbo_ia import indicators as ind
 from turbo_ia.analysis import analyze
 from turbo_ia.broker import MT5Broker, PaperBroker
 from turbo_ia.engine import IAConfig, IASession
+from turbo_ia.forward import ForwardLog
 
 
 def trend(n=200, drift=0.5, seed=1):
@@ -69,7 +70,7 @@ class TestSession(unittest.TestCase):
         clk = Clock()
         b = PaperBroker(seed=3, clock=clk)
         b.connect()
-        s = IASession(b)
+        s = IASession(b, forward=ForwardLog(None))
         s.start(IAConfig(symbol="Volatility 10 Index", mode="veloz", volume=1, target_profit=0.01, loss_limit=10_000,
                          duration_candles=1, max_trades=100))
         s._stop.set()                      # sem thread: dirigimos os ciclos à mão
@@ -82,15 +83,70 @@ class TestSession(unittest.TestCase):
         self.assertGreater(s.st.trades, 0)
         self.assertFalse(s.st.running)
         self.assertTrue(any(l["kind"] == "trade" for l in s.st.log))
+        self.assertGreater(len(s.forward.done) + len(s.forward.pending), 0)    # toda entrada vai para o registro de acerto
 
     def test_loss_limit(self):
         b = PaperBroker(seed=1)
         b.connect()
-        s = IASession(b)
+        s = IASession(b, forward=ForwardLog(None))
         s.cfg = IAConfig(loss_limit=5)
         s.st.running, s.st.pnl = True, -6
         self.assertTrue(s._check_limits())
         self.assertIn("limite de perda", s.st.stopped_reason)
+
+
+def stretched(hour_utc, up=True, n=80, tf=120):
+    """Preço parado e depois uma esticada forte no último candle, que abre na hora pedida."""
+    base = (1_700_000_000 // 86400) * 86400 + hour_utc * 3600 - (n - 1) * tf
+    out = []
+    for i in range(n):
+        p = 100.0 + (0.05 if i % 2 else -0.05)
+        out.append({"time": base + i * tf, "open": p, "high": p + 0.1, "low": p - 0.1, "close": p})
+    last = out[-1]
+    last["close"] = last["high"] = 101.0 if up else 99.0
+    if not up:
+        last["low"] = 99.0
+    return out
+
+
+class TestReversion(unittest.TestCase):
+    def test_sells_stretch_up_inside_hours(self):
+        from turbo_ia.analysis import analyze
+        a = analyze(stretched(16, up=True), "reversao")
+        self.assertEqual(a.signal, "SELL")
+        self.assertGreater(a.sl, a.price)
+        self.assertIsNone(a.tp)
+        self.assertEqual(analyze(stretched(20, up=False), "reversao").signal, "BUY")
+
+    def test_hour_filter_and_server_offset(self):
+        from turbo_ia.analysis import analyze
+        self.assertEqual(analyze(stretched(12), "reversao").signal, "NONE")
+        # MT5 carimba no horário do servidor (UTC+2): candle das 18h do servidor = 16h UTC → opera
+        self.assertEqual(analyze(stretched(18), "reversao", utc_offset=2).signal, "SELL")
+        self.assertEqual(analyze(stretched(16), "reversao", utc_offset=2).signal, "NONE")
+
+
+class TestForward(unittest.TestCase):
+    def test_resolves_after_expiry(self):
+        clk = Clock()
+        b = PaperBroker(seed=5, clock=clk)
+        b.connect()
+        f = ForwardLog(None)
+        c = b.candles("XAUUSD", "M2", 3)
+        f.add("XAUUSD", "M2", "reversao", "BUY", c[-2]["time"], c[-2]["close"], 10, broker="paper")
+        self.assertEqual(f.resolve(b), [])                  # 10 min ainda não passaram
+        clk.t += 15 * 60
+        b.update()
+        r = f.resolve(b)
+        self.assertEqual(len(r), 1)
+        target = c[-2]["time"] + 600
+        exit_ = next(x for x in b.candles("XAUUSD", "M2", 20) if x["time"] == target)["close"]
+        self.assertEqual(r[0]["exit"], exit_)
+        self.assertEqual(r[0]["win"], exit_ > c[-2]["close"])
+        st = f.stats("reversao", "paper")
+        self.assertEqual(st["n"], 1)
+        self.assertIn("coletando", st["verdict"])
+        self.assertEqual(f.stats("reversao", "mt5")["n"], 0)  # simulador não se mistura com o MT5
 
 
 class FakeMT5:
