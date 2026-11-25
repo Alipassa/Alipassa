@@ -316,6 +316,9 @@ def main_rr(a) -> int:
         for tf in a.tfs.split(","):
             c = {"yahoo": lambda: load_yahoo(sym, tf), "mt5": lambda: load_mt5(sym, tf), "deriv": lambda: load_deriv(sym, tf, a.days),
                  "csv": lambda: load_csv(sym)}[a.source]()
+            if a.spread is not None:                 # --spread explícito vale mais que o spread de cada vela
+                for x in c:
+                    x.pop("spread", None)
             if a.by_hour:
                 by_hour(c, sym, tf, rrs, sls[0], spread, a.commission)
                 continue
