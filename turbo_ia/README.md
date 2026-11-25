@@ -176,6 +176,20 @@ Robustez (50 000 velas cada; spread real × spread pessimista 0,30):
 M1 dá mais lucro por mês, mas depende mais do custo de execução (perde ~45 % com spread pior); M3 é o mais robusto por
 operação; M2 fica no meio. Todos positivos nas duas metades nos dois cenários de custo.
 
+## Travas depois de stop (Pepperstone, 62 500 velas, 26/11/2026)
+
+| Gráfico | Regra | Metade A (mais antiga) | Metade B (recente) | Pior queda · stops seguidos |
+| --- | --- | --- | --- | --- |
+| M1 (63 d) | sem trava | −0,010 R/op · −1,2 R/mês | +0,285 R/op · +51,0 R/mês | 15 R · 10 |
+| M1 | não repete o lado | −0,023 · −1,2 | +0,337 · +25,7 | 13 R · 7 |
+| M2 (127 d) | **sem trava** | **+0,158 · +10,7** | **+0,308 · +20,3** | 19 R · 15 |
+| M2 | após 2 stops encerra | +0,157 · +7,7 | +0,288 · +15,1 | 13 R · 11 |
+| M3 (190 d) | sem trava | +0,106 · +4,5 | +0,359 · +12,9 | 20 R · 19 |
+
+Nenhuma trava ganhou da regra sem trava nas duas metades → nenhuma adotada. Achado importante: a vantagem é mais
+fraca na metade mais antiga em todos os gráficos, e no M1 ela some (≈ 0). O M2 é o único positivo com folga nas duas
+metades → M2 volta a ser o recomendado. Sequências de 10 a 19 stops aconteceram: dimensione o risco para isso.
+
 ## Lote pelo risco (% do saldo)
 
 Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (distância do stop × valor de 1,0 de preço por lote)`,
