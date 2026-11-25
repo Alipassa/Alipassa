@@ -210,6 +210,43 @@ def trend_test(load, tfs: list[str], spread_def: float) -> None:
     print("Adotar um filtro só se ele tiver lucro por mês igual ou maior nas DUAS metades, ou quase igual com queda bem menor.")
 
 
+def markets_test(load_sym, symbols: list[str], tf: str) -> None:
+    """A MESMA regra (16h/20h UTC · esticada 2 · alvo 3× · stop 1 ATR), sem nenhum ajuste, em outros mercados.
+    Também mostra a regra em TODAS as horas — se só funcionar em 16h/20h no ouro, é um efeito do ouro."""
+    print(f"\nOUTROS MERCADOS · {tf} · mesma regra sem ajuste · spread real do MT5 · metades A (antiga) e B (recente)")
+    print(f"  {'mercado':14} {'dias':>4} │ {'16h/20h UTC — A':24} │ {'16h/20h UTC — B':24} │ {'todas as horas — A | B (R/op)':30}")
+    rows = []
+    for sym in symbols:
+        try:
+            c = load_sym(sym)
+        except Exception as e:  # noqa: BLE001
+            print(f"  {sym:14} sem dados: {str(e)[:70]}")
+            continue
+        if len(c) < 3000:
+            print(f"  {sym:14} poucas velas ({len(c)})")
+            continue
+        f = features(c)
+        cz = candidates(c, f, 2.0)
+        half = len(c) // 2
+        dA = (c[half]["time"] - c[0]["time"]) / 86400 or 1
+        dB = (c[-1]["time"] - c[half]["time"]) / 86400 or 1
+        spread_def = SPREAD.get(sym, 0.0)
+        res = []
+        for hours in (set(REVERSION_HOURS), set(range(24))):
+            rA = [x for _, x in run_cands(c, f, cz, hours, "3R", 0, half, spread_def, 0)]
+            rB = [x for _, x in run_cands(c, f, cz, hours, "3R", half, len(c), spread_def, 0)]
+            res.append((summary(rA), summary(rB), sum(rA) / dA * 30, sum(rB) / dB * 30))
+        (a1, b1, ma1, mb1), (a2, b2, _, _) = res
+        ok = a1["n"] >= 30 and b1["n"] >= 30 and a1["exp"] > 0.05 and b1["exp"] > 0.05
+        print(f"  {sym:14} {dA + dB:4.0f} │ {a1['n']:3} ops {a1['exp']:+.3f} {ma1:+6.1f}/mês │ {b1['n']:3} ops {b1['exp']:+.3f} {mb1:+6.1f}/mês │ "
+              f"{a2['exp']:+.3f} | {b2['exp']:+.3f}{'   ✔ positivo nas duas' if ok else ''}", flush=True)
+        rows.append((sym, ok, mb1))
+    good = [r for r in rows if r[1]]
+    print("\n" + ("Candidatos a somar ao ouro (positivos nas duas metades): " + ", ".join(r[0] for r in good) if good else
+                  "Nenhum outro mercado positivo nas duas metades: a vantagem é do ouro."))
+    print("Atenção: mercados muito ligados ao ouro (prata) tendem a dar sinal no MESMO momento — somar os dois dobra o risco daquela janela.")
+
+
 def cooldown_test(load, tfs: list[str], spread_def: float) -> None:
     """Regra atual × travas depois de stop, nas duas metades do histórico (não há escolha: as 4 regras são fixas)."""
     rules = ((None, "regra atual (sem trava)"), ("dir", "após stop, não repete o lado na janela"),
@@ -340,9 +377,15 @@ def main(argv=None) -> int:
     ap.add_argument("--tfs", default="M1,M2,M3,M5,M10,M15")
     ap.add_argument("--cooldown", action="store_true", help="compara travas depois de stop com a regra atual")
     ap.add_argument("--trend", action="store_true", help="compara filtros de tendência com a regra atual")
+    ap.add_argument("--markets", help="testa a mesma regra em outros mercados, ex.: XAGUSD,US30,US500,EURUSD")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
+    if a.markets:
+        tf = a.tfs.split(",")[0] if a.tfs and "," not in a.tfs else "M2"
+        load_sym = (lambda sym: load_mt5(sym, tf, a.bars)) if a.source == "mt5" else (lambda sym: load_yahoo(sym, tf))
+        markets_test(load_sym, a.markets.split(","), tf)
+        return 0
     if a.trend:
         spread_def = a.spread if a.spread is not None else SPREAD.get(a.symbol, 0.30)
         load = (lambda tf: load_mt5(a.symbol, tf, a.bars)) if a.source == "mt5" else (lambda tf: load_yahoo(a.symbol, tf))
