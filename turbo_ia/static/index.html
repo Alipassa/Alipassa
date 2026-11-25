@@ -102,7 +102,7 @@
     <select disabled><option id="stratName">Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH</option></select>
 
     <div class="row">
-      <div><label>Risco % / op.</label><input id="riskpct" type="number" step="0.5" min="0" max="10" value="0" title="0 = usa o lote fixo"></div>
+      <div><label>Risco % / op.</label><input id="riskpct" type="number" step="0.5" min="0" max="10" value="5" title="0 = usa o lote fixo"></div>
       <div><label>Lucro alvo</label><input id="target" type="number" step="0.01" value="1"></div>
       <div><label>Limite perda</label><input id="loss" type="number" step="0.01" value="100"></div>
     </div>
@@ -111,7 +111,7 @@
       <div><label>Stop (ATR)</label><input id="slatr" type="number" step="0.1" value="1.5"></div>
       <div><label>Duração (velas)</label><input id="dur" type="number" step="1" min="0" value="0"></div>
     </div>
-    <div class="row2"><div><label>Lote fixo (se risco % = 0)</label><input id="volume" type="number" step="0.01" min="0.01" value="0.50"></div><div></div></div>
+    <div class="row2"><div><label>Lote fixo (se risco % = 0)</label><input id="volume" type="number" step="0.01" min="0.01" value="0.01"></div><div></div></div>
     <div class="hint" id="riskHint">Risco % &gt; 0: o lote é recalculado a cada operação pelo saldo e pela distância do stop (máx. 10%)</div>
     <div class="hint">Duração 0 = sai só por SL/TP · N = fecha após N velas (estilo Rise/Fall)</div>
 
@@ -164,7 +164,7 @@
     <h3>Modo manual</h3>
     <div class="m" style="font-size:12px" id="manSym">—</div>
     <div style="font-size:22px;font-weight:700;margin:6px 0" id="price">—</div>
-    <label>Lote</label><input id="mVol" type="number" step="0.01" value="0.50">
+    <label>Lote <span class="m" id="mVolNote" style="font-weight:400"></span></label><input id="mVol" type="number" step="0.01" value="0.01">
     <div class="row2"><div><label>Stop (ATR)</label><input id="mSl" type="number" step="0.1" value="1.5"></div>
       <div><label>R:R</label><input id="mRr" type="number" step="0.1" value="1.5"></div></div>
     <div class="row2" style="margin-top:14px">
@@ -329,7 +329,7 @@ $('anaNow').onclick = async () => {
   renderAnalysis(a); renderAnaCard(a); $('anaWhen').textContent = '(manual ' + new Date().toLocaleTimeString() + ')';
 };
 const manual = side => async () => {
-  const r = await api('/api/order', {symbol:$('symbol').value, timeframe:$('tf').value, side, volume:$('mVol').value, sl_atr:$('mSl').value, rr:$('mRr').value});
+  const r = await api('/api/order', {symbol:$('symbol').value, timeframe:$('tf').value, side, volume:$('mVol').value, risk_pct:$('riskpct').value, sl_atr:$('mSl').value, rr:$('mRr').value});
   if (!r.ok) alert('Ordem não executada: ' + r.error);
   refreshStatus(); refreshChart();
 };
@@ -347,6 +347,7 @@ $('mode').onchange = () => {
   if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
     $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 3;   // ganho 3×, perda 1×
     $('riskpct').value = 5; $('target').value = 0; $('protect').checked = false;          // escolha do usuário: 5% por operação, sem meta curta
+    syncRisk();
     const bal = parseFloat(($('balance').textContent.match(/[\d.]+/) || ['0'])[0]);
     if (bal) $('loss').value = Math.round(bal * 0.5);                                     // trava: para a IA se perder metade do saldo
     const gold = [...$('symbol').options].find(o => /^(XAUUSD|GOLD)/i.test(o.value));
@@ -357,6 +358,9 @@ $('mode').onchange = () => {
 $('symbol').onchange = () => { try { localStorage.setItem('tia_symbol', $('symbol').value); } catch(e) {} refreshChart(); };
 $('tf').onchange = refreshChart;
 $('rr').onchange = refreshForward;
+const syncRisk = () => { const r = +$('riskpct').value || 0; $('mVol').disabled = r > 0; $('mVol').placeholder = 'automático';
+  if (r > 0) $('mVol').value = ''; else if (!$('mVol').value) $('mVol').value = '0.01'; $('mVolNote').textContent = r > 0 ? `(calculado: ${r}% do saldo)` : '(fixo)'; };
+$('riskpct').oninput = syncRisk; syncRisk();
 
 (async () => {
   await loadSymbols(); await refreshStatus(); await refreshChart();

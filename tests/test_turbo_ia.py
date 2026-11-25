@@ -335,3 +335,17 @@ class TestServerTime(unittest.TestCase):
         from turbo_ia.broker import detect_offset
         m = SimpleNamespace(symbol_info_tick=lambda s: SimpleNamespace(time=1_700_000_000 + 2 * 3600 + 30))
         self.assertEqual(detect_offset(m, now=1_700_000_000), 2.0)
+
+
+class TestManualRisk(unittest.TestCase):
+    def test_manual_order_uses_risk_pct(self):
+        from turbo_ia.server import App
+        b = PaperBroker(seed=2, balance=1000)
+        b.connect()
+        app = App(b)
+        app.session.forward = ForwardLog(None)
+        r = app.manual_order({"symbol": "XAUUSD", "timeframe": "M2", "side": "BUY", "volume": 0.5, "risk_pct": 5, "sl_atr": 1, "rr": 3})
+        self.assertTrue(r["ok"])
+        risk = abs(r["price"] - r["sl"]) * r["volume"]
+        self.assertLessEqual(risk, 50 + 1)          # ~5 % de 1000, nunca o lote fixo 0,5
+        self.assertNotEqual(r["volume"], 0.5)

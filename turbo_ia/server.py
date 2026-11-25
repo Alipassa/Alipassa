@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .analysis import analyze, series
-from .broker import BrokerError, make_broker
+from .broker import BrokerError, lot_for_risk, make_broker
 from .engine import IAConfig, IASession
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -58,7 +58,16 @@ class App:
         dist = float(d.get("sl_atr", 1.5)) * (a.atr or 0)
         sl = (price - dist if side == "BUY" else price + dist) if dist else None
         tp = (price + float(d.get("rr", 1.5)) * dist if side == "BUY" else price - float(d.get("rr", 1.5)) * dist) if dist else None
-        res = self.broker.open(symbol, side, float(d.get("volume", 0.01)), sl, tp, "TurboIA manual")
+        volume = float(d.get("volume") or 0.01)
+        risk_pct = float(d.get("risk_pct") or 0)
+        if risk_pct > 0:                                   # mesmo cálculo da IA: lote para perder risk_pct % no stop
+            if not sl:
+                return {"ok": False, "error": "sem ATR para calcular o stop"}
+            eq = float(self.broker.info().get("equity") or 0)
+            volume, _risk, note = lot_for_risk(self.broker.spec(symbol), price, sl, eq, min(risk_pct, 10.0))
+            if not volume:
+                return {"ok": False, "error": note}
+        res = self.broker.open(symbol, side, volume, sl, tp, "TurboIA manual")
         self.session.log(f"manual {side} {symbol}: {'ok #' + str(res.get('ticket')) if res.get('ok') else res.get('error')}", "trade" if res.get("ok") else "error")
         return res
 
