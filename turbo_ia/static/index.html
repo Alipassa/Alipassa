@@ -93,7 +93,7 @@
           <option value="veloz">⚡ Veloz</option>
           <option value="equilibrado">⚖ Equilibrado</option>
           <option value="preciso">🎯 Preciso</option>
-          <option value="reversao">🧪 Reversão ouro (experimental)</option>
+          <option value="reversao" selected>🧪 Reversão ouro (experimental)</option>
         </select></div>
     </div>
     <div class="hint" id="modeHint">Mais negociações, menos precisão</div>
@@ -187,7 +187,7 @@ const api = async (path, body) => {
 };
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
 const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
-  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · entra com o preço > 2 ATR da média 20 · alvo 3× o stop (1 ATR) · Pepperstone: ~63 ops/mês, ~34% de acerto, +0,30 R/op · espere 8+ stops seguidos'};
+  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só às HL1 e às HL2 no seu relógio (16h e 20h UTC) · entra com o preço > 2 ATR da média 20 · alvo 3× o stop (1 ATR) · Pepperstone: ~63 ops/mês, ~34% de acerto, +0,30 R/op · espere 8+ stops seguidos'};
 
 async function refreshForward() {
   const rr = +$('rr').value || 0;
@@ -298,6 +298,14 @@ async function refreshStatus() {
   $('balance').textContent = a.balance != null ? `${a.currency||''} ${fmt(a.balance)} · equity ${fmt(a.equity)}` : '—';
   const s = d.session;
   running = s.running;
+  if (running && !window._cfgShown && s.config) {     // página aberta com a IA já rodando: mostra a configuração REAL dela
+    window._cfgShown = true;
+    const c = s.config, set = (id, v) => { if (v !== undefined && v !== null) $(id).value = v; };
+    set('mode', c.mode); set('tf', c.timeframe); set('riskpct', c.risk_pct); set('volume', c.volume); set('target', c.target_profit);
+    set('loss', c.loss_limit); set('rr', c.rr); set('slatr', c.sl_atr); set('dur', c.duration_candles); set('zthr', c.z_thr);
+    $('protect').checked = !!c.protect;
+    if ([...$('symbol').options].some(o => o.value === c.symbol)) $('symbol').value = c.symbol;
+  }
   $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
   $('iaBtn').classList.toggle('on', running);
   ['symbol','tf','mode','volume','riskpct','zthr','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
@@ -342,7 +350,9 @@ document.querySelectorAll('.tabs a').forEach(a => a.onclick = () => {
   $('chartTab').style.display = a.dataset.tab === 'chart' ? '' : 'none'; $('logs').style.display = a.dataset.tab === 'logs' ? 'block' : 'none';
 });
 $('mode').onchange = () => {
-  $('modeHint').textContent = MODE_HINT[$('mode').value];
+  // horários da estratégia (16h e 20h UTC) convertidos para o fuso deste computador
+  const lh = h => { const d = new Date(); d.setUTCHours(h, 0, 0, 0); return String(d.getHours()).padStart(2, '0') + 'h–' + String(d.getHours()).padStart(2, '0') + 'h59'; };
+  $('modeHint').textContent = MODE_HINT[$('mode').value].replace('HL1', lh(16)).replace('HL2', lh(20));
   $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (esticada mín. em ATR) · 16h/20h UTC'
                                                               : 'Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH';
   if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
@@ -364,7 +374,9 @@ const syncRisk = () => { const r = +$('riskpct').value || 0; $('mVol').disabled 
 $('riskpct').oninput = syncRisk; syncRisk();
 
 (async () => {
-  await loadSymbols(); await refreshStatus(); await refreshChart();
+  await loadSymbols(); await refreshStatus();
+  if (!running) $('mode').onchange();                 // abre já na Reversão ouro com a configuração testada
+  await refreshChart();
   setInterval(refreshChart, 2000); setInterval(refreshStatus, 1500); refreshForward(); setInterval(refreshForward, 5000);
 })();
 </script>
