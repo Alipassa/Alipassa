@@ -364,3 +364,18 @@ class TestCandleSpread(unittest.TestCase):
         self.assertAlmostEqual(r0["total_r"], 3 - 0.30)
         self.assertAlmostEqual(r1["total_r"], 3 - 0.10)            # spread real da vela ganha do padrão
         self.assertAlmostEqual(r2["total_r"], 3 - 0.17)
+
+
+class TestResearch(unittest.TestCase):
+    def test_variants_run_and_time_exit(self):
+        from turbo_ia import research
+        clk = Clock()
+        b = PaperBroker(seed=9, clock=clk)
+        b.connect()
+        c = b.candles("XAUUSD", "M2", 1500)
+        f = research.features(c)
+        for ex in research.EXITS:
+            r = research.simulate(c, f, dict(research.BASE, exit=ex, z=0.5), 0, len(c), 0.0, 0.0)
+            self.assertTrue(all(x >= -1.0 - 1e-9 for x in r))          # nunca perde mais que o stop (sem custo)
+            if ex == "4R":
+                self.assertTrue(all(x <= 4 + 1e-9 for x in r))

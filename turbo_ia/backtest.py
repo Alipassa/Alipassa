@@ -54,7 +54,12 @@ def load_mt5(symbol: str, tf: str, count: int = 50_000) -> list[dict]:
     if not (mt5.initialize(path=path) if path else mt5.initialize()):
         raise RuntimeError(f"MT5 initialize falhou: {mt5.last_error()}")
     mt5.symbol_select(symbol, True)
-    rates = mt5.copy_rates_from_pos(symbol, getattr(mt5, f"TIMEFRAME_{tf}"), 1, count)
+    rates = None
+    while count >= 1000:                     # o terminal limita o histórico ("Máx. barras no gráfico"): tenta menos se recusar
+        rates = mt5.copy_rates_from_pos(symbol, getattr(mt5, f"TIMEFRAME_{tf}"), 1, count)
+        if rates is not None and len(rates):
+            break
+        count //= 2
     if rates is None or len(rates) == 0:
         raise RuntimeError(f"sem candles de {symbol} {tf}: {mt5.last_error()}")
     from .broker import detect_offset, server_to_utc
