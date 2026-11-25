@@ -199,7 +199,7 @@ def simulate_rr(candles: list[dict], sigs: list[tuple[int, str, float]], rr: flo
             "breakeven": 1 / (1 + rr), "exp_r": tot / nt if nt else 0.0, "total_r": tot, "pf": gp / gl if gl else float("inf"),
             "max_dd_r": dd, "worst_streak": worst, "avg_bars": sum(t["bars"] for t in res) / nt if nt else 0.0,
             "exp_r_h1": sum(t["r"] for t in res[:half]) / half if half else 0.0,
-            "exp_r_h2": sum(t["r"] for t in res[half:]) / (nt - half) if nt - half else 0.0}
+            "exp_r_h2": sum(t["r"] for t in res[half:]) / (nt - half) if nt - half else 0.0, "list": res}
 
 
 def baseline(candles: list[dict], tf: str, expiry_min: int = 10) -> float:
@@ -272,6 +272,7 @@ def main_rr(a) -> int:
                 for sl in sls:
                     for rr in rrs:
                         r = simulate_rr(c, sigs, rr, sl, spread)
+                        r.pop("list")
                         print(f"  {sym:9} {tf} {mode:11} {rr:g}:1 stop {sl:g}ATR  {r['trades']:5} ops  acerto {r['rate']:5.1%} (precisa {r['breakeven']:5.1%})"
                               f"  média {r['exp_r']:+.3f}R  (1ª metade {r['exp_r_h1']:+.3f} · 2ª {r['exp_r_h2']:+.3f})  total {r['total_r']:+7.1f}R"
                               f"  PF {r['pf']:.2f}  pior queda {r['max_dd_r']:.0f}R  {r['worst_streak']} stops seguidos  ~{r['avg_bars']:.0f} velas", flush=True)
