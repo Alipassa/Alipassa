@@ -433,3 +433,12 @@ class TestSweep(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("M1", out)
         self.assertIn("regra atual", out)
+
+
+class TestM3(unittest.TestCase):
+    def test_paper_m3_candles(self):
+        b = PaperBroker(seed=1)
+        b.connect()
+        c = b.candles("XAUUSD", "M3", 50)
+        self.assertTrue(all((y["time"] - x["time"]) % 180 == 0 for x, y in zip(c, c[1:])))
+        self.assertEqual(MT5Broker.TF["M3"], "TIMEFRAME_M3")

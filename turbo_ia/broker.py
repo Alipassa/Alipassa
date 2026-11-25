@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Any, Optional
 
-TF_SECONDS = {"M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
+TF_SECONDS = {"M1": 60, "M2": 120, "M3": 180, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
 MAGIC = 260_611
 
 
@@ -225,7 +225,7 @@ class MT5Broker:
 
     name = "mt5"
     utc_offset = 0.0           # horas que o relógio do servidor está à frente do UTC (detectado no connect)
-    TF = {"M1": "TIMEFRAME_M1", "M2": "TIMEFRAME_M2", "M5": "TIMEFRAME_M5", "M15": "TIMEFRAME_M15", "M30": "TIMEFRAME_M30", "H1": "TIMEFRAME_H1"}
+    TF = {"M1": "TIMEFRAME_M1", "M2": "TIMEFRAME_M2", "M3": "TIMEFRAME_M3", "M5": "TIMEFRAME_M5", "M15": "TIMEFRAME_M15", "M30": "TIMEFRAME_M30", "H1": "TIMEFRAME_H1"}
 
     def __init__(self, mt5: Any = None, path: Optional[str] = None, login: Optional[int] = None, password: Optional[str] = None,
                  server: Optional[str] = None, allow_real: Optional[bool] = None, deviation: int = 20) -> None:

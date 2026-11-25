@@ -17,7 +17,7 @@ from .analysis import analyze
 from .broker import lot_for_risk
 from .forward import ForwardLog
 
-TF_SECONDS = {"M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
+TF_SECONDS = {"M1": 60, "M2": 120, "M3": 180, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
 
 
 @dataclass
