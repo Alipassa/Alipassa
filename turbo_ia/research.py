@@ -40,7 +40,7 @@ def simulate(c: list[dict], f: dict, v: dict, lo: int, hi: int, spread_def: floa
     i = max(lo, 30)
     while i < hi - 1:
         a, m = atr[i], sma[i]
-        if not a or m is None or (c[i]["time"] // 3600) % 24 not in REVERSION_HOURS:
+        if not a or m is None or (c[i]["time"] // 3600) % 24 not in v.get("hours", REVERSION_HOURS):
             i += 1
             continue
         e = c[i]["close"]
@@ -74,7 +74,7 @@ def simulate(c: list[dict], f: dict, v: dict, lo: int, hi: int, spread_def: floa
                 res = (sl - e) / dist if buy else (e - sl) / dist
             elif (x["high"] >= tp) if buy else (x["low"] <= tp):
                 res = abs(tp - e) / dist
-            elif ex == "3R+30velas" and j - i >= 30:
+            elif ex == "3R+30velas" and j - i >= v.get("max_bars", 30):
                 res = ((x["close"] - e) if buy else (e - x["close"])) / dist
             if res is not None:
                 break
@@ -86,6 +86,131 @@ def simulate(c: list[dict], f: dict, v: dict, lo: int, hi: int, spread_def: floa
         out.append(res - sp / dist)
         i = j
     return out
+
+
+# ---------------------------------------------------------------------------------------------------- varredura
+TF_MIN = {"M1": 1, "M2": 2, "M3": 3, "M5": 5, "M10": 10, "M15": 15, "M30": 30}
+
+
+def candidates(c: list[dict], f: dict, z_thr: float) -> list[tuple[int, bool, int]]:
+    """(índice, compra?, hora UTC) de toda vela fechada esticada além de z_thr ATR."""
+    out = []
+    for i in range(30, len(c) - 1):
+        a, m = f["atr"][i], f["sma"][i]
+        if not a or m is None:
+            continue
+        z = (c[i]["close"] - m) / a
+        if abs(z) > z_thr:
+            out.append((i, z < 0, (c[i]["time"] // 3600) % 24))
+    return out
+
+
+def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, spread_def: float, max_bars: int) -> list[tuple[int, float]]:
+    """Simula só nas velas candidatas (rápido). Uma operação por vez. Devolve [(índice da entrada, R)]."""
+    out: list[tuple[int, float]] = []
+    free = lo
+    for i, buy, h in cands:
+        if i < free or i < lo or h not in hours:
+            continue
+        if i >= hi - 1:
+            break
+        a, m, e = f["atr"][i], f["sma"][i], c[i]["close"]
+        dist = a
+        sl = e - dist if buy else e + dist
+        if ex == "media":
+            tp = m
+        else:
+            rr = float(ex[0])
+            tp = e + rr * dist if buy else e - rr * dist
+        res, j = None, i + 1
+        while j < len(c):
+            x = c[j]
+            if (x["low"] <= sl) if buy else (x["high"] >= sl):
+                res = -1.0
+            elif (x["high"] >= tp) if buy else (x["low"] <= tp):
+                res = abs(tp - e) / dist
+            elif ex.endswith("+1h") and j - i >= max_bars:
+                res = ((x["close"] - e) if buy else (e - x["close"])) / dist
+            if res is not None:
+                break
+            j += 1
+        if res is None:
+            break
+        out.append((i, res - (c[i].get("spread") or spread_def) / dist))
+        free = j
+    return out
+
+
+def sweep(load, tfs: list[str], spread_def: float) -> None:
+    """Para cada tempo gráfico: escolhe NA METADE A as horas, a esticada e a saída; mede o pacote inteiro NA METADE B.
+    O que conta é a coluna B: é o resultado de um procedimento de escolha que nunca viu aqueles dados."""
+    zs = (1.5, 2.0, 2.5)
+    exits = ("3R", "media", "3R+1h")
+    print("\nVARREDURA · tempo gráfico × hora × esticada × saída · escolha na metade A, prova na metade B · spread real quando houver")
+    print(f"  {'gráfico':7} {'dias':>4} │ {'escolhido na metade A':48} │ {'A: ops   R/op  R/mês':22} │ {'B (PROVA): ops  acerto   R/op  R/mês  queda':44}")
+    summary_rows = []
+    for tf in tfs:
+        try:
+            c = load(tf)
+        except Exception as e:  # noqa: BLE001
+            print(f"  {tf:7} sem dados: {e}")
+            continue
+        if len(c) < 2000:
+            print(f"  {tf:7} poucas velas ({len(c)})")
+            continue
+        f = features(c)
+        half = len(c) // 2
+        dA = (c[half]["time"] - c[0]["time"]) / 86400 or 1
+        dB = (c[-1]["time"] - c[half]["time"]) / 86400 or 1
+        mb = max(1, 60 // TF_MIN.get(tf, 1))
+        best = None
+        for z in zs:
+            cz = candidates(c, f, z)
+            for ex in exits:
+                good = []
+                for h in range(24):
+                    r = [x for _, x in run_cands(c, f, cz, {h}, ex, 0, half, spread_def, mb)]
+                    if len(r) >= 25 and sum(r) / len(r) > 0.10:
+                        good.append(h)
+                if not good:
+                    continue
+                rA = [x for _, x in run_cands(c, f, cz, set(good), ex, 0, half, spread_def, mb)]
+                totA = sum(rA)
+                if best is None or totA > best[0]:
+                    best = (totA, z, ex, good, rA, cz)
+        base_cz = candidates(c, f, 2.0)
+        base = [x for _, x in run_cands(c, f, base_cz, set(REVERSION_HOURS), "3R", half, len(c), spread_def, mb)]
+        sb = summary(base)
+        base_line = (f"  {'':7} {'':4} │ {'regra atual (16h/20h · z>2 · 3R) na metade B':48} │ {'':22} │"
+                     f" {sb['n']:4}  {sb['win']:5.1%}  {sb['exp']:+.3f} {sum(base) / dB * 30:+6.1f}  {sb['dd']:4.0f}R")
+        if best is None:
+            print(f"  {tf:7} {dB + dA:4.0f} │ nenhuma hora com +0,10 R na metade A")
+            print(base_line)
+            summary_rows.append((tf, sum(base) / dB * 30, sb, "regra atual (16h/20h · z>2 · 3R)"))
+            continue
+        totA, z, ex, good, rA, cz = best
+        rB = [x for _, x in run_cands(c, f, cz, set(good), ex, half, len(c), spread_def, mb)]
+        sB = summary(rB)
+        desc = f"z>{z:g} · {ex:6} · {len(good):2}h: {','.join(str(h) for h in good)}"
+        print(f"  {tf:7} {dA + dB:4.0f} │ {desc[:48]:48} │ {len(rA):4} {sum(rA) / len(rA):+.3f} {totA / dA * 30:+6.1f} │"
+              f" {sB['n']:4}  {sB['win']:5.1%}  {sB['exp']:+.3f} {sum(rB) / dB * 30:+6.1f}  {sB['dd']:4.0f}R", flush=True)
+        print(base_line, flush=True)
+        summary_rows.append((tf, sum(rB) / dB * 30, sB, desc))
+        summary_rows.append((tf, sum(base) / dB * 30, sb, "regra atual (16h/20h · z>2 · 3R)"))
+    if summary_rows:
+        cur = next((r for r in summary_rows if r[0] == "M2" and r[3].startswith("regra atual")), None)
+        print("\nRANKING NA PROVA (metade B) — lucro por mês em R; só conta o que tem ≥ 30 operações:")
+        ok = [r for r in summary_rows if r[2]["n"] >= 30]
+        for tf, rm, sB, desc in sorted(ok, key=lambda r: -r[1])[:8]:
+            print(f"  {tf:4} {rm:+6.1f} R/mês · {sB['exp']:+.3f} R/op · {sB['n']:4} ops · queda {sB['dd']:3.0f} R · {desc}")
+        if ok and cur:
+            tf, rm, sB, desc = max(ok, key=lambda r: r[1])
+            if (tf, desc) == (cur[0], cur[3]) or rm <= cur[1] * 1.2 or sB["exp"] <= 0.10:
+                print(f"\nVEREDITO: nada supera com folga a regra atual no M2 ({cur[1]:+.1f} R/mês na prova). Manter.")
+            else:
+                print(f"\nVEREDITO: candidata {tf} — {desc}: {rm:+.1f} R/mês na prova contra {cur[1]:+.1f} da regra atual. "
+                      "Muitas combinações testadas: rode em DEMO lado a lado antes de trocar.")
+        print("R/mês × risco = % do saldo por mês (ex.: +10 R/mês a 2 % ≈ +20 %/mês, antes dos juros compostos).")
 
 
 def summary(r: list[float]) -> dict:
@@ -111,9 +236,16 @@ def main(argv=None) -> int:
     ap.add_argument("--symbol", default="XAUUSD")
     ap.add_argument("--bars", type=int, default=200_000)
     ap.add_argument("--spread", type=float)
+    ap.add_argument("--sweep", action="store_true", help="varre tempos gráficos × horas × esticada × saída")
+    ap.add_argument("--tfs", default="M1,M2,M3,M5,M10,M15")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
+    if a.sweep:
+        spread_def = a.spread if a.spread is not None else SPREAD.get(a.symbol, 0.30)
+        load = (lambda tf: load_mt5(a.symbol, tf, a.bars)) if a.source == "mt5" else (lambda tf: load_yahoo(a.symbol, tf))
+        sweep(load, a.tfs.split(","), spread_def)
+        return 0
     c = load_mt5(a.symbol, "M2", a.bars) if a.source == "mt5" else load_yahoo(a.symbol, "M2")
     spread_def = a.spread if a.spread is not None else SPREAD.get(a.symbol, 0.30)
     sps = sorted(x["spread"] for x in c if x.get("spread"))

@@ -418,3 +418,18 @@ class TestOnlyReversion(unittest.TestCase):
             app.session.stop()
             srv.shutdown()
             srv.server_close()
+
+
+class TestSweep(unittest.TestCase):
+    def test_sweep_runs_on_paper_data(self):
+        import io
+        from contextlib import redirect_stdout
+        from turbo_ia import research
+        b = PaperBroker(seed=4)
+        b.connect()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            research.sweep(lambda tf: b.candles("XAUUSD", tf, 3000), ["M1", "M2"], 0.0)
+        out = buf.getvalue()
+        self.assertIn("M1", out)
+        self.assertIn("regra atual", out)
