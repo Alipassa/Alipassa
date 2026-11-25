@@ -76,6 +76,10 @@ REVERSION_Z = 1.0
 # Alvo × stop (backtest 60 dias GC=F M2, stop = 1 ATR, stop contado primeiro quando os dois cabem no candle, spread 0,30):
 #   2:1 → 214 ops, 43,5 % (precisa 33,3 %), +0,18 R/op, positivo nas duas metades (+0,16 / +0,21), pior queda 9 R
 #   3:1 → 174 ops, 35,1 % (precisa 25,0 %), +0,28 R/op, positivo nas duas metades (+0,39 / +0,18), pior queda 11 R
+# Pepperstone (50 000 velas M2 ≈ 3 meses, spread real de cada vela, mediana 0,10):
+#   3:1 → 423 ops, 30,3 %, +0,164 R/op (metades +0,165 / +0,163), PF 1,22, pior queda 21 R, 13 stops seguidos
+#   2:1 → 502 ops, 39,4 %, +0,137 R/op (metades +0,050 / +0,224), PF 1,22, pior queda 15 R
+#   hora a hora: só 16h e 20h UTC positivas nas duas metades com 3:1 (as outras 22 horas, quase todas negativas)
 REVERSION_RR = 2.0
 REVERSION_SL_ATR = 1.0
 

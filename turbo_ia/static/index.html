@@ -186,7 +186,7 @@ const api = async (path, body) => {
 };
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
 const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
-  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · alvo 3× o stop (stop 1 ATR) · risco 5%/op · histórico: 35,1% de acerto, +0,28 R/op · com 5% a conta costuma cair ~50% no caminho · ainda não comprovado'};
+  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · alvo 3× o stop (stop 1 ATR) · histórico Pepperstone (423 ops, spread real): 30,3% de acerto, +0,16 R/op · espere 10+ stops seguidos'};
 
 async function refreshForward() {
   const rr = +$('rr').value || 0;

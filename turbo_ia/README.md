@@ -126,6 +126,22 @@ no mesmo candle, conta o **stop** (pior caso). Spread descontado (ouro 0,30; EUR
 O **Registro de acerto** do painel mede o mesmo em tempo real: com alvo, cada entrada é seguida candle a candle até tocar
 alvo ou stop e vira +2 R / +3 R ou −1 R; o empate passa a ser 33,3 % (2:1) ou 25 % (3:1).
 
+## Confirmação no histórico da Pepperstone (25/11/2026)
+
+50 000 velas M2 de XAUUSD (≈ 3 meses), horário do servidor convertido para UTC vela a vela, spread real de cada vela
+(mediana 0,10):
+
+| Ganho × perda | Ops | Acerto | Precisa | Média/op | Metades | PF | Pior queda | Stops seguidos |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **3:1** | 423 | 30,3 % | 25,0 % | **+0,164 R** | +0,165 / +0,163 | 1,22 | 21 R | 13 |
+| 3:1 + comissão Razor | 423 | 30,3 % | 25,0 % | +0,137 R | +0,139 / +0,135 | 1,18 | 23 R | 13 |
+| 2:1 | 502 | 39,4 % | 33,3 % | +0,137 R | +0,050 / +0,224 | 1,22 | 15 R | 9 |
+| 3:1 com spread fixo 0,30 | 423 | 30,3 % | 25,0 % | +0,095 R | +0,102 / +0,087 | 1,12 | 25 R | 13 |
+
+Hora a hora, só 16h e 20h UTC ficam positivas nas duas metades com 3:1. US$ 1.000 em 30 dias (≈ 125 ops, 3:1, spread real):
+1 % → típico US$ 1.208 (20 % de chance de prejuízo, queda típica 14 %); 2 % → US$ 1.401 (20 %, 27 %);
+5 % → US$ 1.731 (33 %, 58 %). Vantagem ≈ 1,8 desvio acima de zero — promissora, ainda não comprovada.
+
 ## Lote pelo risco (% do saldo)
 
 Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (distância do stop × valor de 1,0 de preço por lote)`,
