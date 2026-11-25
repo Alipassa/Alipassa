@@ -107,7 +107,7 @@
       <div><label>Limite perda</label><input id="loss" type="number" step="0.01" value="100"></div>
     </div>
     <div class="row">
-      <div><label>Risco:Retorno</label><input id="rr" type="number" step="0.1" value="1.5"></div>
+      <div><label>Ganho × perda</label><input id="rr" type="number" step="0.1" value="1.5"></div>
       <div><label>Stop (ATR)</label><input id="slatr" type="number" step="0.1" value="1.5"></div>
       <div><label>Duração (velas)</label><input id="dur" type="number" step="1" min="0" value="0"></div>
     </div>
@@ -126,7 +126,7 @@
     <div class="status" id="iaStatus">IA parada</div>
 
     <div class="card" id="fwdCard">
-      <b>Registro de acerto (10 min)</b> <span class="m" id="fwdMode"></span>
+      <b id="fwdTitle">Registro de acerto</b> <span class="m" id="fwdMode"></span>
       <div style="font-size:24px;font-weight:800;margin:4px 0" id="fwdRate">—</div>
       <div class="m" style="font-size:12px" id="fwdInfo">nenhuma operação conferida ainda</div>
       <div style="font-size:12px;margin-top:6px" id="fwdVerdict"></div>
@@ -184,14 +184,17 @@ const api = async (path, body) => {
 };
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
 const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
-  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · sai em 10 min · 61% no histórico, ainda não comprovado'};
+  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · alvo 2× o stop (stop 1 ATR) · histórico: 43,5% de acerto, +0,18 R por operação · ainda não comprovado'};
 
 async function refreshForward() {
-  let f; try { f = await api('/api/forward?mode=' + $('mode').value); } catch(e) { return; }
+  const rr = +$('rr').value || 0;
+  let f; try { f = await api(`/api/forward?mode=${$('mode').value}&kind=${rr > 0 ? 'rr' : 'expiry'}&rr=${rr || 2}`); } catch(e) { return; }
+  $('fwdTitle').textContent = f.kind === 'rr' ? `Registro de acerto (alvo ${(+f.rr).toFixed(1).replace('.0','')}× stop)` : 'Registro de acerto (10 min)';
   $('fwdMode').textContent = '(' + $('mode').selectedOptions[0].textContent.trim() + (f.broker === 'paper' ? ' · simulador' : '') + ')';
   $('fwdRate').textContent = f.n ? (f.rate*100).toFixed(1) + '%' : '—';
   $('fwdRate').className = !f.n ? '' : f.rate > f.breakeven ? 'g' : 'r';
   $('fwdInfo').textContent = `${f.wins}/${f.n} acertos · faixa provável ${(f.ci[0]*100).toFixed(1)}–${(f.ci[1]*100).toFixed(1)}% · empate ${(f.breakeven*100).toFixed(1)}%` +
+                             (f.kind === 'rr' && f.n ? ` · média ${f.exp_r >= 0 ? '+' : ''}${f.exp_r.toFixed(2)} R/op (total ${f.total_r >= 0 ? '+' : ''}${f.total_r.toFixed(1)} R)` : '') +
                              (f.pending ? ` · ${f.pending} aguardando os 10 min` : '');
   $('fwdVerdict').textContent = f.verdict;
 }
@@ -340,7 +343,7 @@ $('mode').onchange = () => {
   $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (> 1 ATR) · 16h/20h UTC'
                                                               : 'Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH';
   if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
-    $('tf').value = 'M2'; $('dur').value = 5; $('slatr').value = 3; $('rr').value = 0;
+    $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 2;   // ganho 2×, perda 1× (3 também testado)
     const gold = [...$('symbol').options].find(o => /^(XAUUSD|GOLD)/i.test(o.value));
     if (gold) $('symbol').value = gold.value;
   }
@@ -348,6 +351,7 @@ $('mode').onchange = () => {
 };
 $('symbol').onchange = () => { try { localStorage.setItem('tia_symbol', $('symbol').value); } catch(e) {} refreshChart(); };
 $('tf').onchange = refreshChart;
+$('rr').onchange = refreshForward;
 
 (async () => {
   await loadSymbols(); await refreshStatus(); await refreshChart();

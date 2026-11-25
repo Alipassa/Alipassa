@@ -96,7 +96,7 @@ def make_handler(app: App):
                 elif u.path == "/api/status":
                     self._json(app.status())
                 elif u.path == "/api/forward":
-                    self._json(app.session.forward.stats(q.get("mode") or None, app.broker.name))
+                    self._json(app.session.forward.stats(q.get("mode") or None, app.broker.name, q.get("kind") or None, float(q.get("rr") or 2)))
                 elif u.path == "/api/symbols":
                     self._json({"symbols": app.broker.symbols()})
                 elif u.path == "/api/chart":

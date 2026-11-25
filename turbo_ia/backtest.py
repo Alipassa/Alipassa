@@ -133,6 +133,75 @@ def run(candles: list[dict], tf: str, mode: str, expiry_min: int = 10, payout: f
             "buy": sum(t["side"] == "BUY" for t in trades), "list": trades}
 
 
+# ---------------------------------------------------------------------------------------------------- alvo × stop
+SPREAD = {"GC=F": 0.30, "XAUUSD": 0.30, "EURUSD=X": 0.00012, "EURUSD": 0.00012}
+
+
+def signals(candles: list[dict], mode: str, utc_offset: float = 0.0) -> list[tuple[int, str, float]]:
+    """(índice, lado, ATR) de todo candle fechado com sinal — calculado uma vez e reaproveitado em vários alvos/stops."""
+    out = []
+    for i in range(WINDOW - 1, len(candles) - 1):
+        a = analyze(candles[i - WINDOW + 1:i + 1], mode, utc_offset=utc_offset)
+        if a.signal != "NONE" and a.atr > 0:
+            out.append((i, a.signal, a.atr))
+    return out
+
+
+def simulate_rr(candles: list[dict], sigs: list[tuple[int, str, float]], rr: float, sl_atr: float, spread: float = 0.0,
+                max_bars: int = 0) -> dict:
+    """Entra no fechamento do candle do sinal com stop = sl_atr × ATR e alvo = rr × stop; anda candle a candle.
+    Se stop e alvo cabem no mesmo candle, conta o STOP (pior caso). Spread descontado em R. Uma operação por vez."""
+    by_i = {i: (side, a) for i, side, a in sigs}
+    res: list[dict] = []
+    i, n = WINDOW - 1, len(candles)
+    while i < n - 1:
+        if i not in by_i:
+            i += 1
+            continue
+        side, a = by_i[i]
+        e = candles[i]["close"]
+        dist = sl_atr * a
+        buy = side == "BUY"
+        sl, tp = (e - dist, e + rr * dist) if buy else (e + dist, e - rr * dist)
+        out, j = None, i + 1
+        while j < n:
+            c = candles[j]
+            hit_sl = c["low"] <= sl if buy else c["high"] >= sl
+            hit_tp = c["high"] >= tp if buy else c["low"] <= tp
+            if hit_sl:
+                out = -1.0
+            elif hit_tp:
+                out = rr
+            elif max_bars and j - i >= max_bars:
+                out = ((c["close"] - e) if buy else (e - c["close"])) / dist
+            if out is not None:
+                break
+            j += 1
+        if out is None:
+            break                                   # histórico acabou com a operação aberta
+        res.append({"time": candles[i]["time"], "side": side, "r": out - spread / dist, "win": out > 0, "bars": j - i})
+        i = j
+    nt = len(res)
+    wins = sum(t["win"] for t in res)
+    tot = sum(t["r"] for t in res)
+    gp = sum(t["r"] for t in res if t["r"] > 0)
+    gl = -sum(t["r"] for t in res if t["r"] < 0)
+    eq = peak = dd = 0.0
+    streak = worst = 0
+    for t in res:
+        eq += t["r"]
+        peak = max(peak, eq)
+        dd = max(dd, peak - eq)
+        streak = streak + 1 if not t["win"] else 0
+        worst = max(worst, streak)
+    half = nt // 2
+    return {"rr": rr, "sl_atr": sl_atr, "trades": nt, "wins": wins, "rate": wins / nt if nt else 0.0, "ci": wilson(wins, nt),
+            "breakeven": 1 / (1 + rr), "exp_r": tot / nt if nt else 0.0, "total_r": tot, "pf": gp / gl if gl else float("inf"),
+            "max_dd_r": dd, "worst_streak": worst, "avg_bars": sum(t["bars"] for t in res) / nt if nt else 0.0,
+            "exp_r_h1": sum(t["r"] for t in res[:half]) / half if half else 0.0,
+            "exp_r_h2": sum(t["r"] for t in res[half:]) / (nt - half) if nt - half else 0.0}
+
+
 def baseline(candles: list[dict], tf: str, expiry_min: int = 10) -> float:
     """Taxa de 'subiu em 10 min' em todo o histórico: um palpite fixo de COMPRA acerta isso."""
     steps = expiry_min * 60 // TF_SEC[tf]
@@ -155,7 +224,12 @@ def main(argv=None) -> int:
     ap.add_argument("--payout", type=float, default=0.78)
     ap.add_argument("--days", type=int, default=30, help="só para --source deriv")
     ap.add_argument("--save", help="grava as operações em JSON")
+    ap.add_argument("--rr", help="testa alvo × stop em vez de expiração, ex.: 2,3 (alvo 2× e 3× o stop)")
+    ap.add_argument("--sl-atr", default="1.5", help="stop em ATRs, um ou vários: 1,1.5,2")
+    ap.add_argument("--spread", type=float, help="spread em preço (padrão: típico do ativo)")
     a = ap.parse_args(argv)
+    if a.rr:
+        return main_rr(a)
     rows, dump = [], {}
     for sym in (a.symbols.split(",") if a.source != "csv" else [a.csv]):
         for tf in a.tfs.split(","):
@@ -180,6 +254,27 @@ def main(argv=None) -> int:
     if a.save:
         with open(a.save, "w", encoding="utf-8") as f:
             json.dump({"rows": rows, "trades": dump}, f, default=str)
+    return 0
+
+
+def main_rr(a) -> int:
+    rrs = [float(x) for x in a.rr.split(",")]
+    sls = [float(x) for x in a.sl_atr.split(",")]
+    print(f"alvo × stop · {', '.join(f'{r:g}:1' for r in rrs)} · stop {', '.join(f'{x:g}' for x in sls)} ATR · "
+          f"stop antes do alvo quando os dois cabem no mesmo candle · spread descontado")
+    for sym in (a.symbols.split(",") if a.source != "csv" else [a.csv]):
+        spread = a.spread if a.spread is not None else SPREAD.get(sym, 0.0)
+        for tf in a.tfs.split(","):
+            c = {"yahoo": lambda: load_yahoo(sym, tf), "mt5": lambda: load_mt5(sym, tf), "deriv": lambda: load_deriv(sym, tf, a.days),
+                 "csv": lambda: load_csv(sym)}[a.source]()
+            for mode in a.modes.split(","):
+                sigs = signals(c, mode)
+                for sl in sls:
+                    for rr in rrs:
+                        r = simulate_rr(c, sigs, rr, sl, spread)
+                        print(f"  {sym:9} {tf} {mode:11} {rr:g}:1 stop {sl:g}ATR  {r['trades']:5} ops  acerto {r['rate']:5.1%} (precisa {r['breakeven']:5.1%})"
+                              f"  média {r['exp_r']:+.3f}R  (1ª metade {r['exp_r_h1']:+.3f} · 2ª {r['exp_r_h2']:+.3f})  total {r['total_r']:+7.1f}R"
+                              f"  PF {r['pf']:.2f}  pior queda {r['max_dd_r']:.0f}R  {r['worst_streak']} stops seguidos  ~{r['avg_bars']:.0f} velas", flush=True)
     return 0
 
 

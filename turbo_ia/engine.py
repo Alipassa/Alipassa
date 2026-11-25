@@ -85,8 +85,7 @@ class IASession:
         with self.lock:
             if self.st.running:
                 return {"ok": False, "error": "IA já está rodando"}
-            if cfg.mode == "reversao":          # aposta de direção em 10 min: sai por tempo, sem alvo, stop largo só de proteção
-                cfg.rr = 0.0
+            if cfg.mode == "reversao" and cfg.rr <= 0:   # sem alvo = aposta de direção: sai por tempo, stop largo só de proteção
                 cfg.sl_atr = max(cfg.sl_atr, 3.0)
                 if cfg.duration_candles <= 0:
                     cfg.duration_candles = max(1, cfg.expiry_min * 60 // TF_SECONDS.get(cfg.timeframe, 60))
@@ -164,7 +163,8 @@ class IASession:
             acct = str(b.info().get("login", ""))
         except Exception:  # noqa: BLE001
             acct = ""
-        self.forward.add(c.symbol, c.timeframe, c.mode, a.signal, int(closed[-1]["time"]), float(closed[-1]["close"]), c.expiry_min, acct, getattr(b, "name", ""))
+        self.forward.add(c.symbol, c.timeframe, c.mode, a.signal, int(closed[-1]["time"]), float(closed[-1]["close"]), c.expiry_min, acct,
+                         getattr(b, "name", ""), sl=a.sl, tp=a.tp)
         with self.lock:
             self.st.open_ticket, self.st.open_bar = res["ticket"], bar
             self.st.trades += 1

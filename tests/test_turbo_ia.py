@@ -112,10 +112,13 @@ def stretched(hour_utc, up=True, n=80, tf=120):
 class TestReversion(unittest.TestCase):
     def test_sells_stretch_up_inside_hours(self):
         from turbo_ia.analysis import analyze
-        a = analyze(stretched(16, up=True), "reversao")
+        a = analyze(stretched(16, up=True), "reversao", rr=2, sl_atr=1)
         self.assertEqual(a.signal, "SELL")
-        self.assertGreater(a.sl, a.price)
-        self.assertIsNone(a.tp)
+        self.assertAlmostEqual(a.sl - a.price, a.atr)                  # perda 1× (1 ATR)
+        self.assertAlmostEqual(a.price - a.tp, 2 * a.atr)              # ganho 2×
+        a3 = analyze(stretched(16, up=True), "reversao", rr=3, sl_atr=1)
+        self.assertAlmostEqual(a3.price - a3.tp, 3 * a3.atr)
+        self.assertIsNone(analyze(stretched(16, up=True), "reversao", rr=0).tp)
         self.assertEqual(analyze(stretched(20, up=False), "reversao").signal, "BUY")
 
     def test_hour_filter_and_server_offset(self):
@@ -147,6 +150,41 @@ class TestForward(unittest.TestCase):
         self.assertEqual(st["n"], 1)
         self.assertIn("coletando", st["verdict"])
         self.assertEqual(f.stats("reversao", "mt5")["n"], 0)  # simulador não se mistura com o MT5
+
+
+class StaticBroker:
+    def __init__(self, candles):
+        self.c = candles
+
+    def candles(self, symbol, tf, n):
+        return self.c[-n:]
+
+
+class TestForwardRR(unittest.TestCase):
+    def bars(self, lows_highs, t0=0, tf=120):
+        return [{"time": t0 + i * tf, "open": 100, "high": h, "low": l, "close": 100} for i, (l, h) in enumerate(lows_highs)]
+
+    def test_target_first_wins_2r(self):
+        f = ForwardLog(None)
+        f.add("XAUUSD", "M2", "reversao", "BUY", 0, 100.0, sl=99.0, tp=102.0)
+        b = StaticBroker(self.bars([(99.5, 100.5), (99.6, 101), (99.5, 102.1), (98, 100), (99, 100)]))
+        r = f.resolve(b)
+        self.assertEqual((r[0]["win"], r[0]["r"]), (True, 2.0))
+        st = f.stats("reversao")
+        self.assertEqual(st["kind"], "rr")
+        self.assertAlmostEqual(st["breakeven"], 1 / 3)
+        self.assertEqual(st["exp_r"], 2.0)
+
+    def test_both_in_same_candle_counts_stop(self):
+        f = ForwardLog(None)
+        f.add("XAUUSD", "M2", "reversao", "SELL", 0, 100.0, sl=101.0, tp=97.0)
+        r = f.resolve(StaticBroker(self.bars([(99.5, 100.5), (96, 101.5), (99, 100)])))
+        self.assertEqual((r[0]["win"], r[0]["r"]), (False, -1.0))
+
+    def test_open_candle_is_not_used(self):
+        f = ForwardLog(None)
+        f.add("XAUUSD", "M2", "reversao", "BUY", 0, 100.0, sl=99.0, tp=102.0)
+        self.assertEqual(f.resolve(StaticBroker(self.bars([(99.5, 100.5), (99.5, 103)]))), [])   # só o candle em formação tocou
 
 
 class FakeMT5:

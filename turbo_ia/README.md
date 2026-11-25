@@ -79,7 +79,7 @@ Resultado da busca por vantagem (≈ 50 regras, escolhidas numa metade dos dados
 sustentou foi **reversão à média no ouro, gráfico M2, só às 16h e 20h UTC (13h e 17h de Brasília)**.
 
 - Regra: no fechamento de cada candle M2, se o preço está a mais de 1 ATR(14) da média de 20, aposta na volta
-  (acima → VENDA, abaixo → COMPRA). Sai em 10 min (5 candles), sem alvo, stop de proteção em 3 ATR.
+  (acima → VENDA, abaixo → COMPRA). Stop 1 ATR, alvo 2× o stop (veja a seção ganho × perda). Com "Ganho × perda" = 0 volta ao modo antigo: sai em 10 min, sem alvo, stop 3 ATR.
 - Histórico (GC=F, 60 dias): **61,2 % em 209 operações** (faixa provável 54,5–67,6 %), cerca de 6 por dia. No M5: 53,2 %, então só M2.
 - **Não está provado.** Os horários foram escolhidos entre 24, então parte desse acerto pode ser sorte. Precisa ficar acima de
   **56,2 %** (empate com payout de 78 %) em operações NOVAS.
@@ -97,6 +97,32 @@ separados. O veredito só sai a partir de 100 operações (≈ 3–4 semanas):
 
 O fuso do servidor MT5 é detectado sozinho (os candles vêm no horário da corretora); se errar, defina `TURBO_IA_UTC_OFFSET`
 (ex.: `2`). Para refazer a conta do histórico: `python -m turbo_ia.backtest --source yahoo --symbols GC=F --tfs M2 --modes reversao`.
+
+## Ganho 2× / perda 1× e ganho 3× / perda 1× (`--rr`)
+
+```bash
+python -m turbo_ia.backtest --source yahoo --symbols GC=F,EURUSD=X --tfs M2,M5 --modes veloz,equilibrado,preciso,reversao --rr 2,3 --sl-atr 1,1.5
+```
+
+Entra no fechamento do candle do sinal, stop = N × ATR, alvo = 2× ou 3× o stop; o primeiro tocado decide e, se os dois cabem
+no mesmo candle, conta o **stop** (pior caso). Spread descontado (ouro 0,30; EUR/USD 0,00012). 60 dias, 25/11/2026:
+
+| Ativo / gráfico | Modo | Ganho × perda | Stop | Ops | Acerto | Precisa | Média por op. | 1ª metade · 2ª | Pior queda |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Ouro M2 | **reversão** | **2:1** | 1 ATR | 214 | **43,5 %** | 33,3 % | **+0,18 R** | +0,16 · +0,21 | 9 R |
+| Ouro M2 | **reversão** | **3:1** | 1 ATR | 174 | **35,1 %** | 25,0 % | **+0,28 R** | +0,39 · +0,18 | 11 R |
+| Ouro M5 | reversão | 2:1 | 1 ATR | 162 | 41,4 % | 33,3 % | +0,17 R | +0,10 · +0,23 | 10 R |
+| Ouro M5 | preciso | 3:1 | 1,5 ATR | 559 | 27,5 % | 25,0 % | +0,06 R | −0,02 · +0,13 | 52 R |
+| Ouro M2 | veloz/equilibrado/preciso | 2:1 e 3:1 | 1–1,5 ATR | 780–2856 | 24–34 % | — | −0,05 a −0,15 R | — | 70–350 R |
+| EUR/USD M2/M5 | todos | 2:1 e 3:1 | 1–1,5 ATR | — | ≈ empate | — | −0,2 a −1,1 R | — | — |
+
+- Os modos de confluência ficam no empate ou abaixo — o alvo maior só troca acerto por tamanho do ganho.
+- No EUR/USD de 2–5 min o ATR é do tamanho do spread: o custo come 0,3–1 R por operação. Não opere EUR/USD nesses tempos.
+- A reversão no ouro é o único caso positivo nas duas metades, com 2:1 e 3:1. O modo usa **2:1, stop 1 ATR** por padrão
+  (campo "Ganho × perda" = 3 para 3:1). Ressalva de sempre: os horários 16h/20h UTC saíram desses mesmos dados.
+
+O **Registro de acerto** do painel mede o mesmo em tempo real: com alvo, cada entrada é seguida candle a candle até tocar
+alvo ou stop e vira +2 R / +3 R ou −1 R; o empate passa a ser 33,3 % (2:1) ou 25 % (3:1).
 
 ## Segurança
 

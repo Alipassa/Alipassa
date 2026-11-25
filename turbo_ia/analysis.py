@@ -73,9 +73,17 @@ REVERSION_HOURS = (16, 20)
 REVERSION_Z = 1.0
 
 
-def analyze_reversion(candles: list[dict], hours=REVERSION_HOURS, z_thr: float = REVERSION_Z, sl_atr: float = 3.0,
-                      utc_offset: float = 0.0) -> Analysis:
-    """Preço esticado > z_thr ATR da média de 20 → aposta na volta. `utc_offset` = fuso do carimbo dos candles (MT5: servidor)."""
+# Alvo × stop (backtest 60 dias GC=F M2, stop = 1 ATR, stop contado primeiro quando os dois cabem no candle, spread 0,30):
+#   2:1 → 214 ops, 43,5 % (precisa 33,3 %), +0,18 R/op, positivo nas duas metades (+0,16 / +0,21), pior queda 9 R
+#   3:1 → 174 ops, 35,1 % (precisa 25,0 %), +0,28 R/op, positivo nas duas metades (+0,39 / +0,18), pior queda 11 R
+REVERSION_RR = 2.0
+REVERSION_SL_ATR = 1.0
+
+
+def analyze_reversion(candles: list[dict], hours=REVERSION_HOURS, z_thr: float = REVERSION_Z, sl_atr: float = REVERSION_SL_ATR,
+                      utc_offset: float = 0.0, rr: float = REVERSION_RR) -> Analysis:
+    """Preço esticado > z_thr ATR da média de 20 → aposta na volta. Stop = sl_atr × ATR, alvo = rr × stop (rr 0 = sem alvo).
+    `utc_offset` = fuso do carimbo dos candles (MT5: horário do servidor)."""
     mode = "reversao"
     if len(candles) < 40:
         p = float(candles[-1]["close"]) if candles else 0.0
@@ -96,15 +104,17 @@ def analyze_reversion(candles: list[dict], hours=REVERSION_HOURS, z_thr: float =
     if a <= 0:
         blocked.append("ATR zero")
     signal = "NONE" if blocked else ("BUY" if side > 0 else "SELL")
-    sl = (price - sl_atr * a if side > 0 else price + sl_atr * a) if signal != "NONE" else None
+    dist = sl_atr * a
+    sl = (price - dist if side > 0 else price + dist) if signal != "NONE" else None
+    tp = (price + rr * dist if side > 0 else price - rr * dist) if signal != "NONE" and rr > 0 else None
     reasons = [f"preço {z:+.2f} ATR {'acima' if z > 0 else 'abaixo'} da média 20 → reversão", f"{hour:02d}h UTC"]
-    return Analysis(signal, round(min(abs(z) / 3, 1) * 100, 1), price, a, sl, None, votes, reasons, blocked, mode,
+    return Analysis(signal, round(min(abs(z) / 3, 1) * 100, 1), price, a, sl, tp, votes, reasons, blocked, mode,
                     f"{'Alta' if side > 0 else 'Baixa'} · Reversão {'armada' if signal != 'NONE' else 'aguardando'}")
 
 
 def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5, utc_offset: float = 0.0) -> Analysis:
     if mode == "reversao":
-        return analyze_reversion(candles, sl_atr=max(sl_atr, 3.0), utc_offset=utc_offset)
+        return analyze_reversion(candles, sl_atr=sl_atr, utc_offset=utc_offset, rr=rr)
     mode = mode if mode in MODES else "veloz"
     cfg = MODES[mode]
     if len(candles) < 60:
