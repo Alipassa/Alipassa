@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 from .analysis import analyze
 
-TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
+TF_SECONDS = {"M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
 
 
 @dataclass

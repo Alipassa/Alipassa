@@ -51,6 +51,28 @@ Venda é o espelho. A **confluência** é o peso a favor ÷ peso total.
 - Uma posição por vez. **Duração (velas)** > 0 fecha a posição após N candles — o equivalente mais próximo do Rise/Fall,
   que não existe no MT5 (lá são CFDs com compra/venda).
 
+## Teste de acerto por tempo gráfico (`backtest.py`)
+
+Faz a mesma análise do botão em cada candle fechado do histórico, "entra" no fechamento e confere o preço N minutos depois
+(estilo Rise/Fall; empate = erro). Uma operação por vez: a próxima só depois da expiração.
+
+```bash
+python -m turbo_ia.backtest --source mt5 --symbols "Volatility 10 Index" --tfs M2,M5 --expiry 10
+python -m turbo_ia.backtest --source deriv --symbols R_10 --tfs M2,M5 --expiry 10 --days 30   # pip install websocket-client
+python -m turbo_ia.backtest --source yahoo --symbols EURUSD=X,GC=F --tfs M2,M5 --expiry 10
+```
+
+Resultado em 60 dias reais (Yahoo, 25/11/2026), expiração 10 min, payout 78 % → precisa de **56,2 %** para empatar:
+
+| Ativo | Gráfico | Modo | Operações | Acerto | Sem contar empates |
+| --- | --- | --- | --- | --- | --- |
+| Ouro | **M5** | veloz | 5658 | **48,9 %** | 49,6 % |
+| Ouro | M2 | veloz | 3144 | 48,2 % | 48,7 % |
+| EUR/USD | M2 | veloz | 4069 | 38,7 % | 48,3 % |
+| EUR/USD | M5 | veloz | 7371 | 38,2 % | 48,6 % |
+
+M2 e M5 empatam dentro da margem estatística; nenhum chega perto dos 56,2 %. Os outros modos ficaram iguais ou piores.
+
 ## Segurança
 
 - O servidor só escuta em `127.0.0.1` e recusa POSTs de outras origens.

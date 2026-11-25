@@ -140,3 +140,19 @@ class TestMT5Broker(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBacktest(unittest.TestCase):
+    def test_expiry_and_no_overlap(self):
+        from turbo_ia.backtest import run
+        c = [dict(x, time=x["time"] * 2) for x in trend(500, 0.5)]        # candles de 2 min
+        r = run(c, "M2", "veloz", expiry_min=10)
+        self.assertGreater(r["trades"], 0)
+        self.assertGreater(r["rate"], 0.9)                                    # tendência limpa: compra acerta
+        times = [t["time"] for t in r["list"]]
+        self.assertTrue(all(b - a >= 600 for a, b in zip(times, times[1:])))   # de 10 em 10 min, sem sobrepor
+
+    def test_expiry_must_fit_timeframe(self):
+        from turbo_ia.backtest import run
+        with self.assertRaises(ValueError):
+            run(trend(400), "M5", "veloz", expiry_min=7)
