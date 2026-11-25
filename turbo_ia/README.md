@@ -159,6 +159,23 @@ Metade das operações e lucro total parecido, com quedas menores. US$ 1.000 a 2
 chance de prejuízo 18 % → 11 %, queda típica 27 % → 18 %. A 3 % a nova regra tem a mesma queda típica da antiga a 2 %
 (≈ 26 %) com mês típico ≈ US$ 1.570. O campo **Esticada mín. (ATR)** no painel ajusta (padrão 2).
 
+## Tempo gráfico: M1 × M2 × M3 (Pepperstone, 25/11/2026)
+
+Varredura M1–M15 × 24 horas (escolha na metade A, prova na B): escolher novas horas pelo passado fracassou em todos os
+gráficos (ex.: M1 +126 R/mês na A → −49 R/mês na B). A regra atual (16h/20h UTC, esticada 2, alvo 3×) foi positiva na prova
+em TODOS: M1 +0,32 · M2 +0,33 · M3 +0,41 · M5 +0,21 · M10 +0,10 · M15 +0,05 R/op (M15 cobre ~1,3 ano).
+
+Robustez (50 000 velas cada; spread real × spread pessimista 0,30):
+
+| Gráfico | Dias | Ops | Acerto | R/op real | R/op com 0,30 | R/mês real | R/mês com 0,30 | Pior queda |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| M1 | ~50 | 252 | 32,5 % | +0,239 | +0,131 | +36 | +20 | 13–17 R |
+| M2 | ~101 | 211 | 33,6 % | +0,302 | +0,235 | +19 | +15 | 17–18 R |
+| M3 | ~152 | 195 | 34,9 % | +0,358 | +0,307 | +14 | +12 | 8–9 R |
+
+M1 dá mais lucro por mês, mas depende mais do custo de execução (perde ~45 % com spread pior); M3 é o mais robusto por
+operação; M2 fica no meio. Todos positivos nas duas metades nos dois cenários de custo.
+
 ## Lote pelo risco (% do saldo)
 
 Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (distância do stop × valor de 1,0 de preço por lote)`,
