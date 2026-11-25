@@ -317,3 +317,21 @@ class TestSettings(unittest.TestCase):
                 os.environ.pop(k, None)
                 if v is not None:
                     os.environ[k] = v
+
+
+class TestServerTime(unittest.TestCase):
+    def test_ny_close_server_dst(self):
+        import calendar
+        from turbo_ia.broker import server_to_utc, us_dst
+        summer = calendar.timegm((2026, 7, 1, 19, 0, 0))     # 19h servidor em julho (UTC+3) = 16h UTC
+        winter = calendar.timegm((2026, 11, 20, 18, 0, 0))   # 18h servidor em novembro (UTC+2) = 16h UTC
+        self.assertTrue(us_dst(summer))
+        self.assertFalse(us_dst(winter))
+        self.assertEqual((server_to_utc(summer, 2.0) // 3600) % 24, 16)   # fuso de HOJE é +2, mas julho era +3
+        self.assertEqual((server_to_utc(winter, 2.0) // 3600) % 24, 16)
+        self.assertEqual((server_to_utc(winter, 0.0) // 3600) % 24, 18)   # servidor em UTC: não mexe
+
+    def test_detect_offset(self):
+        from turbo_ia.broker import detect_offset
+        m = SimpleNamespace(symbol_info_tick=lambda s: SimpleNamespace(time=1_700_000_000 + 2 * 3600 + 30))
+        self.assertEqual(detect_offset(m, now=1_700_000_000), 2.0)

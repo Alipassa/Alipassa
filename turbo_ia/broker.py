@@ -175,6 +175,47 @@ class PaperBroker:
         return rec["profit"] if rec else None
 
 
+# ---------------------------------------------------------------------------------------------------- fuso do servidor
+def detect_offset(mt5: Any, now: Optional[float] = None) -> float:
+    """Candles do MT5 vêm no horário do SERVIDOR. Compara o tick mais recente com o relógio UTC; TURBO_IA_UTC_OFFSET força."""
+    forced = os.environ.get("TURBO_IA_UTC_OFFSET") or os.environ.get("MT5_UTC_OFFSET_HOURS")
+    if forced not in (None, ""):
+        return float(forced)
+    ts = 0.0
+    for sym in ("EURUSD", "XAUUSD", "GBPUSD", "USDJPY", "Volatility 10 Index"):
+        try:
+            t = mt5.symbol_info_tick(sym)
+            ts = max(ts, float(getattr(t, "time", 0) or 0))
+        except Exception:  # noqa: BLE001
+            continue
+    if not ts:
+        return 0.0
+    raw = (ts - (now if now is not None else time.time())) / 3600
+    off = round(raw)
+    return float(off) if abs(raw - off) < 0.25 and abs(off) <= 14 else 0.0
+
+
+def us_dst(utc_ts: float) -> bool:
+    """Horário de verão dos EUA: 2º domingo de março 07:00 UTC até 1º domingo de novembro 06:00 UTC."""
+    import datetime as _dt
+    d = _dt.datetime.fromtimestamp(utc_ts, tz=_dt.timezone.utc)
+
+    def sunday(month: int, nth: int) -> _dt.datetime:
+        first = _dt.datetime(d.year, month, 1, tzinfo=_dt.timezone.utc)
+        return first + _dt.timedelta(days=(6 - first.weekday()) % 7 + 7 * (nth - 1))
+    start = sunday(3, 2) + _dt.timedelta(hours=7)
+    end = sunday(11, 1) + _dt.timedelta(hours=6)
+    return start <= d < end
+
+
+def server_to_utc(ts: int, offset_now: float) -> int:
+    """Converte o carimbo do servidor para UTC. Servidores "fechamento de Nova York" (UTC+2 no inverno / UTC+3 no verão dos EUA,
+    como Pepperstone, IC Markets…) mudam de fuso ao longo do ano: o histórico é convertido vela a vela."""
+    if offset_now in (2.0, 3.0) and not os.environ.get("TURBO_IA_UTC_OFFSET"):
+        return int(ts - (3 if us_dst(ts - 2 * 3600) else 2) * 3600)
+    return int(ts - offset_now * 3600)
+
+
 # ---------------------------------------------------------------------------------------------------- MT5
 class MT5Broker:
     """MetaTrader 5 via pacote oficial `MetaTrader5` (Windows, terminal aberto e logado).
@@ -216,22 +257,7 @@ class MT5Broker:
         self.utc_offset = self.detect_offset()
 
     def detect_offset(self) -> float:
-        """Candles do MT5 vêm no horário do SERVIDOR. Compara o tick mais recente com o relógio UTC; TURBO_IA_UTC_OFFSET força."""
-        forced = os.environ.get("TURBO_IA_UTC_OFFSET") or os.environ.get("MT5_UTC_OFFSET_HOURS")
-        if forced not in (None, ""):
-            return float(forced)
-        ts = 0.0
-        for sym in ("EURUSD", "XAUUSD", "GBPUSD", "USDJPY", "Volatility 10 Index"):
-            try:
-                t = self.mt5.symbol_info_tick(sym)
-                ts = max(ts, float(getattr(t, "time", 0) or 0))
-            except Exception:  # noqa: BLE001
-                continue
-        if not ts:
-            return 0.0
-        raw = (ts - time.time()) / 3600
-        off = round(raw)
-        return float(off) if abs(raw - off) < 0.25 and abs(off) <= 14 else 0.0
+        return detect_offset(self.mt5)
 
     def update(self) -> None:
         pass

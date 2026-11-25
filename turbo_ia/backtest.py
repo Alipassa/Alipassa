@@ -57,7 +57,10 @@ def load_mt5(symbol: str, tf: str, count: int = 50_000) -> list[dict]:
     rates = mt5.copy_rates_from_pos(symbol, getattr(mt5, f"TIMEFRAME_{tf}"), 1, count)
     if rates is None or len(rates) == 0:
         raise RuntimeError(f"sem candles de {symbol} {tf}: {mt5.last_error()}")
-    return [{"time": int(r["time"]), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])} for r in rates]
+    from .broker import detect_offset, server_to_utc
+    off = detect_offset(mt5)
+    print(f"  {symbol} {tf}: {len(rates)} velas do MT5 · servidor UTC{off:+g} agora → horários convertidos para UTC vela a vela", flush=True)
+    return [{"time": server_to_utc(int(r["time"]), off), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])} for r in rates]
 
 
 def load_deriv(symbol: str, tf: str, days: int = 30) -> list[dict]:
@@ -139,11 +142,14 @@ def run(candles: list[dict], tf: str, mode: str, expiry_min: int = 10, payout: f
 SPREAD = {"GC=F": 0.30, "XAUUSD": 0.30, "EURUSD=X": 0.00012, "EURUSD": 0.00012}
 
 
-def signals(candles: list[dict], mode: str, utc_offset: float = 0.0) -> list[tuple[int, str, float]]:
-    """(índice, lado, ATR) de todo candle fechado com sinal — calculado uma vez e reaproveitado em vários alvos/stops."""
+def signals(candles: list[dict], mode: str, utc_offset: float = 0.0, all_hours: bool = False) -> list[tuple[int, str, float]]:
+    """(índice, lado, ATR) de todo candle fechado com sinal — calculado uma vez e reaproveitado em vários alvos/stops.
+    `all_hours`: na reversão, ignora o filtro de horário (para medir hora a hora)."""
+    from .analysis import analyze_reversion
     out = []
     for i in range(WINDOW - 1, len(candles) - 1):
-        a = analyze(candles[i - WINDOW + 1:i + 1], mode, utc_offset=utc_offset)
+        w = candles[i - WINDOW + 1:i + 1]
+        a = analyze_reversion(w, hours=None, utc_offset=utc_offset) if (all_hours and mode == "reversao") else analyze(w, mode, utc_offset=utc_offset)
         if a.signal != "NONE" and a.atr > 0:
             out.append((i, a.signal, a.atr))
     return out
@@ -229,6 +235,7 @@ def main(argv=None) -> int:
     ap.add_argument("--rr", help="testa alvo × stop em vez de expiração, ex.: 2,3 (alvo 2× e 3× o stop)")
     ap.add_argument("--sl-atr", default="1.5", help="stop em ATRs, um ou vários: 1,1.5,2")
     ap.add_argument("--spread", type=float, help="spread em preço (padrão: típico do ativo)")
+    ap.add_argument("--by-hour", action="store_true", help="reversão: mede cada hora UTC separadamente (com --rr)")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
@@ -261,6 +268,28 @@ def main(argv=None) -> int:
     return 0
 
 
+def by_hour(c: list[dict], sym: str, tf: str, rrs: list[float], sl: float, spread: float) -> None:
+    """Reversão em todas as horas; cada hora UTC simulada só com os seus sinais. Metades = 1ª e 2ª metade do período."""
+    sigs = signals(c, "reversao", all_hours=True)
+    print(f"\n  {sym} {tf} reversão hora a hora (UTC; Brasília = UTC−3) · stop {sl:g} ATR")
+    print("   hora  " + "  ".join(f"{'%g:1' % rr:>34}" for rr in rrs))
+    mid = c[len(c) // 2]["time"]
+    for h in range(24):
+        hs = [x for x in sigs if (c[x[0]]["time"] // 3600) % 24 == h]
+        cells = []
+        for rr in rrs:
+            r = simulate_rr(c, hs, rr, sl, spread)
+            lst = r.pop("list")
+            e1 = [t["r"] for t in lst if t["time"] < mid]
+            e2 = [t["r"] for t in lst if t["time"] >= mid]
+            m1 = sum(e1) / len(e1) if e1 else 0.0
+            m2 = sum(e2) / len(e2) if e2 else 0.0
+            flag = "✔" if e1 and e2 and m1 > 0 and m2 > 0 and r["trades"] >= 40 else " "
+            cells.append(f"{r['trades']:4} ops {r['rate']:5.1%} {r['exp_r']:+.2f}R ({m1:+.2f}/{m2:+.2f}){flag}")
+        print(f"   {h:02d}h  " + "  ".join(f"{x:>34}" for x in cells), flush=True)
+    print("   ✔ = positivo nas duas metades do período com ≥ 40 operações. Com 24 horas testadas, 1–2 ✔ podem ser sorte.")
+
+
 def main_rr(a) -> int:
     rrs = [float(x) for x in a.rr.split(",")]
     sls = [float(x) for x in a.sl_atr.split(",")]
@@ -271,6 +300,9 @@ def main_rr(a) -> int:
         for tf in a.tfs.split(","):
             c = {"yahoo": lambda: load_yahoo(sym, tf), "mt5": lambda: load_mt5(sym, tf), "deriv": lambda: load_deriv(sym, tf, a.days),
                  "csv": lambda: load_csv(sym)}[a.source]()
+            if a.by_hour:
+                by_hour(c, sym, tf, rrs, sls[0], spread)
+                continue
             for mode in a.modes.split(","):
                 sigs = signals(c, mode)
                 for sl in sls:
