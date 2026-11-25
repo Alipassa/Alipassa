@@ -349,3 +349,18 @@ class TestManualRisk(unittest.TestCase):
         risk = abs(r["price"] - r["sl"]) * r["volume"]
         self.assertLessEqual(risk, 50 + 1)          # ~5 % de 1000, nunca o lote fixo 0,5
         self.assertNotEqual(r["volume"], 0.5)
+
+
+class TestCandleSpread(unittest.TestCase):
+    def test_uses_candle_spread_and_commission(self):
+        from turbo_ia.backtest import simulate_rr, WINDOW
+        c = [{"time": 120 * i, "open": 100, "high": 100.5, "low": 99.5, "close": 100} for i in range(WINDOW + 5)]
+        c[WINDOW]["high"] = 104                                    # alvo 3 × 1 atingido no candle seguinte ao sinal
+        sig = [(WINDOW - 1, "BUY", 1.0)]
+        r0 = simulate_rr(c, sig, 3, 1.0, spread=0.30)
+        c[WINDOW - 1]["spread"] = 0.10
+        r1 = simulate_rr(c, sig, 3, 1.0, spread=0.30)
+        r2 = simulate_rr(c, sig, 3, 1.0, spread=0.30, commission=0.07)
+        self.assertAlmostEqual(r0["total_r"], 3 - 0.30)
+        self.assertAlmostEqual(r1["total_r"], 3 - 0.10)            # spread real da vela ganha do padrão
+        self.assertAlmostEqual(r2["total_r"], 3 - 0.17)

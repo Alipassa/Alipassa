@@ -59,8 +59,20 @@ def load_mt5(symbol: str, tf: str, count: int = 50_000) -> list[dict]:
         raise RuntimeError(f"sem candles de {symbol} {tf}: {mt5.last_error()}")
     from .broker import detect_offset, server_to_utc
     off = detect_offset(mt5)
+    info = mt5.symbol_info(symbol)
+    point = float(getattr(info, "point", 0) or 0)
     print(f"  {symbol} {tf}: {len(rates)} velas do MT5 · servidor UTC{off:+g} agora → horários convertidos para UTC vela a vela", flush=True)
-    return [{"time": server_to_utc(int(r["time"]), off), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])} for r in rates]
+    names = getattr(rates.dtype, "names", ()) or ()
+    out = []
+    for r in rates:
+        c = {"time": server_to_utc(int(r["time"]), off), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}
+        if "spread" in names and point:
+            c["spread"] = float(r["spread"]) * point          # spread REAL da corretora naquela vela
+        out.append(c)
+    sp = [c["spread"] for c in out if c.get("spread")]
+    if sp:
+        print(f"  spread real da corretora: mediana {sorted(sp)[len(sp) // 2]:.2f} (usado vela a vela no lugar do padrão)", flush=True)
+    return out
 
 
 def load_deriv(symbol: str, tf: str, days: int = 30) -> list[dict]:
@@ -156,9 +168,10 @@ def signals(candles: list[dict], mode: str, utc_offset: float = 0.0, all_hours: 
 
 
 def simulate_rr(candles: list[dict], sigs: list[tuple[int, str, float]], rr: float, sl_atr: float, spread: float = 0.0,
-                max_bars: int = 0) -> dict:
+                max_bars: int = 0, commission: float = 0.0) -> dict:
     """Entra no fechamento do candle do sinal com stop = sl_atr × ATR e alvo = rr × stop; anda candle a candle.
-    Se stop e alvo cabem no mesmo candle, conta o STOP (pior caso). Spread descontado em R. Uma operação por vez."""
+    Se stop e alvo cabem no mesmo candle, conta o STOP (pior caso). Spread (o da vela, se o MT5 informou) e comissão
+    (em preço por unidade, ida e volta) descontados em R. Uma operação por vez."""
     by_i = {i: (side, a) for i, side, a in sigs}
     res: list[dict] = []
     i, n = WINDOW - 1, len(candles)
@@ -168,6 +181,7 @@ def simulate_rr(candles: list[dict], sigs: list[tuple[int, str, float]], rr: flo
             continue
         side, a = by_i[i]
         e = candles[i]["close"]
+        sp = candles[i].get("spread") or spread
         dist = sl_atr * a
         buy = side == "BUY"
         sl, tp = (e - dist, e + rr * dist) if buy else (e + dist, e - rr * dist)
@@ -187,7 +201,7 @@ def simulate_rr(candles: list[dict], sigs: list[tuple[int, str, float]], rr: flo
             j += 1
         if out is None:
             break                                   # histórico acabou com a operação aberta
-        res.append({"time": candles[i]["time"], "side": side, "r": out - spread / dist, "win": out > 0, "bars": j - i})
+        res.append({"time": candles[i]["time"], "side": side, "r": out - (sp + commission) / dist, "win": out > 0, "bars": j - i})
         i = j
     nt = len(res)
     wins = sum(t["win"] for t in res)
@@ -235,6 +249,8 @@ def main(argv=None) -> int:
     ap.add_argument("--rr", help="testa alvo × stop em vez de expiração, ex.: 2,3 (alvo 2× e 3× o stop)")
     ap.add_argument("--sl-atr", default="1.5", help="stop em ATRs, um ou vários: 1,1.5,2")
     ap.add_argument("--spread", type=float, help="spread em preço (padrão: típico do ativo)")
+    ap.add_argument("--commission", type=float, default=0.0,
+                    help="comissão ida+volta em PREÇO (ouro Razor: US$ 7 por lote de 100 oz = 0.07)")
     ap.add_argument("--by-hour", action="store_true", help="reversão: mede cada hora UTC separadamente (com --rr)")
     a = ap.parse_args(argv)
     from .settings import load_env
@@ -268,7 +284,7 @@ def main(argv=None) -> int:
     return 0
 
 
-def by_hour(c: list[dict], sym: str, tf: str, rrs: list[float], sl: float, spread: float) -> None:
+def by_hour(c: list[dict], sym: str, tf: str, rrs: list[float], sl: float, spread: float, commission: float = 0.0) -> None:
     """Reversão em todas as horas; cada hora UTC simulada só com os seus sinais. Metades = 1ª e 2ª metade do período."""
     sigs = signals(c, "reversao", all_hours=True)
     print(f"\n  {sym} {tf} reversão hora a hora (UTC; Brasília = UTC−3) · stop {sl:g} ATR")
@@ -278,7 +294,7 @@ def by_hour(c: list[dict], sym: str, tf: str, rrs: list[float], sl: float, sprea
         hs = [x for x in sigs if (c[x[0]]["time"] // 3600) % 24 == h]
         cells = []
         for rr in rrs:
-            r = simulate_rr(c, hs, rr, sl, spread)
+            r = simulate_rr(c, hs, rr, sl, spread, commission=commission)
             lst = r.pop("list")
             e1 = [t["r"] for t in lst if t["time"] < mid]
             e2 = [t["r"] for t in lst if t["time"] >= mid]
@@ -301,13 +317,13 @@ def main_rr(a) -> int:
             c = {"yahoo": lambda: load_yahoo(sym, tf), "mt5": lambda: load_mt5(sym, tf), "deriv": lambda: load_deriv(sym, tf, a.days),
                  "csv": lambda: load_csv(sym)}[a.source]()
             if a.by_hour:
-                by_hour(c, sym, tf, rrs, sls[0], spread)
+                by_hour(c, sym, tf, rrs, sls[0], spread, a.commission)
                 continue
             for mode in a.modes.split(","):
                 sigs = signals(c, mode)
                 for sl in sls:
                     for rr in rrs:
-                        r = simulate_rr(c, sigs, rr, sl, spread)
+                        r = simulate_rr(c, sigs, rr, sl, spread, commission=a.commission)
                         r.pop("list")
                         print(f"  {sym:9} {tf} {mode:11} {rr:g}:1 stop {sl:g}ATR  {r['trades']:5} ops  acerto {r['rate']:5.1%} (precisa {r['breakeven']:5.1%})"
                               f"  média {r['exp_r']:+.3f}R  (1ª metade {r['exp_r_h1']:+.3f} · 2ª {r['exp_r_h2']:+.3f})  total {r['total_r']:+7.1f}R"
