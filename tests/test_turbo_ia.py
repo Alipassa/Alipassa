@@ -473,3 +473,37 @@ class TestStopBlock(unittest.TestCase):
         s.broker.positions = lambda sym=None: []
         s._manage_open()
         self.assertEqual(s.st.window_stops, {"123": 1, "123|SELL": 1})
+
+
+class TestPercentLimits(unittest.TestCase):
+    def _s(self, balance, **kw):
+        b = PaperBroker(seed=1, balance=balance)
+        b.connect()
+        s = IASession(b, forward=ForwardLog(None))
+        s.start(IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2", **kw))
+        s._stop.set()
+        s.st.running = True
+        return s
+
+    def test_loss_pct_scales_with_balance(self):
+        for bal in (1000, 11000):
+            s = self._s(bal, loss_pct=50)
+            self.assertAlmostEqual(s.limits()["loss"], bal * 0.5, places=0)
+            s.st.pnl = -bal * 0.49
+            self.assertFalse(s._check_limits())
+            s.st.pnl = -bal * 0.51
+            self.assertTrue(s._check_limits())
+            self.assertIn("limite de perda", s.st.stopped_reason)
+
+    def test_target_and_protection_pct_and_no_trade_cap(self):
+        s = self._s(11000, target_pct=10, loss_pct=0, protect=True, protect_after_pct=20, protect_keep_pct=10)
+        self.assertEqual(s.limits()["loss"], 0)
+        s.st.trades = 500                                     # sem limite de operações por padrão
+        s.st.pnl, s.st.peak = 1000, 1000
+        self.assertFalse(s._check_limits())
+        s.st.pnl = 1100
+        self.assertTrue(s._check_limits())                    # meta de 10 % de 11.000
+        s2 = self._s(11000, protect=True, protect_after_pct=20, protect_keep_pct=10)
+        s2.st.peak, s2.st.pnl = 2300, 1000                    # passou de +20 % e voltou abaixo de +10 %
+        self.assertTrue(s2._check_limits())
+        self.assertIn("proteção", s2.st.stopped_reason)

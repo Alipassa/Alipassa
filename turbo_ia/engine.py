@@ -33,12 +33,16 @@ class IAConfig:
     rr: float = 1.5                     # alvo = rr × distância do stop
     sl_atr: float = 1.5                 # stop padrão em ATRs
     duration_candles: int = 0           # >0 fecha a posição após N candles (estilo Rise/Fall); 0 = só SL/TP
-    target_profit: float = 1.0          # meta da sessão (moeda da conta)
-    loss_limit: float = 100.0           # perda máxima da sessão
-    max_trades: int = 50
+    target_profit: float = 0.0          # meta da sessão em dinheiro (0 = sem) — o painel usa target_pct
+    loss_limit: float = 0.0             # perda máxima em dinheiro (0 = sem) — o painel usa loss_pct
+    target_pct: float = 0.0             # meta em % do saldo do INÍCIO da sessão (0 = sem meta)
+    loss_pct: float = 50.0              # para a IA se a sessão perder este % do saldo do início (0 = sem limite)
+    max_trades: int = 0                 # 0 = sem limite de operações
     protect: bool = True                # proteção: depois de lucrar `protect_after`, não devolve mais que até `protect_keep`
-    protect_after: float = 0.70
+    protect_after: float = 0.70         # (dinheiro) — o painel usa os campos em %
     protect_keep: float = 0.14
+    protect_after_pct: float = 0.0      # proteção em % do saldo inicial: depois de lucrar X %, encerra se voltar a Y %
+    protect_keep_pct: float = 0.0
     expiry_min: int = 10                # registro de acerto: confere o preço N minutos depois de cada entrada
 
     @classmethod
@@ -55,6 +59,7 @@ class IAConfig:
 class SessionState:
     running: bool = False
     started_at: Optional[float] = None
+    start_equity: float = 0.0
     stopped_reason: str = ""
     pnl: float = 0.0
     peak: float = 0.0
@@ -98,9 +103,16 @@ class IASession:
                 if cfg.duration_candles <= 0:
                     cfg.duration_candles = max(1, cfg.expiry_min * 60 // TF_SECONDS.get(cfg.timeframe, 60))
             self.cfg = cfg
-            self.st = SessionState(running=True, started_at=time.time())
+            try:
+                eq = float(self.broker.info().get("equity") or 0)
+            except Exception:  # noqa: BLE001
+                eq = 0.0
+            self.st = SessionState(running=True, started_at=time.time(), start_equity=eq)
             self._stop.clear()
-        self.log(f"IA iniciada · {cfg.symbol} {cfg.timeframe} · modo {cfg.mode} · lote {cfg.volume} · meta {cfg.target_profit} · limite {cfg.loss_limit}", "start")
+        lim = self.limits()
+        self.log(f"IA iniciada · {cfg.symbol} {cfg.timeframe} · risco {cfg.risk_pct:g}%/op · saldo inicial {eq:.2f} · "
+                 f"meta {('+%.2f' % lim['target']) if lim['target'] else 'nenhuma'} · "
+                 f"limite de perda {('-%.2f' % lim['loss']) if lim['loss'] else 'nenhum'}", "start")
         self._thread = threading.Thread(target=self._run, name="turbo-ia", daemon=True)
         self._thread.start()
         return {"ok": True}
@@ -118,6 +130,7 @@ class IASession:
         with self.lock:
             d = asdict(self.st)
             d["config"] = asdict(self.cfg)
+            d["limits"] = self.limits()
             return d
 
     # ------------------------------------------------------------------ laço
@@ -235,18 +248,27 @@ class IASession:
             self.st.history.append({"ticket": t, "profit": round(profit, 2), "t": time.time()})
         self.log(f"#{t} fechada: {profit:+.2f} · sessão {self.st.pnl:+.2f}", "win" if profit >= 0 else "loss")
 
+    def limits(self) -> dict:
+        """Limites da sessão em dinheiro. Em % valem sobre o saldo do início da sessão (servem para 1.000 ou 11.000)."""
+        c, eq = self.cfg, self.st.start_equity
+        pct = lambda p: eq * p / 100.0 if p > 0 and eq > 0 else 0.0  # noqa: E731
+        return {"target": pct(c.target_pct) or c.target_profit, "loss": pct(c.loss_pct) or c.loss_limit,
+                "protect_after": pct(c.protect_after_pct) or c.protect_after,
+                "protect_keep": pct(c.protect_keep_pct) if c.protect_after_pct > 0 else c.protect_keep}
+
     def _check_limits(self) -> bool:
         c, s = self.cfg, self.st
         if s.open_ticket is not None:
             return False                          # deixa a operação aberta terminar antes de encerrar
+        lim = self.limits()
         reason = ""
-        if c.target_profit > 0 and s.pnl >= c.target_profit:
+        if lim["target"] > 0 and s.pnl >= lim["target"]:
             reason = f"meta atingida ({s.pnl:+.2f})"
-        elif c.loss_limit > 0 and s.pnl <= -c.loss_limit:
-            reason = f"limite de perda atingido ({s.pnl:+.2f})"
-        elif c.protect and s.peak >= c.protect_after and s.pnl <= c.protect_keep:
+        elif lim["loss"] > 0 and s.pnl <= -lim["loss"]:
+            reason = f"limite de perda atingido ({s.pnl:+.2f} de -{lim['loss']:.2f})"
+        elif c.protect and s.peak >= lim["protect_after"] and s.pnl <= lim["protect_keep"]:
             reason = f"proteção da sessão: lucro voltou a {s.pnl:+.2f} após pico {s.peak:+.2f}"
-        elif s.trades >= c.max_trades:
+        elif c.max_trades > 0 and s.trades >= c.max_trades:
             reason = f"máximo de {c.max_trades} operações"
         if reason:
             self.stop(reason)
