@@ -105,12 +105,23 @@ def candidates(c: list[dict], f: dict, z_thr: float) -> list[tuple[int, bool, in
     return out
 
 
-def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, spread_def: float, max_bars: int) -> list[tuple[int, float]]:
-    """Simula só nas velas candidatas (rápido). Uma operação por vez. Devolve [(índice da entrada, R)]."""
+def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, spread_def: float, max_bars: int,
+              block: Optional[str] = None) -> list[tuple[int, float]]:
+    """Simula só nas velas candidatas (rápido). Uma operação por vez. Devolve [(índice da entrada, R)].
+    block: None · "dir" (depois de um stop, não repete o MESMO lado naquela janela de 1 h)
+           · "window" (depois de um stop, encerra aquela janela de 1 h) · "2stops" (encerra a janela após 2 stops)."""
     out: list[tuple[int, float]] = []
     free = lo
+    stops: dict = {}
     for i, buy, h in cands:
         if i < free or i < lo or h not in hours:
+            continue
+        win = c[i]["time"] // 3600
+        if block == "dir" and stops.get((win, buy)):
+            continue
+        if block == "window" and stops.get(win):
+            continue
+        if block == "2stops" and stops.get(win, 0) >= 2:
             continue
         if i >= hi - 1:
             break
@@ -137,8 +148,39 @@ def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, s
         if res is None:
             break
         out.append((i, res - (c[i].get("spread") or spread_def) / dist))
+        if res < 0:
+            stops[(win, buy)] = stops.get((win, buy), 0) + 1
+            stops[win] = stops.get(win, 0) + 1
         free = j
     return out
+
+
+def cooldown_test(load, tfs: list[str], spread_def: float) -> None:
+    """Regra atual × travas depois de stop, nas duas metades do histórico (não há escolha: as 4 regras são fixas)."""
+    rules = ((None, "regra atual (sem trava)"), ("dir", "após stop, não repete o lado na janela"),
+             ("2stops", "após 2 stops, encerra a janela"), ("window", "após 1 stop, encerra a janela"))
+    print("\nTRAVA DEPOIS DE STOP · 16h/20h UTC · esticada 2 · alvo 3× · spread real · metades A e B")
+    for tf in tfs:
+        c = load(tf)
+        f = features(c)
+        cz = candidates(c, f, 2.0)
+        half = len(c) // 2
+        dA = (c[half]["time"] - c[0]["time"]) / 86400 or 1
+        dB = (c[-1]["time"] - c[half]["time"]) / 86400 or 1
+        print(f"  {tf} ({(dA + dB):.0f} dias)")
+        for blk, label in rules:
+            rA = [x for _, x in run_cands(c, f, cz, set(REVERSION_HOURS), "3R", 0, half, spread_def, 0, blk)]
+            rB = [x for _, x in run_cands(c, f, cz, set(REVERSION_HOURS), "3R", half, len(c), spread_def, 0, blk)]
+            sA, sB = summary(rA), summary(rB)
+            allr = rA + rB
+            streak = worst = 0
+            for x in allr:
+                streak = streak + 1 if x < 0 else 0
+                worst = max(worst, streak)
+            print(f"    {label:40} A: {sA['n']:4} ops {sA['exp']:+.3f} R/op {sum(rA) / dA * 30:+6.1f} R/mês │ "
+                  f"B: {sB['n']:4} ops {sB['exp']:+.3f} R/op {sum(rB) / dB * 30:+6.1f} R/mês │ pior queda {max(sA['dd'], sB['dd']):3.0f} R · "
+                  f"{worst} stops seguidos", flush=True)
+    print("Adotar uma trava só se ela tiver lucro por mês igual ou maior nas DUAS metades, ou quase igual com queda bem menor.")
 
 
 def sweep(load, tfs: list[str], spread_def: float) -> None:
@@ -238,9 +280,15 @@ def main(argv=None) -> int:
     ap.add_argument("--spread", type=float)
     ap.add_argument("--sweep", action="store_true", help="varre tempos gráficos × horas × esticada × saída")
     ap.add_argument("--tfs", default="M1,M2,M3,M5,M10,M15")
+    ap.add_argument("--cooldown", action="store_true", help="compara travas depois de stop com a regra atual")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
+    if a.cooldown:
+        spread_def = a.spread if a.spread is not None else SPREAD.get(a.symbol, 0.30)
+        load = (lambda tf: load_mt5(a.symbol, tf, a.bars)) if a.source == "mt5" else (lambda tf: load_yahoo(a.symbol, tf))
+        cooldown_test(load, a.tfs.split(","), spread_def)
+        return 0
     if a.sweep:
         spread_def = a.spread if a.spread is not None else SPREAD.get(a.symbol, 0.30)
         load = (lambda tf: load_mt5(a.symbol, tf, a.bars)) if a.source == "mt5" else (lambda tf: load_yahoo(a.symbol, tf))

@@ -110,6 +110,13 @@
     </div>
     <div class="row2"><div><label>Lote fixo (se risco % = 0)</label><input id="volume" type="number" step="0.01" min="0.01" value="0.01"></div>
       <div><label>Esticada mín. (ATR)</label><input id="zthr" type="number" step="0.25" min="0.5" value="2" title="Reversão: só entra com o preço a mais de N ATR da média 20"></div></div>
+    <label>Trava depois de stop (mesma janela de 1 h)</label>
+    <select id="stopblock">
+      <option value="">nenhuma (regra testada)</option>
+      <option value="2stops">após 2 stops, encerra a janela</option>
+      <option value="dir">após stop, não repete o lado</option>
+      <option value="window">após 1 stop, encerra a janela</option>
+    </select>
     <div class="hint" id="riskHint">Risco % &gt; 0: o lote é recalculado a cada operação pelo saldo e pela distância do stop (máx. 10%)</div>
     <div class="hint">Duração 0 = sai só por SL/TP · N = fecha após N velas (estilo Rise/Fall)</div>
 
@@ -307,13 +314,13 @@ async function refreshStatus() {
     window._cfgShown = true;
     const c = s.config, set = (id, v) => { if (v !== undefined && v !== null) $(id).value = v; };
     set('mode', c.mode); set('tf', c.timeframe); set('riskpct', c.risk_pct); set('volume', c.volume); set('target', c.target_profit);
-    set('loss', c.loss_limit); set('rr', c.rr); set('slatr', c.sl_atr); set('dur', c.duration_candles); set('zthr', c.z_thr);
+    set('loss', c.loss_limit); set('rr', c.rr); set('slatr', c.sl_atr); set('dur', c.duration_candles); set('zthr', c.z_thr); set('stopblock', c.stop_block);
     $('protect').checked = !!c.protect;
     if ([...$('symbol').options].some(o => o.value === c.symbol)) $('symbol').value = c.symbol;
   }
   $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
   $('iaBtn').classList.toggle('on', running);
-  ['symbol','tf','mode','volume','riskpct','zthr','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
+  ['symbol','tf','mode','volume','riskpct','zthr','stopblock','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
   $('sessPnl').textContent = `${s.pnl>=0?'+':''}${fmt(s.pnl)} (${s.trades} ops · ${s.wins}G/${s.losses}P)`;
   $('sessPnl').className = 'pnl' + (s.pnl < 0 ? ' neg' : '');
   $('iaStatus').textContent = running ? `IA operando ${s.config.symbol} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}`
@@ -332,7 +339,7 @@ $('iaBtn').onclick = async () => {
   else {
     const r = await api('/api/ia/start', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value, volume:$('volume').value,
       target_profit:$('target').value, loss_limit:$('loss').value, rr:$('rr').value, sl_atr:$('slatr').value, duration_candles:$('dur').value,
-      protect:$('protect').checked, risk_pct:$('riskpct').value, z_thr:$('zthr').value, protect_after:$('pafter').value, protect_keep:$('pkeep').value});
+      protect:$('protect').checked, risk_pct:$('riskpct').value, z_thr:$('zthr').value, stop_block:$('stopblock').value, protect_after:$('pafter').value, protect_keep:$('pkeep').value});
     if (!r.ok) alert(r.error);
   }
   $('iaBtn').disabled = false; refreshStatus();

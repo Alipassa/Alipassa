@@ -442,3 +442,34 @@ class TestM3(unittest.TestCase):
         c = b.candles("XAUUSD", "M3", 50)
         self.assertTrue(all((y["time"] - x["time"]) % 180 == 0 for x, y in zip(c, c[1:])))
         self.assertEqual(MT5Broker.TF["M3"], "TIMEFRAME_M3")
+
+
+class TestStopBlock(unittest.TestCase):
+    def _session(self, block):
+        clk = Clock()
+        b = PaperBroker(seed=3, clock=clk)
+        b.connect()
+        s = IASession(b, forward=ForwardLog(None))
+        s.start(IAConfig(symbol="Volatility 10 Index", mode="veloz", volume=1, target_profit=0, loss_limit=0, protect=False,
+                         stop_block=block))
+        s._stop.set()
+        s.st.running = True
+        return s, clk
+
+    def test_window_block_skips_after_stop(self):
+        s, clk = self._session("window")
+        s.st.last_bar = 0
+        # simula um stop registrado na janela atual
+        t = s.broker.candles(s.cfg.symbol, s.cfg.timeframe, 3)[-2]["time"]
+        s.st.window_stops[str(int(t // 3600))] = 1
+        clk.t += 61
+        s.step()
+        self.assertTrue(any("trava" in l["msg"] for l in s.st.log) or s.st.last_analysis["signal"] == "NONE")
+
+    def test_loss_is_counted_per_window_and_side(self):
+        s, _ = self._session("dir")
+        s.st.open_ticket, s.st.open_side, s.st.open_window = 999, "SELL", 123
+        s.broker.closed_profit = lambda t: -10.0
+        s.broker.positions = lambda sym=None: []
+        s._manage_open()
+        self.assertEqual(s.st.window_stops, {"123": 1, "123|SELL": 1})

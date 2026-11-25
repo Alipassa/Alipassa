@@ -28,6 +28,8 @@ class IAConfig:
     volume: float = 0.5                 # lote fixo por operação (usado quando risk_pct = 0)
     risk_pct: float = 0.0               # > 0: lote calculado a cada operação para perder este % do saldo no stop
     z_thr: float = 2.0                  # reversão: distância mínima da média 20, em ATRs, para entrar
+    stop_block: str = ""                # trava após stop na mesma janela de 1 h: "" (nenhuma) · "dir" (não repete o lado)
+                                        # · "2stops" (encerra a janela após 2 stops) · "window" (encerra após 1 stop)
     rr: float = 1.5                     # alvo = rr × distância do stop
     sl_atr: float = 1.5                 # stop padrão em ATRs
     duration_candles: int = 0           # >0 fecha a posição após N candles (estilo Rise/Fall); 0 = só SL/TP
@@ -61,6 +63,9 @@ class SessionState:
     losses: int = 0
     open_ticket: Optional[int] = None
     open_bar: Optional[int] = None
+    open_side: Optional[str] = None
+    open_window: Optional[int] = None
+    window_stops: dict = field(default_factory=dict)     # "janela" e "janela|lado" → nº de stops (janela = hora UTC desde 1970)
     last_bar: Optional[int] = None
     last_analysis: Optional[dict] = None
     log: list = field(default_factory=list)
@@ -156,6 +161,18 @@ class IASession:
         if a.signal == "NONE":
             self.log(f"sem entrada ({a.label}): {'; '.join(a.blocked)}", "skip")
             return
+        window = int((int(closed[-1]["time"]) - getattr(b, "utc_offset", 0.0) * 3600) // 3600)
+        ws = self.st.window_stops
+        why = ""
+        if c.stop_block == "dir" and ws.get(f"{window}|{a.signal}"):
+            why = f"trava: já houve stop {'comprando' if a.signal == 'BUY' else 'vendendo'} nesta janela"
+        elif c.stop_block == "window" and ws.get(str(window)):
+            why = "trava: já houve stop nesta janela"
+        elif c.stop_block == "2stops" and ws.get(str(window), 0) >= 2:
+            why = "trava: 2 stops nesta janela"
+        if why:
+            self.log(f"sem entrada ({why})", "skip")
+            return
         volume, risk_note = c.volume, ""
         if c.risk_pct > 0:
             if not a.sl:
@@ -181,6 +198,7 @@ class IASession:
                          getattr(b, "name", ""), sl=a.sl, tp=a.tp)
         with self.lock:
             self.st.open_ticket, self.st.open_bar = res["ticket"], bar
+            self.st.open_side, self.st.open_window = a.signal, window
             self.st.trades += 1
         self.log(f"{'COMPRA' if a.signal == 'BUY' else 'VENDA'} #{res['ticket']} {res['volume']} @ {res['price']} · SL {res['sl']} · TP {res['tp']} · "
                  f"força {a.strength:.0f}%{risk_note} · {', '.join(a.reasons[:3])}", "trade")
@@ -210,6 +228,10 @@ class IASession:
                 self.st.wins += 1
             else:
                 self.st.losses += 1
+                if self.st.open_window is not None:
+                    w, ws = self.st.open_window, self.st.window_stops
+                    ws[str(w)] = ws.get(str(w), 0) + 1
+                    ws[f"{w}|{self.st.open_side}"] = ws.get(f"{w}|{self.st.open_side}", 0) + 1
             self.st.history.append({"ticket": t, "profit": round(profit, 2), "t": time.time()})
         self.log(f"#{t} fechada: {profit:+.2f} · sessão {self.st.pnl:+.2f}", "win" if profit >= 0 else "loss")
 
