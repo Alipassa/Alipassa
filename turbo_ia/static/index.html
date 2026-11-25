@@ -111,7 +111,8 @@
       <div><label>Stop (ATR)</label><input id="slatr" type="number" step="0.1" value="1.5"></div>
       <div><label>Duração (velas)</label><input id="dur" type="number" step="1" min="0" value="0"></div>
     </div>
-    <div class="row2"><div><label>Lote fixo (se risco % = 0)</label><input id="volume" type="number" step="0.01" min="0.01" value="0.01"></div><div></div></div>
+    <div class="row2"><div><label>Lote fixo (se risco % = 0)</label><input id="volume" type="number" step="0.01" min="0.01" value="0.01"></div>
+      <div><label>Esticada mín. (ATR)</label><input id="zthr" type="number" step="0.25" min="0.5" value="2" title="Reversão: só entra com o preço a mais de N ATR da média 20"></div></div>
     <div class="hint" id="riskHint">Risco % &gt; 0: o lote é recalculado a cada operação pelo saldo e pela distância do stop (máx. 10%)</div>
     <div class="hint">Duração 0 = sai só por SL/TP · N = fecha após N velas (estilo Rise/Fall)</div>
 
@@ -186,7 +187,7 @@ const api = async (path, body) => {
 };
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
 const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
-  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · alvo 3× o stop (stop 1 ATR) · histórico Pepperstone (423 ops, spread real): 30,3% de acerto, +0,16 R/op · espere 10+ stops seguidos'};
+  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · entra com o preço > 2 ATR da média 20 · alvo 3× o stop (1 ATR) · Pepperstone: ~63 ops/mês, ~34% de acerto, +0,30 R/op · espere 8+ stops seguidos'};
 
 async function refreshForward() {
   const rr = +$('rr').value || 0;
@@ -283,7 +284,7 @@ async function loadSymbols() {
 
 async function refreshChart() {
   try {
-    const d = await api(`/api/chart?symbol=${encodeURIComponent($('symbol').value)}&tf=${$('tf').value}&mode=${$('mode').value}&n=300`);
+    const d = await api(`/api/chart?symbol=${encodeURIComponent($('symbol').value)}&tf=${$('tf').value}&mode=${$('mode').value}&z=${$('zthr').value}&n=300`);
     if (d.error) { $('tSub').textContent = d.error; return; }
     renderChart(d);
   } catch(e) { $('tSub').textContent = 'servidor indisponível'; }
@@ -299,7 +300,7 @@ async function refreshStatus() {
   running = s.running;
   $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
   $('iaBtn').classList.toggle('on', running);
-  ['symbol','tf','mode','volume','riskpct','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
+  ['symbol','tf','mode','volume','riskpct','zthr','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
   $('sessPnl').textContent = `${s.pnl>=0?'+':''}${fmt(s.pnl)} (${s.trades} ops · ${s.wins}G/${s.losses}P)`;
   $('sessPnl').className = 'pnl' + (s.pnl < 0 ? ' neg' : '');
   $('iaStatus').textContent = running ? `IA operando ${s.config.symbol} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}`
@@ -318,13 +319,13 @@ $('iaBtn').onclick = async () => {
   else {
     const r = await api('/api/ia/start', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value, volume:$('volume').value,
       target_profit:$('target').value, loss_limit:$('loss').value, rr:$('rr').value, sl_atr:$('slatr').value, duration_candles:$('dur').value,
-      protect:$('protect').checked, risk_pct:$('riskpct').value, protect_after:$('pafter').value, protect_keep:$('pkeep').value});
+      protect:$('protect').checked, risk_pct:$('riskpct').value, z_thr:$('zthr').value, protect_after:$('pafter').value, protect_keep:$('pkeep').value});
     if (!r.ok) alert(r.error);
   }
   $('iaBtn').disabled = false; refreshStatus();
 };
 $('anaNow').onclick = async () => {
-  const a = await api('/api/analyze', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value});
+  const a = await api('/api/analyze', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value, z_thr:$('zthr').value});
   if (a.error) return alert(a.error);
   renderAnalysis(a); renderAnaCard(a); $('anaWhen').textContent = '(manual ' + new Date().toLocaleTimeString() + ')';
 };
@@ -342,11 +343,11 @@ document.querySelectorAll('.tabs a').forEach(a => a.onclick = () => {
 });
 $('mode').onchange = () => {
   $('modeHint').textContent = MODE_HINT[$('mode').value];
-  $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (> 1 ATR) · 16h/20h UTC'
+  $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (esticada mín. em ATR) · 16h/20h UTC'
                                                               : 'Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH';
   if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
     $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 3;   // ganho 3×, perda 1×
-    $('riskpct').value = 2; $('target').value = 0; $('protect').checked = false;          // escolha do usuário: 2% por operação, sem meta curta
+    $('riskpct').value = 2; $('zthr').value = 2; $('target').value = 0; $('protect').checked = false;          // escolha do usuário: 2% por operação, sem meta curta
     syncRisk();
     const bal = parseFloat(($('balance').textContent.match(/[\d.]+/) || ['0'])[0]);
     if (bal) $('loss').value = Math.round(bal * 0.5);                                     // trava: para a IA se perder metade do saldo

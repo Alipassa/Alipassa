@@ -8,7 +8,7 @@ import os
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
@@ -36,14 +36,14 @@ class App:
                 info = {"broker": self.broker.name, "error": str(e)}
             return {"version": __version__, "account": info, "session": self.session.state(), "positions": self.broker.positions()}
 
-    def chart(self, symbol: str, tf: str, n: int, mode: str) -> dict:
+    def chart(self, symbol: str, tf: str, n: int, mode: str, z_thr: Optional[float] = None) -> dict:
         with self.lock:
             self.broker.update()
             candles = self.broker.candles(symbol, tf, n)
             bid, ask = self.broker.tick(symbol)
             digits = self.broker.spec(symbol).get("digits", 2)
         s = series(candles)
-        a = analyze(candles[:-1], mode, utc_offset=self.broker.utc_offset) if len(candles) > 1 else None
+        a = analyze(candles[:-1], mode, utc_offset=self.broker.utc_offset, z_thr=z_thr) if len(candles) > 1 else None
         return {"symbol": symbol, "tf": tf, "candles": candles, "series": s, "analysis": a.to_dict() if a else None,
                 "bid": bid, "ask": ask, "digits": digits, "positions": self.broker.positions(symbol)}
 
@@ -109,7 +109,8 @@ def make_handler(app: App):
                 elif u.path == "/api/symbols":
                     self._json({"symbols": app.broker.symbols()})
                 elif u.path == "/api/chart":
-                    self._json(app.chart(q.get("symbol", ""), q.get("tf", "M1"), int(q.get("n", 300)), q.get("mode", "veloz")))
+                    self._json(app.chart(q.get("symbol", ""), q.get("tf", "M1"), int(q.get("n", 300)), q.get("mode", "veloz"),
+                                         float(q["z"]) if q.get("z") else None))
                 else:
                     self._json({"error": "não encontrado"}, 404)
             except Exception as e:  # noqa: BLE001
@@ -130,7 +131,8 @@ def make_handler(app: App):
                 elif p == "/api/analyze":
                     with app.lock:
                         candles = app.broker.candles(d["symbol"], d.get("timeframe", "M1"), 300)
-                    self._json(analyze(candles[:-1], d.get("mode", "veloz"), utc_offset=app.broker.utc_offset).to_dict())
+                    self._json(analyze(candles[:-1], d.get("mode", "veloz"), utc_offset=app.broker.utc_offset,
+                                       z_thr=float(d["z_thr"]) if d.get("z_thr") else None).to_dict())
                 elif p == "/api/order":
                     self._json(app.manual_order(d))
                 elif p == "/api/close":

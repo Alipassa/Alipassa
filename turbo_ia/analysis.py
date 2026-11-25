@@ -70,7 +70,12 @@ def series(candles: list[dict]) -> dict:
 # 61,2 % em 209 operações (IC95 54,5–67,6 %). Foi escolhida entre 24 horários — o acerto real pode ser menor. Só vale depois
 # de confirmada em DEMO (registro de acerto do painel): precisa ficar acima de 56,2 % (payout 78 %) com centenas de operações.
 REVERSION_HOURS = (16, 20)
-REVERSION_Z = 1.0
+# Esticada mínima: 1,0 na origem; 2,0 desde a pesquisa na Pepperstone (101 dias M2, metade A escolhe / B prova):
+#   z>1 3R: A +0,163 R (195 ops) · B +0,165 R (228 ops) · pior queda 21 R
+#   z>2 3R: A +0,262 R (104 ops) · B +0,340 R (107 ops) · pior queda 17 R — metade das operações, lucro total parecido,
+#   quedas menores (US$ 1.000 a 2 %: mês típico igual, chance de prejuízo 18 % → 11 %, queda típica 27 % → 18 %).
+#   O efeito é coerente: z maior melhorou também com saída 4R e com vela de confirmação.
+REVERSION_Z = 2.0
 
 
 # Alvo × stop (backtest 60 dias GC=F M2, stop = 1 ATR, stop contado primeiro quando os dois cabem no candle, spread 0,30):
@@ -116,9 +121,11 @@ def analyze_reversion(candles: list[dict], hours=REVERSION_HOURS, z_thr: float =
                     f"{'Alta' if side > 0 else 'Baixa'} · Reversão {'armada' if signal != 'NONE' else 'aguardando'}")
 
 
-def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5, utc_offset: float = 0.0) -> Analysis:
+def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5, utc_offset: float = 0.0,
+            z_thr: Optional[float] = None) -> Analysis:
     if mode == "reversao":
-        return analyze_reversion(candles, sl_atr=sl_atr, utc_offset=utc_offset, rr=rr)
+        return analyze_reversion(candles, sl_atr=sl_atr, utc_offset=utc_offset, rr=rr,
+                                 z_thr=REVERSION_Z if z_thr is None else z_thr)
     mode = mode if mode in MODES else "veloz"
     cfg = MODES[mode]
     if len(candles) < 60:

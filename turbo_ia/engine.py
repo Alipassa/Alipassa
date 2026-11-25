@@ -27,6 +27,7 @@ class IAConfig:
     mode: str = "veloz"                 # veloz | equilibrado | preciso | reversao (experimental: ouro M2, 16h/20h UTC)
     volume: float = 0.5                 # lote fixo por operação (usado quando risk_pct = 0)
     risk_pct: float = 0.0               # > 0: lote calculado a cada operação para perder este % do saldo no stop
+    z_thr: float = 2.0                  # reversão: distância mínima da média 20, em ATRs, para entrar
     rr: float = 1.5                     # alvo = rr × distância do stop
     sl_atr: float = 1.5                 # stop padrão em ATRs
     duration_candles: int = 0           # >0 fecha a posição após N candles (estilo Rise/Fall); 0 = só SL/TP
@@ -147,7 +148,7 @@ class IASession:
             return
         self.st.last_bar = bar
         closed = candles[:-1]                     # só candles fechados: sem repintura
-        a = analyze(closed, c.mode, c.rr, c.sl_atr, getattr(b, "utc_offset", 0.0))
+        a = analyze(closed, c.mode, c.rr, c.sl_atr, getattr(b, "utc_offset", 0.0), c.z_thr)
         with self.lock:
             self.st.last_analysis = a.to_dict()
         if self.st.open_ticket is not None:

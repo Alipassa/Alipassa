@@ -142,6 +142,23 @@ Hora a hora, só 16h e 20h UTC ficam positivas nas duas metades com 3:1. US$ 1.0
 1 % → típico US$ 1.208 (20 % de chance de prejuízo, queda típica 14 %); 2 % → US$ 1.401 (20 %, 27 %);
 5 % → US$ 1.731 (33 %, 58 %). Vantagem ≈ 1,8 desvio acima de zero — promissora, ainda não comprovada.
 
+## Pesquisa de melhorias (`research.py`) — esticada mínima 2 ATR
+
+`python -m turbo_ia.research --source mt5 --symbol XAUUSD` testa 96 variações (esticada 1/1,25/1,5/2 ATR, vela de
+confirmação, alvo 2R/3R/4R/média, zero a zero, saída em 30 velas, filtro de spread). A metade A do histórico escolhe; a
+metade B prova. Na Pepperstone (101 dias M2, 25/11/2026):
+
+| Variação | Metade A | Metade B | Pior queda |
+| --- | --- | --- | --- |
+| esticada > 1 ATR, alvo 3R (anterior) | 195 ops · +0,163 R | 228 ops · +0,165 R | 21 R |
+| **esticada > 2 ATR, alvo 3R (atual)** | 104 ops · +0,262 R | 107 ops · **+0,340 R** | 17 R |
+| esticada > 2 ATR, alvo 4R | 102 ops · +0,377 R | 104 ops · +0,303 R | 16 R |
+| alvo 4R com esticada 1 ATR | 174 ops · +0,191 R | 196 ops · +0,077 R | 23 R |
+
+Metade das operações e lucro total parecido, com quedas menores. US$ 1.000 a 2 %: mês típico ≈ US$ 1.380 nos dois casos,
+chance de prejuízo 18 % → 11 %, queda típica 27 % → 18 %. A 3 % a nova regra tem a mesma queda típica da antiga a 2 %
+(≈ 26 %) com mês típico ≈ US$ 1.570. O campo **Esticada mín. (ATR)** no painel ajusta (padrão 2).
+
 ## Lote pelo risco (% do saldo)
 
 Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (distância do stop × valor de 1,0 de preço por lote)`,

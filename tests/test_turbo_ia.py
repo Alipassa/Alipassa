@@ -379,3 +379,15 @@ class TestResearch(unittest.TestCase):
             self.assertTrue(all(x >= -1.0 - 1e-9 for x in r))          # nunca perde mais que o stop (sem custo)
             if ex == "4R":
                 self.assertTrue(all(x <= 4 + 1e-9 for x in r))
+
+
+class TestZThreshold(unittest.TestCase):
+    def test_default_is_2_and_configurable(self):
+        from turbo_ia.analysis import REVERSION_Z, analyze
+        self.assertEqual(REVERSION_Z, 2.0)
+        c = stretched(16, up=True)
+        z = analyze(c, "reversao", z_thr=0.5).reasons[0]          # "preço +X ATR acima…"
+        zval = float(z.split()[1])
+        self.assertEqual(analyze(c, "reversao", z_thr=zval - 0.1).signal, "SELL")
+        self.assertEqual(analyze(c, "reversao", z_thr=zval + 0.1).signal, "NONE")
+        self.assertEqual(IAConfig.from_dict({"z_thr": "2.5"}).z_thr, 2.5)
