@@ -190,6 +190,25 @@ Nenhuma trava ganhou da regra sem trava nas duas metades → nenhuma adotada. Ac
 fraca na metade mais antiga em todos os gráficos, e no M1 ela some (≈ 0). O M2 é o único positivo com folga nas duas
 metades → M2 volta a ser o recomendado. Sequências de 10 a 19 stops aconteceram: dimensione o risco para isso.
 
+## Filtro de tendência e freio diário (Pepperstone, 62 500 velas, 26/11/2026)
+
+M2 (127 dias), R por mês nas metades A (antiga) | B (recente):
+
+| Regra | A | B | Pior queda · stops seguidos |
+| --- | --- | --- | --- |
+| **sem filtro (atual)** | +10,7 | +20,3 | 19 R · 15 |
+| só a favor da tendência (EMA 200) | −1,8 | +2,0 | 15 R · 10 |
+| só com EMA 200 plana | +13,9 | +10,5 | 13 R · 11 |
+| não entra contra impulso > 4 ATR | +0,8 | +10,8 | 16 R · 11 |
+| freio diário −3R (6 % a 2 %) | +9,8 | +12,1 | 14 R · 10 |
+| freio diário −4R (8 %) | +12,6 | +14,8 | 15 R · 12 |
+| **freio diário −5R (10 % a 2 %) — adotado** | **+11,0** | **+21,3** | **16 R · 13** |
+| freio diário −6R (12 %) | +9,0 | +20,8 | 19 R · 14 |
+
+Nenhum filtro de tendência ganhou nas duas metades (a estratégia lucra justamente contra a tendência de curto prazo).
+O freio diário de 5 × o risco foi o único ajuste igual ou melhor nas duas metades do M2, com queda menor; no M3 ficou
+neutro (A +3,3 × +4,5 · B +12,9 × +12,9). Configuração final: M2 · esticada 2 · 3R · 2 % · freio diário 10 % · sem meta.
+
 ## Lote pelo risco (% do saldo)
 
 Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (distância do stop × valor de 1,0 de preço por lote)`,
