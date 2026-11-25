@@ -42,7 +42,7 @@ class App:
             candles = self.broker.candles(symbol, tf, n)
             bid, ask = self.broker.tick(symbol)
             digits = self.broker.spec(symbol).get("digits", 2)
-        s = series(candles)
+        s = series(candles, z_thr if z_thr else 2.0)
         a = analyze(candles[:-1], mode, utc_offset=self.broker.utc_offset, z_thr=z_thr) if len(candles) > 1 else None
         return {"symbol": symbol, "tf": tf, "candles": candles, "series": s, "analysis": a.to_dict() if a else None,
                 "bid": bid, "ask": ask, "digits": digits, "positions": self.broker.positions(symbol)}
@@ -125,7 +125,10 @@ def make_handler(app: App):
                 d = self._body()
                 p = urlparse(self.path).path
                 if p == "/api/ia/start":
-                    self._json(app.session.start(IAConfig.from_dict(d)))
+                    if d.get("mode", "reversao") != "reversao":     # só a estratégia que passou nos testes pode operar
+                        self._json({"ok": False, "error": "só o modo Reversão ouro está habilitado (os outros deram prejuízo nos testes)"})
+                    else:
+                        self._json(app.session.start(IAConfig.from_dict({**d, "mode": "reversao"})))
                 elif p == "/api/ia/stop":
                     self._json(app.session.stop())
                 elif p == "/api/analyze":

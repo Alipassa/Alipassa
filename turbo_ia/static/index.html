@@ -90,10 +90,7 @@
         <select id="tf"><option>M1</option><option>M2</option><option>M5</option><option>M15</option><option>M30</option><option>H1</option></select></div>
       <div><label>Modo de negociação</label>
         <select id="mode">
-          <option value="veloz">⚡ Veloz</option>
-          <option value="equilibrado">⚖ Equilibrado</option>
-          <option value="preciso">🎯 Preciso</option>
-          <option value="reversao" selected>🧪 Reversão ouro (experimental)</option>
+          <option value="reversao" selected>🧪 Reversão ouro</option>
         </select></div>
     </div>
     <div class="hint" id="modeHint">Mais negociações, menos precisão</div>
@@ -148,8 +145,10 @@
       <div class="toolbar">
         <button id="anaNow">🔍 Analisar agora</button>
         <span class="m" style="font-size:12px;margin-left:8px">Indicadores:</span>
-        <button class="on" data-ind="st">SuperTrend</button><button class="on" data-ind="lsma">LSMA 25</button>
-        <button class="on" data-ind="kc">Keltner 20</button><button class="on" data-ind="sar">SAR</button><button class="on" data-ind="choch">CHoCH</button>
+        <button class="on" data-ind="rev">Faixas da Reversão</button>
+        <span class="m" style="font-size:12px;margin-left:8px">extras (não usados pela IA):</span>
+        <button data-ind="st">SuperTrend</button><button data-ind="lsma">LSMA 25</button>
+        <button data-ind="kc">Keltner 20</button><button data-ind="sar">SAR</button><button data-ind="choch">CHoCH</button>
       </div>
       <div class="legend" id="legend"></div>
       <div id="chartwrap"><div id="chart"></div>
@@ -201,7 +200,7 @@ async function refreshForward() {
                              (f.pending ? ` · ${f.pending} aguardando os 10 min` : '');
   $('fwdVerdict').textContent = f.verdict;
 }
-const show = {st:true, lsma:true, kc:true, sar:true, choch:true};
+const show = {rev:true, st:false, lsma:false, kc:false, sar:false, choch:false};
 let running = false, digits = 3, lastAnalysis = null;
 
 // ---------- gráfico
@@ -215,6 +214,7 @@ const candles = chart.addCandlestickSeries({upColor:'#22c55e', downColor:'#ef444
 const line = (color, w=1, extra={}) => chart.addLineSeries({color, lineWidth:w, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, ...extra});
 const st = line('#16a34a', 2), lsma = line('#f5c542', 2);
 const kcU = line('#3b82f6'), kcM = line('#60a5fa', 1, {lineStyle:2}), kcL = line('#3b82f6');
+const revM = line('#f5c542', 1, {lineStyle:2}), revU = line('#ef4444', 2), revL = line('#22c55e', 2);
 const sar = line('#a78bfa', 1, {lineVisible:false, pointMarkersVisible:true, pointMarkersRadius:2});
 let priceLines = [];
 
@@ -232,6 +232,7 @@ function renderChart(d) {
   lsma.setData(show.lsma ? toLine(c, s.lsma) : []);
   kcU.setData(show.kc ? toLine(c, s.kc_up) : []); kcM.setData(show.kc ? toLine(c, s.kc_mid) : []); kcL.setData(show.kc ? toLine(c, s.kc_lo) : []);
   sar.setData(show.sar ? toLine(c, s.sar) : []);
+  revM.setData(show.rev ? toLine(c, s.rev_mid) : []); revU.setData(show.rev ? toLine(c, s.rev_up) : []); revL.setData(show.rev ? toLine(c, s.rev_lo) : []);
   const t0 = c[0].time;
   candles.setMarkers(show.choch ? s.choch.filter(e => e.time >= t0).map(e => ({time:e.time, position:e.dir>0?'belowBar':'aboveBar',
      color:e.dir>0?'#22c55e':'#ef4444', shape:e.dir>0?'arrowUp':'arrowDown', text:'CHoCH '+(e.dir>0?'↑':'↓')})) : []);
@@ -242,11 +243,15 @@ function renderChart(d) {
     if (p.tp) priceLines.push(candles.createPriceLine({price:p.tp, color:'#22c55e', lineStyle:2, lineWidth:1, title:'Objetivo'}));
   }
   const L = i => s[i] && s[i][s[i].length-1];
+  const z = $('zthr').value;
   $('legend').innerHTML = `<span><b>${d.symbol}</b> · ${d.tf}</span>
+    <span><i style="background:#ef4444"></i>média 20 + ${z} ATR ${fmt(L('rev_up'),digits)} (acima → VENDA)</span>
+    <span><i style="background:#f5c542"></i>média 20 ${fmt(L('rev_mid'),digits)}</span>
+    <span><i style="background:#22c55e"></i>média 20 − ${z} ATR ${fmt(L('rev_lo'),digits)} (abaixo → COMPRA)</span>` + (!(show.st||show.lsma||show.kc||show.sar) ? '' : `
     <span><i style="background:#16a34a"></i>SuperTrend 10 3 ${fmt(L('supertrend'),digits)}</span>
     <span><i style="background:#f5c542"></i>LSMA 25 ${fmt(L('lsma'),digits)}</span>
     <span><i style="background:#3b82f6"></i>KC 20 1 ${fmt(L('kc_up'),digits)} ${fmt(L('kc_mid'),digits)} ${fmt(L('kc_lo'),digits)}</span>
-    <span><i style="background:#a78bfa"></i>SAR ${fmt(L('sar'),digits)}</span>`;
+    <span><i style="background:#a78bfa"></i>SAR ${fmt(L('sar'),digits)}</span>`);
   $('price').textContent = fmt(d.bid, digits);
   $('manSym').textContent = `${d.symbol} · bid ${fmt(d.bid,digits)} / ask ${fmt(d.ask,digits)}`;
   if (d.analysis) renderAnalysis(d.analysis, !running);
@@ -368,6 +373,7 @@ $('mode').onchange = () => {
 };
 $('symbol').onchange = () => { try { localStorage.setItem('tia_symbol', $('symbol').value); } catch(e) {} refreshChart(); };
 $('tf').onchange = refreshChart;
+$('zthr').onchange = refreshChart;
 $('rr').onchange = refreshForward;
 const syncRisk = () => { const r = +$('riskpct').value || 0; $('mVol').disabled = r > 0; $('mVol').placeholder = 'automático';
   if (r > 0) $('mVol').value = ''; else if (!$('mVol').value) $('mVol').value = '0.01'; $('mVolNote').textContent = r > 0 ? `(calculado: ${r}% do saldo)` : '(fixo)'; };

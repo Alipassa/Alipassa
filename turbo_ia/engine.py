@@ -24,7 +24,7 @@ TF_SECONDS = {"M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, "H1": 360
 class IAConfig:
     symbol: str = "Volatility 10 Index"
     timeframe: str = "M1"
-    mode: str = "veloz"                 # veloz | equilibrado | preciso | reversao (experimental: ouro M2, 16h/20h UTC)
+    mode: str = "reversao"              # reversao (painel). veloz | equilibrado | preciso só para estudo/backtest: deram prejuízo
     volume: float = 0.5                 # lote fixo por operação (usado quando risk_pct = 0)
     risk_pct: float = 0.0               # > 0: lote calculado a cada operação para perder este % do saldo no stop
     z_thr: float = 2.0                  # reversão: distância mínima da média 20, em ATRs, para entrar

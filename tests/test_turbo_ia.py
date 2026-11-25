@@ -391,3 +391,30 @@ class TestZThreshold(unittest.TestCase):
         self.assertEqual(analyze(c, "reversao", z_thr=zval - 0.1).signal, "SELL")
         self.assertEqual(analyze(c, "reversao", z_thr=zval + 0.1).signal, "NONE")
         self.assertEqual(IAConfig.from_dict({"z_thr": "2.5"}).z_thr, 2.5)
+
+
+class TestOnlyReversion(unittest.TestCase):
+    def test_server_rejects_other_modes(self):
+        import json
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        from turbo_ia.server import App, make_handler
+        b = PaperBroker(seed=1)
+        b.connect()
+        app = App(b)
+        app.session.forward = ForwardLog(None)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            def post(body):
+                req = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}/api/ia/start", json.dumps(body).encode(),
+                                             {"Content-Type": "application/json"})
+                return json.loads(urllib.request.urlopen(req).read())
+            self.assertFalse(post({"mode": "veloz"})["ok"])
+            self.assertTrue(post({"mode": "reversao", "symbol": "XAUUSD", "timeframe": "M2"})["ok"])
+            self.assertEqual(app.session.cfg.mode, "reversao")
+        finally:
+            app.session.stop()
+            srv.shutdown()
+            srv.server_close()

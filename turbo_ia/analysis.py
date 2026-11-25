@@ -50,9 +50,12 @@ def _last(s):
     return None
 
 
-def series(candles: list[dict]) -> dict:
-    """Séries para o gráfico (mesmos parâmetros do painel)."""
+def series(candles: list[dict], z_thr: float = 2.0) -> dict:
+    """Séries para o gráfico: faixas da Reversão (média 20 ± z_thr × ATR 14) + indicadores clássicos (opcionais)."""
     closes = [float(c["close"]) for c in candles]
+    m20, a14 = ind.sma(closes, 20), ind.atr(candles, 14)
+    rev_up = [m + z_thr * a if m is not None and a else None for m, a in zip(m20, a14)]
+    rev_lo = [m - z_thr * a if m is not None and a else None for m, a in zip(m20, a14)]
     st_line, st_dir = ind.supertrend(candles, 10, 3.0)
     up, mid, lo = ind.keltner(candles, 20, 1.0)
     sar, sar_dir = ind.parabolic_sar(candles, 0.02, 0.02, 0.2)
@@ -61,6 +64,7 @@ def series(candles: list[dict]) -> dict:
         "lsma": ind.lsma(closes, 25), "supertrend": st_line, "supertrend_dir": st_dir,
         "kc_up": up, "kc_mid": mid, "kc_lo": lo, "sar": sar, "sar_dir": sar_dir,
         "pivots": piv, "choch": ind.choch(candles, piv),
+        "rev_mid": m20, "rev_up": rev_up, "rev_lo": rev_lo,
     }
 
 
