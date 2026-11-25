@@ -144,6 +144,9 @@ def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, s
             continue
         if block == "2stops" and stops.get(win, 0) >= 2:
             continue
+        day = c[i]["time"] // 86400
+        if block and block.startswith("day") and stops.get(("dayR", day), 0.0) <= -float(block[3:-1]):
+            continue
         if not trend_ok(f, i, buy, trend):
             continue
         if i >= hi - 1:
@@ -171,6 +174,7 @@ def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, s
         if res is None:
             break
         out.append((i, res - (c[i].get("spread") or spread_def) / dist))
+        stops[("dayR", day)] = stops.get(("dayR", day), 0.0) + out[-1][1]
         if res < 0:
             stops[(win, buy)] = stops.get((win, buy), 0) + 1
             stops[win] = stops.get(win, 0) + 1
@@ -209,7 +213,10 @@ def trend_test(load, tfs: list[str], spread_def: float) -> None:
 def cooldown_test(load, tfs: list[str], spread_def: float) -> None:
     """Regra atual × travas depois de stop, nas duas metades do histórico (não há escolha: as 4 regras são fixas)."""
     rules = ((None, "regra atual (sem trava)"), ("dir", "após stop, não repete o lado na janela"),
-             ("2stops", "após 2 stops, encerra a janela"), ("window", "após 1 stop, encerra a janela"))
+             ("2stops", "após 2 stops, encerra a janela"), ("window", "após 1 stop, encerra a janela"),
+             ("day2R", "freio diário em -2R (4% a 2%)"), ("day3R", "freio diário em -3R (6% a 2%)"),
+             ("day4R", "freio diário em -4R (8% a 2%)"), ("day5R", "freio diário em -5R (10% a 2%)"),
+             ("day6R", "freio diário em -6R (12% a 2%)"))
     print("\nTRAVA DEPOIS DE STOP · 16h/20h UTC · esticada 2 · alvo 3× · spread real · metades A e B")
     for tf in tfs:
         c = load(tf)

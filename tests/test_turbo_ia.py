@@ -507,3 +507,26 @@ class TestPercentLimits(unittest.TestCase):
         s2.st.peak, s2.st.pnl = 2300, 1000                    # passou de +20 % e voltou abaixo de +10 %
         self.assertTrue(s2._check_limits())
         self.assertIn("proteção", s2.st.stopped_reason)
+
+
+class TestDailyBrake(unittest.TestCase):
+    def test_brake_blocks_rest_of_day_and_releases_next_day(self):
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        s = IASession(b, forward=ForwardLog(None))
+        s.start(IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2", daily_loss_pct=10))
+        s._stop.set()
+        s.st.running = True
+        s._roll_day()
+        self.assertAlmostEqual(s.st.day_start_equity, 1000, places=0)
+        s.st.day_pnl = -99
+        self.assertFalse(s._daily_brake())
+        s.st.day_pnl = -101
+        self.assertTrue(s._daily_brake())
+        self.assertTrue(any("FREIO DIÁRIO" in l["msg"] for l in s.st.log))
+        s.st.day = "2000-01-01"                       # virou o dia
+        s._roll_day()
+        self.assertFalse(s.st.day_braked)
+        self.assertEqual(s.st.day_pnl, 0.0)
+        self.assertFalse(s._daily_brake())
+        self.assertTrue(s.st.running)                 # o freio não encerra a sessão

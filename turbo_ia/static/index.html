@@ -110,6 +110,9 @@
     </div>
     <div class="row2"><div><label>Lote fixo (se risco % = 0)</label><input id="volume" type="number" step="0.01" min="0.01" value="0.01"></div>
       <div><label>Esticada mín. (ATR)</label><input id="zthr" type="number" step="0.25" min="0.5" value="2" title="Reversão: só entra com o preço a mais de N ATR da média 20"></div></div>
+    <div class="row2"><div><label>Freio diário (% perda)</label><input id="dailyloss" type="number" step="1" min="0" max="60" value="10"
+      title="Perdeu este % do saldo do começo do dia → sem novas entradas até o dia seguinte. 0 = desligado"></div>
+      <div class="hint" style="align-self:end">≈ 5 perdas seguidas (5 × risco). Mais apertado corta a recuperação e reduz o lucro.</div></div>
     <label>Trava depois de stop (mesma janela de 1 h)</label>
     <select id="stopblock">
       <option value="">nenhuma (regra testada)</option>
@@ -314,18 +317,18 @@ async function refreshStatus() {
     window._cfgShown = true;
     const c = s.config, set = (id, v) => { if (v !== undefined && v !== null) $(id).value = v; };
     set('mode', c.mode); set('tf', c.timeframe); set('riskpct', c.risk_pct); set('volume', c.volume); set('target', c.target_pct);
-    set('loss', c.loss_pct); set('pafter', c.protect_after_pct); set('pkeep', c.protect_keep_pct); set('rr', c.rr); set('slatr', c.sl_atr); set('dur', c.duration_candles); set('zthr', c.z_thr); set('stopblock', c.stop_block);
+    set('loss', c.loss_pct); set('pafter', c.protect_after_pct); set('pkeep', c.protect_keep_pct); set('rr', c.rr); set('slatr', c.sl_atr); set('dur', c.duration_candles); set('zthr', c.z_thr); set('stopblock', c.stop_block); set('dailyloss', c.daily_loss_pct);
     $('protect').checked = !!c.protect;
     if ([...$('symbol').options].some(o => o.value === c.symbol)) $('symbol').value = c.symbol;
   }
   $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
   $('iaBtn').classList.toggle('on', running);
-  ['symbol','tf','mode','volume','riskpct','zthr','stopblock','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
+  ['symbol','tf','mode','volume','riskpct','dailyloss','zthr','stopblock','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
   $('sessPnl').textContent = `${s.pnl>=0?'+':''}${fmt(s.pnl)} (${s.trades} ops · ${s.wins}G/${s.losses}P)`;
   $('sessPnl').className = 'pnl' + (s.pnl < 0 ? ' neg' : '');
   const lim = s.limits || {};
   $('iaStatus').textContent = running ? `IA operando ${s.config.symbol} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}` +
-      (lim.loss ? ` · para se perder ${fmt(lim.loss)}` : '') + (lim.target ? ` · meta +${fmt(lim.target)}` : '')
+      (s.day_braked ? ` · FREIO DIÁRIO ativo (hoje ${fmt(s.day_pnl)}) — volta amanhã` : (lim.daily ? ` · hoje ${fmt(s.day_pnl)} (freio em -${fmt(lim.daily)})` : '')) + (lim.loss ? ` · para se perder ${fmt(lim.loss)}` : '') + (lim.target ? ` · meta +${fmt(lim.target)}` : '')
                                       : (s.stopped_reason ? 'Parada: ' + s.stopped_reason : 'IA parada');
   if (s.last_analysis) { renderAnaCard(s.last_analysis); $('anaWhen').textContent = '(IA)'; }
   $('logs').innerHTML = s.log.slice().reverse().map(l => `<div class="lg-${l.kind}">${new Date(l.t*1000).toLocaleTimeString()} · ${l.msg}</div>`).join('') || '<span class="m">sem registros</span>';
@@ -341,7 +344,7 @@ $('iaBtn').onclick = async () => {
   else {
     const r = await api('/api/ia/start', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value, volume:$('volume').value,
       target_pct:$('target').value || 0, loss_pct:$('loss').value || 0, target_profit:0, loss_limit:0, rr:$('rr').value, sl_atr:$('slatr').value, duration_candles:$('dur').value,
-      protect:$('protect').checked, risk_pct:$('riskpct').value, z_thr:$('zthr').value, stop_block:$('stopblock').value, protect_after_pct:$('pafter').value || 0, protect_keep_pct:$('pkeep').value || 0});
+      protect:$('protect').checked, risk_pct:$('riskpct').value, daily_loss_pct:$('dailyloss').value || 0, z_thr:$('zthr').value, stop_block:$('stopblock').value, protect_after_pct:$('pafter').value || 0, protect_keep_pct:$('pkeep').value || 0});
     if (!r.ok) alert(r.error);
   }
   $('iaBtn').disabled = false; refreshStatus();
@@ -373,7 +376,7 @@ $('mode').onchange = () => {
     $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 3;   // ganho 3×, perda 1×
     $('riskpct').value = 2; $('zthr').value = 2; $('target').value = 0; $('protect').checked = false;          // escolha do usuário: 2% por operação, sem meta curta
     syncRisk();
-    $('loss').value = 50;                                                                 // trava: para a IA se perder metade do saldo
+    $('loss').value = 50; $('dailyloss').value = 10;                                                                 // trava: para a IA se perder metade do saldo
     const gold = [...$('symbol').options].find(o => /^(XAUUSD|GOLD)/i.test(o.value));
     if (gold) $('symbol').value = gold.value;
   }
@@ -385,7 +388,7 @@ $('zthr').onchange = refreshChart;
 $('rr').onchange = refreshForward;
 const syncRisk = () => { const r = +$('riskpct').value || 0; $('mVol').disabled = r > 0; $('mVol').placeholder = 'automático';
   if (r > 0) $('mVol').value = ''; else if (!$('mVol').value) $('mVol').value = '0.01'; $('mVolNote').textContent = r > 0 ? `(calculado: ${r}% do saldo)` : '(fixo)'; };
-$('riskpct').oninput = syncRisk; syncRisk();
+$('riskpct').oninput = () => { syncRisk(); const r = +$('riskpct').value || 0; if (r > 0) $('dailyloss').value = Math.round(5 * r); }; syncRisk();
 
 (async () => {
   await loadSymbols(); await refreshStatus();

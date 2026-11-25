@@ -37,6 +37,7 @@ class IAConfig:
     loss_limit: float = 0.0             # perda máxima em dinheiro (0 = sem) — o painel usa loss_pct
     target_pct: float = 0.0             # meta em % do saldo do INÍCIO da sessão (0 = sem meta)
     loss_pct: float = 50.0              # para a IA se a sessão perder este % do saldo do início (0 = sem limite)
+    daily_loss_pct: float = 10.0        # freio diário (padrão = 5 × risco de 2 %): perdeu este % do saldo do início do dia (UTC) → sem entradas até amanhã
     max_trades: int = 0                 # 0 = sem limite de operações
     protect: bool = True                # proteção: depois de lucrar `protect_after`, não devolve mais que até `protect_keep`
     protect_after: float = 0.70         # (dinheiro) — o painel usa os campos em %
@@ -60,6 +61,10 @@ class SessionState:
     running: bool = False
     started_at: Optional[float] = None
     start_equity: float = 0.0
+    day: str = ""                       # dia UTC corrente (AAAA-MM-DD)
+    day_start_equity: float = 0.0
+    day_pnl: float = 0.0
+    day_braked: bool = False
     stopped_reason: str = ""
     pnl: float = 0.0
     peak: float = 0.0
@@ -152,6 +157,7 @@ class IASession:
         self._manage_open()
         if not self.st.running:
             return
+        self._roll_day()
         if self._check_limits():
             return
         candles = b.candles(c.symbol, c.timeframe, 300)
@@ -173,6 +179,8 @@ class IASession:
             return
         if a.signal == "NONE":
             self.log(f"sem entrada ({a.label}): {'; '.join(a.blocked)}", "skip")
+            return
+        if self._daily_brake():
             return
         window = int((int(closed[-1]["time"]) - getattr(b, "utc_offset", 0.0) * 3600) // 3600)
         ws = self.st.window_stops
@@ -236,6 +244,7 @@ class IASession:
         with self.lock:
             self.st.open_ticket = self.st.open_bar = None
             self.st.pnl = round(self.st.pnl + profit, 2)
+            self.st.day_pnl = round(self.st.day_pnl + profit, 2)
             self.st.peak = max(self.st.peak, self.st.pnl)
             if profit >= 0:
                 self.st.wins += 1
@@ -248,11 +257,38 @@ class IASession:
             self.st.history.append({"ticket": t, "profit": round(profit, 2), "t": time.time()})
         self.log(f"#{t} fechada: {profit:+.2f} · sessão {self.st.pnl:+.2f}", "win" if profit >= 0 else "loss")
 
+    def _roll_day(self) -> None:
+        """Novo dia (UTC): zera o resultado do dia e guarda o saldo de referência do freio diário."""
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if self.st.day != today:
+            try:
+                eq = float(self.broker.info().get("equity") or 0)
+            except Exception:  # noqa: BLE001
+                eq = self.st.start_equity
+            with self.lock:
+                if self.st.day and self.st.day_braked:
+                    self.log("novo dia: freio diário liberado", "start")
+                self.st.day, self.st.day_start_equity, self.st.day_pnl, self.st.day_braked = today, eq, 0.0, False
+
+    def _daily_brake(self) -> bool:
+        c, s = self.cfg, self.st
+        if c.daily_loss_pct <= 0 or s.day_start_equity <= 0:
+            return False
+        lim = s.day_start_equity * c.daily_loss_pct / 100.0
+        if s.day_pnl <= -lim:
+            if not s.day_braked:
+                s.day_braked = True
+                self.log(f"FREIO DIÁRIO: perda de {s.day_pnl:.2f} hoje (limite {c.daily_loss_pct:g}% = -{lim:.2f}) — "
+                         "sem novas entradas até o próximo dia (00h UTC = 21h de Brasília)", "stop")
+            return True
+        return False
+
     def limits(self) -> dict:
         """Limites da sessão em dinheiro. Em % valem sobre o saldo do início da sessão (servem para 1.000 ou 11.000)."""
         c, eq = self.cfg, self.st.start_equity
         pct = lambda p: eq * p / 100.0 if p > 0 and eq > 0 else 0.0  # noqa: E731
         return {"target": pct(c.target_pct) or c.target_profit, "loss": pct(c.loss_pct) or c.loss_limit,
+                "daily": self.st.day_start_equity * c.daily_loss_pct / 100.0 if c.daily_loss_pct > 0 else 0.0,
                 "protect_after": pct(c.protect_after_pct) or c.protect_after,
                 "protect_keep": pct(c.protect_keep_pct) if c.protect_after_pct > 0 else c.protect_keep}
 
