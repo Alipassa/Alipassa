@@ -30,7 +30,28 @@ EXITS = ("2R", "3R", "4R", "media", "3R+zero", "3R+30velas")
 
 def features(c: list[dict]) -> dict:
     cl = [x["close"] for x in c]
-    return {"sma": ind.sma(cl, 20), "atr": ind.atr(c, 14)}
+    return {"sma": ind.sma(cl, 20), "atr": ind.atr(c, 14), "ema200": ind.ema(cl, 200), "close": cl}
+
+
+def trend_ok(f: dict, i: int, buy: bool, kind: Optional[str]) -> bool:
+    """Filtros de tendência (só olham o passado). True = pode entrar.
+    "favor":  só a favor da EMA 200 (inclinação nas últimas 30 velas): compra só com ela subindo, venda só caindo.
+    "lateral": só quando a EMA 200 está quase plana (|inclinação em 30 velas| < 1,5 ATR).
+    "impulso": não entra contra um impulso de mais de 4 ATR nas últimas 30 velas."""
+    if not kind:
+        return True
+    e, a, cl = f["ema200"], f["atr"][i], f["close"]
+    if i < 230 or e[i] is None or e[i - 30] is None or not a:
+        return False
+    slope = (e[i] - e[i - 30]) / a
+    if kind == "favor":
+        return slope > 0 if buy else slope < 0
+    if kind == "lateral":
+        return abs(slope) < 1.5
+    if kind == "impulso":
+        run = (cl[i] - cl[i - 30]) / a
+        return not ((buy and run < -4) or ((not buy) and run > 4))
+    return True
 
 
 def simulate(c: list[dict], f: dict, v: dict, lo: int, hi: int, spread_def: float, med_spread: float) -> list[float]:
@@ -106,7 +127,7 @@ def candidates(c: list[dict], f: dict, z_thr: float) -> list[tuple[int, bool, in
 
 
 def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, spread_def: float, max_bars: int,
-              block: Optional[str] = None) -> list[tuple[int, float]]:
+              block: Optional[str] = None, trend: Optional[str] = None) -> list[tuple[int, float]]:
     """Simula só nas velas candidatas (rápido). Uma operação por vez. Devolve [(índice da entrada, R)].
     block: None · "dir" (depois de um stop, não repete o MESMO lado naquela janela de 1 h)
            · "window" (depois de um stop, encerra aquela janela de 1 h) · "2stops" (encerra a janela após 2 stops)."""
@@ -122,6 +143,8 @@ def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, s
         if block == "window" and stops.get(win):
             continue
         if block == "2stops" and stops.get(win, 0) >= 2:
+            continue
+        if not trend_ok(f, i, buy, trend):
             continue
         if i >= hi - 1:
             break
@@ -153,6 +176,34 @@ def run_cands(c: list[dict], f: dict, cands, hours, ex: str, lo: int, hi: int, s
             stops[win] = stops.get(win, 0) + 1
         free = j
     return out
+
+
+def trend_test(load, tfs: list[str], spread_def: float) -> None:
+    """Regra atual × filtros de tendência (regras fixas, sem escolha) nas duas metades do histórico."""
+    rules = ((None, None, "regra atual (sem filtro)"), ("favor", None, "só a favor da tendência (EMA 200)"),
+             ("lateral", None, "só com tendência fraca (EMA 200 plana)"), ("impulso", None, "não entra contra impulso > 4 ATR"),
+             ("favor", "2stops", "a favor da tendência + 2 stops encerra"))
+    print("\nFILTRO DE TENDÊNCIA · 16h/20h UTC · esticada 2 · alvo 3× · spread real · metades A e B")
+    for tf in tfs:
+        c = load(tf)
+        f = features(c)
+        cz = candidates(c, f, 2.0)
+        half = len(c) // 2
+        dA = (c[half]["time"] - c[0]["time"]) / 86400 or 1
+        dB = (c[-1]["time"] - c[half]["time"]) / 86400 or 1
+        print(f"  {tf} ({(dA + dB):.0f} dias)")
+        for trend, blk, label in rules:
+            rA = [x for _, x in run_cands(c, f, cz, set(REVERSION_HOURS), "3R", 0, half, spread_def, 0, blk, trend)]
+            rB = [x for _, x in run_cands(c, f, cz, set(REVERSION_HOURS), "3R", half, len(c), spread_def, 0, blk, trend)]
+            sA, sB = summary(rA), summary(rB)
+            streak = worst = 0
+            for x in rA + rB:
+                streak = streak + 1 if x < 0 else 0
+                worst = max(worst, streak)
+            print(f"    {label:40} A: {sA['n']:4} ops {sA['exp']:+.3f} R/op {sum(rA) / dA * 30:+6.1f} R/mês │ "
+                  f"B: {sB['n']:4} ops {sB['exp']:+.3f} R/op {sum(rB) / dB * 30:+6.1f} R/mês │ pior queda {max(sA['dd'], sB['dd']):3.0f} R · "
+                  f"{worst} stops seguidos", flush=True)
+    print("Adotar um filtro só se ele tiver lucro por mês igual ou maior nas DUAS metades, ou quase igual com queda bem menor.")
 
 
 def cooldown_test(load, tfs: list[str], spread_def: float) -> None:
@@ -281,9 +332,15 @@ def main(argv=None) -> int:
     ap.add_argument("--sweep", action="store_true", help="varre tempos gráficos × horas × esticada × saída")
     ap.add_argument("--tfs", default="M1,M2,M3,M5,M10,M15")
     ap.add_argument("--cooldown", action="store_true", help="compara travas depois de stop com a regra atual")
+    ap.add_argument("--trend", action="store_true", help="compara filtros de tendência com a regra atual")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
+    if a.trend:
+        spread_def = a.spread if a.spread is not None else SPREAD.get(a.symbol, 0.30)
+        load = (lambda tf: load_mt5(a.symbol, tf, a.bars)) if a.source == "mt5" else (lambda tf: load_yahoo(a.symbol, tf))
+        trend_test(load, a.tfs.split(","), spread_def)
+        return 0
     if a.cooldown:
         spread_def = a.spread if a.spread is not None else SPREAD.get(a.symbol, 0.30)
         load = (lambda tf: load_mt5(a.symbol, tf, a.bars)) if a.source == "mt5" else (lambda tf: load_yahoo(a.symbol, tf))
