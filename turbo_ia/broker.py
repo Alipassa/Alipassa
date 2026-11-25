@@ -194,7 +194,8 @@ class MT5Broker:
             except Exception as e:  # noqa: BLE001
                 raise BrokerError("pacote MetaTrader5 não instalado — no Windows: pip install MetaTrader5") from e
         self.mt5 = mt5
-        self.path = path or os.environ.get("MT5_PATH")
+        from .settings import clean_path, mt5_path
+        self.path = clean_path(path) or mt5_path()
         lg = login or os.environ.get("MT5_LOGIN")
         self.login = int(lg) if lg else None
         self.password = password or os.environ.get("MT5_PASSWORD")
@@ -210,7 +211,8 @@ class MT5Broker:
         if self.login:
             kw.update(login=self.login, password=self.password, server=self.server)
         if not self.mt5.initialize(**kw):
-            raise BrokerError(f"MT5 initialize falhou: {self.mt5.last_error()} — abra o terminal, faça login e confira MT5_PATH")
+            raise BrokerError(f"MT5 initialize falhou: {self.mt5.last_error()} — terminal usado: {self.path or '(o último aberto)'}. "
+                              "Abra o terminal, faça login e confira MT5_PATH no .env")
         self.utc_offset = self.detect_offset()
 
     def detect_offset(self) -> float:

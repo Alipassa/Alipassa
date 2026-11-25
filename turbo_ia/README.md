@@ -21,7 +21,9 @@ candle fecha → análise (8 indicadores votam) → confluência ≥ mínimo do 
 Sem MT5 (ou em Linux/Mac) rode `python -m turbo_ia --broker paper`: um simulador local gera o preço e executa as ordens,
 para testar o painel sem risco. `--broker auto` (padrão) tenta o MT5 e cai no simulador.
 
-Variáveis opcionais (as mesmas do resto do projeto): `MT5_PATH`, `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER`.
+O painel lê o `.env` da raiz do projeto (o mesmo do resto do repositório): `MT5_PATH`, `MT5_LOGIN`, `MT5_PASSWORD`,
+`MT5_SERVER`. Sem `MT5_PATH`, usa o terminal da Pepperstone no caminho padrão
+`C:\Program Files\Pepperstone MetaTrader 5\terminal64.exe` (o caminho pode vir com aspas, ou só a pasta).
 
 ## A análise
 

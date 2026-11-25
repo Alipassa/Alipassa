@@ -285,3 +285,35 @@ class TestBacktest(unittest.TestCase):
         from turbo_ia.backtest import run
         with self.assertRaises(ValueError):
             run(trend(400), "M5", "veloz", expiry_min=7)
+
+
+class TestSettings(unittest.TestCase):
+    PEP = r"C:\Program Files\Pepperstone MetaTrader 5\terminal64.exe"
+
+    def test_clean_path_variants(self):
+        from turbo_ia.settings import clean_path
+        self.assertEqual(clean_path(f'"{self.PEP}"'), self.PEP)
+        self.assertEqual(clean_path(self.PEP), self.PEP)
+        folder = clean_path(r'"C:\Program Files\Pepperstone MetaTrader 5"')
+        self.assertTrue(folder.startswith(r"C:\Program Files\Pepperstone MetaTrader 5"))
+        self.assertTrue(folder.endswith("terminal64.exe"))
+
+    def test_env_file_and_default(self):
+        import os
+        import tempfile
+        from turbo_ia import settings
+        old = {k: os.environ.pop(k, None) for k in ("MT5_PATH", "CAMINHO_MT5", "TIA_TEST")}
+        try:
+            self.assertEqual(settings.mt5_path(exists=lambda p: p == self.PEP), self.PEP)   # sem .env: padrão da Pepperstone
+            self.assertIsNone(settings.mt5_path(exists=lambda p: False))
+            with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False, encoding="utf-8") as f:
+                f.write(f'# comentário\nMT5_PATH="{self.PEP}"\nTIA_TEST=1 # nota\n')
+            settings.load_env(f.name)
+            self.assertEqual(settings.mt5_path(exists=lambda p: False), self.PEP)
+            self.assertEqual(os.environ["TIA_TEST"], "1")
+            os.unlink(f.name)
+        finally:
+            for k, v in old.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v

@@ -141,12 +141,15 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true")
     a = ap.parse_args(argv)
+    from .settings import load_env
+    load_env()
     broker = make_broker(a.broker)
     app = App(broker)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(app))
     url = f"http://127.0.0.1:{a.port}"
     info = broker.info()
-    print(f"TURBO IA {__version__} · corretora: {broker.name} · conta {info.get('login')} ({'DEMO' if info.get('demo') else 'REAL'})")
+    print(f"TURBO IA {__version__} · corretora: {broker.name} · conta {info.get('login')} ({'DEMO' if info.get('demo') else 'REAL'})"
+          + (f" · terminal {broker.path}" if getattr(broker, "path", None) else ""))
     print(f"painel: {url}   (Ctrl+C para sair)")
     if not a.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

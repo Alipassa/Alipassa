@@ -49,7 +49,9 @@ def load_yahoo(symbol: str, tf: str) -> list[dict]:
 
 def load_mt5(symbol: str, tf: str, count: int = 50_000) -> list[dict]:
     import MetaTrader5 as mt5  # type: ignore
-    if not mt5.initialize():
+    from .settings import mt5_path
+    path = mt5_path()
+    if not (mt5.initialize(path=path) if path else mt5.initialize()):
         raise RuntimeError(f"MT5 initialize falhou: {mt5.last_error()}")
     mt5.symbol_select(symbol, True)
     rates = mt5.copy_rates_from_pos(symbol, getattr(mt5, f"TIMEFRAME_{tf}"), 1, count)
@@ -228,6 +230,8 @@ def main(argv=None) -> int:
     ap.add_argument("--sl-atr", default="1.5", help="stop em ATRs, um ou vários: 1,1.5,2")
     ap.add_argument("--spread", type=float, help="spread em preço (padrão: típico do ativo)")
     a = ap.parse_args(argv)
+    from .settings import load_env
+    load_env()
     if a.rr:
         return main_rr(a)
     rows, dump = [], {}
