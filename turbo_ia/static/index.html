@@ -102,7 +102,7 @@
     <select disabled><option id="stratName">Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH</option></select>
 
     <div class="row">
-      <div><label>Risco % / op.</label><input id="riskpct" type="number" step="0.5" min="0" max="10" value="5" title="0 = usa o lote fixo"></div>
+      <div><label>Risco % / op.</label><input id="riskpct" type="number" step="0.5" min="0" max="10" value="2" title="0 = usa o lote fixo"></div>
       <div><label>Lucro alvo</label><input id="target" type="number" step="0.01" value="1"></div>
       <div><label>Limite perda</label><input id="loss" type="number" step="0.01" value="100"></div>
     </div>
@@ -346,7 +346,7 @@ $('mode').onchange = () => {
                                                               : 'Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH';
   if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
     $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 3;   // ganho 3×, perda 1×
-    $('riskpct').value = 5; $('target').value = 0; $('protect').checked = false;          // escolha do usuário: 5% por operação, sem meta curta
+    $('riskpct').value = 2; $('target').value = 0; $('protect').checked = false;          // escolha do usuário: 2% por operação, sem meta curta
     syncRisk();
     const bal = parseFloat(($('balance').textContent.match(/[\d.]+/) || ['0'])[0]);
     if (bal) $('loss').value = Math.round(bal * 0.5);                                     // trava: para a IA se perder metade do saldo

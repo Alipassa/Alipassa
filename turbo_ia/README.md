@@ -148,7 +148,7 @@ Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (dist
 arredondado PARA BAIXO no passo da corretora (máximo 10 %). Se nem o lote mínimo cabe no risco, a operação é pulada.
 Ex.: US$ 1.000, 5 %, ouro com stop de US$ 3 → 0,16 lote (risco US$ 48).
 
-O modo **🧪 Reversão ouro** vem com a escolha do usuário: **5 % por operação, ganho 3× / perda 1×**, sem meta de lucro,
+O modo **🧪 Reversão ouro** vem com a escolha do usuário: **2 % por operação, ganho 3× / perda 1×**, sem meta de lucro,
 proteção desligada e limite de perda = metade do saldo. Simulação (60 dias de GC=F, 20 mil meses sorteados, US$ 1.000):
 
 | Risco | Ganho × perda | Mês ruim (5 %) | Mês típico | Mês bom (95 %) | Chance de prejuízo | Queda no caminho (típica / pior 5 %) |
