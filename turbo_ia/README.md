@@ -124,6 +124,23 @@ no mesmo candle, conta o **stop** (pior caso). Spread descontado (ouro 0,30; EUR
 O **Registro de acerto** do painel mede o mesmo em tempo real: com alvo, cada entrada é seguida candle a candle até tocar
 alvo ou stop e vira +2 R / +3 R ou −1 R; o empate passa a ser 33,3 % (2:1) ou 25 % (3:1).
 
+## Lote pelo risco (% do saldo)
+
+Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (distância do stop × valor de 1,0 de preço por lote)`,
+arredondado PARA BAIXO no passo da corretora (máximo 10 %). Se nem o lote mínimo cabe no risco, a operação é pulada.
+Ex.: US$ 1.000, 5 %, ouro com stop de US$ 3 → 0,16 lote (risco US$ 48).
+
+O modo **🧪 Reversão ouro** vem com a escolha do usuário: **5 % por operação, ganho 3× / perda 1×**, sem meta de lucro,
+proteção desligada e limite de perda = metade do saldo. Simulação (60 dias de GC=F, 20 mil meses sorteados, US$ 1.000):
+
+| Risco | Ganho × perda | Mês ruim (5 %) | Mês típico | Mês bom (95 %) | Chance de prejuízo | Queda no caminho (típica / pior 5 %) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 % | 3:1 | US$ 710 | US$ 4.141 | US$ 27.377 | 9 % | 54 % / 77 % |
+| 1 % | 3:1 | US$ 1.024 | US$ 1.472 | US$ 2.174 | 4 % | 13 % / 23 % |
+
+Supõe que a vantagem do histórico se repete — os horários saíram desses mesmos dados. Se a vantagem real for 0,2 R menor,
+o mês típico com 5 % fica perto do zero a zero e a queda no caminho continua grande. Confirme em DEMO antes.
+
 ## Segurança
 
 - O servidor só escuta em `127.0.0.1` e recusa POSTs de outras origens.

@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 from .analysis import analyze
+from .broker import lot_for_risk
 from .forward import ForwardLog
 
 TF_SECONDS = {"M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
@@ -24,7 +25,8 @@ class IAConfig:
     symbol: str = "Volatility 10 Index"
     timeframe: str = "M1"
     mode: str = "veloz"                 # veloz | equilibrado | preciso | reversao (experimental: ouro M2, 16h/20h UTC)
-    volume: float = 0.5                 # lote por operação
+    volume: float = 0.5                 # lote fixo por operação (usado quando risk_pct = 0)
+    risk_pct: float = 0.0               # > 0: lote calculado a cada operação para perder este % do saldo no stop
     rr: float = 1.5                     # alvo = rr × distância do stop
     sl_atr: float = 1.5                 # stop padrão em ATRs
     duration_candles: int = 0           # >0 fecha a posição após N candles (estilo Rise/Fall); 0 = só SL/TP
@@ -153,7 +155,18 @@ class IASession:
         if a.signal == "NONE":
             self.log(f"sem entrada ({a.label}): {'; '.join(a.blocked)}", "skip")
             return
-        res = b.open(c.symbol, a.signal, c.volume, a.sl, a.tp, f"TurboIA {c.mode}")
+        volume, risk_note = c.volume, ""
+        if c.risk_pct > 0:
+            if not a.sl:
+                self.log("risco % exige stop — operação pulada", "error")
+                return
+            eq = float(b.info().get("equity") or 0)
+            volume, risk_money, note = lot_for_risk(b.spec(c.symbol), a.price, a.sl, eq, min(c.risk_pct, 10.0))
+            if not volume:
+                self.log(note, "skip")
+                return
+            risk_note = f" · risco {risk_money:.2f} ({risk_money / eq:.1%} do saldo {eq:.2f})"
+        res = b.open(c.symbol, a.signal, volume, a.sl, a.tp, f"TurboIA {c.mode}")
         if not res.get("ok"):
             self.log(f"ordem recusada: {res.get('error')}", "error")
             if "REAL" in str(res.get("error", "")):
@@ -169,7 +182,7 @@ class IASession:
             self.st.open_ticket, self.st.open_bar = res["ticket"], bar
             self.st.trades += 1
         self.log(f"{'COMPRA' if a.signal == 'BUY' else 'VENDA'} #{res['ticket']} {res['volume']} @ {res['price']} · SL {res['sl']} · TP {res['tp']} · "
-                 f"força {a.strength:.0f}% · {', '.join(a.reasons[:3])}", "trade")
+                 f"força {a.strength:.0f}%{risk_note} · {', '.join(a.reasons[:3])}", "trade")
 
     def _manage_open(self) -> None:
         t = self.st.open_ticket

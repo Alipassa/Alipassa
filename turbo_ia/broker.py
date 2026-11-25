@@ -130,7 +130,8 @@ class PaperBroker:
         return round(p - half, d), round(p + half, d)
 
     def spec(self, symbol: str) -> dict:
-        return {"digits": self._digits(symbol), "volume_min": 0.01, "volume_step": 0.01, "volume_max": 100.0, "contract_size": 1.0}
+        return {"digits": self._digits(symbol), "volume_min": 0.01, "volume_step": 0.01, "volume_max": 100.0, "contract_size": 1.0,
+                "value_per_unit": 1.0}
 
     def open(self, symbol: str, side: str, volume: float, sl: Optional[float] = None, tp: Optional[float] = None, comment: str = "TurboIA") -> dict:
         with self.lock:
@@ -270,7 +271,10 @@ class MT5Broker:
         i = self._select(symbol)
         return {"digits": i.digits, "volume_min": i.volume_min, "volume_step": i.volume_step, "volume_max": i.volume_max,
                 "contract_size": getattr(i, "trade_contract_size", 1.0), "point": i.point,
-                "stops_level": getattr(i, "trade_stops_level", 0), "filling_mode": getattr(i, "filling_mode", 0)}
+                "stops_level": getattr(i, "trade_stops_level", 0), "filling_mode": getattr(i, "filling_mode", 0),
+                # quanto 1 lote ganha/perde na moeda da conta quando o preço anda 1,0 (ouro: ~100 USD por lote = 100 oz)
+                "value_per_unit": (i.trade_tick_value / i.trade_tick_size) if getattr(i, "trade_tick_size", 0) else
+                                  getattr(i, "trade_contract_size", 1.0)}
 
     def _filling(self, spec: dict) -> int:
         fm = spec.get("filling_mode", 0)
@@ -351,6 +355,27 @@ class MT5Broker:
         if not deals:
             return None
         return float(sum(getattr(d, "profit", 0.0) + getattr(d, "commission", 0.0) + getattr(d, "swap", 0.0) for d in deals))
+
+
+def lot_for_risk(spec: dict, entry: float, sl: float, equity: float, risk_pct: float) -> tuple[float, float, str]:
+    """Lote para perder `risk_pct` % do saldo se o stop for atingido. Arredonda PARA BAIXO no passo da corretora.
+    Devolve (lote, risco real em dinheiro, aviso). Lote 0 = nem o lote mínimo cabe no risco (não opera, não arrisca a mais)."""
+    dist = abs(entry - sl)
+    vpu = float(spec.get("value_per_unit") or spec.get("contract_size") or 1.0)
+    if dist <= 0 or vpu <= 0 or equity <= 0 or risk_pct <= 0:
+        return 0.0, 0.0, "stop, saldo ou risco inválido"
+    budget = equity * risk_pct / 100.0
+    raw = budget / (dist * vpu)
+    step = spec.get("volume_step") or 0.01
+    lot = math.floor(raw / step + 1e-9) * step
+    lot = min(lot, spec.get("volume_max") or lot)
+    dec = max(0, -int(math.floor(math.log10(step)))) if step < 1 else 0
+    lot = round(lot, dec)
+    vmin = spec.get("volume_min") or step
+    if lot < vmin:
+        need = vmin * dist * vpu
+        return 0.0, 0.0, (f"lote mínimo {vmin} arriscaria {need:.2f} ({need / equity:.1%} do saldo) > {risk_pct:g}% — operação pulada")
+    return lot, round(lot * dist * vpu, 2), ""
 
 
 def make_broker(kind: str = "auto") -> Any:

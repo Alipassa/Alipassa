@@ -187,6 +187,41 @@ class TestForwardRR(unittest.TestCase):
         self.assertEqual(f.resolve(StaticBroker(self.bars([(99.5, 100.5), (99.5, 103)]))), [])   # só o candle em formação tocou
 
 
+class TestRiskSizing(unittest.TestCase):
+    GOLD = {"volume_min": 0.01, "volume_step": 0.01, "volume_max": 100, "value_per_unit": 100.0}   # 1 lote = 100 oz
+
+    def test_5pct_of_1000_with_3usd_stop(self):
+        from turbo_ia.broker import lot_for_risk
+        lot, risk, note = lot_for_risk(self.GOLD, 2650.0, 2647.0, 1000.0, 5)
+        self.assertEqual(lot, 0.16)                       # 50 / (3 × 100) = 0,166 → arredonda para baixo
+        self.assertAlmostEqual(risk, 48.0)
+        self.assertLessEqual(risk, 50.0)
+
+    def test_skips_when_min_lot_is_too_risky(self):
+        from turbo_ia.broker import lot_for_risk
+        lot, _, note = lot_for_risk(self.GOLD, 2650.0, 2640.0, 50.0, 1)   # 0,01 lote arriscaria 10 de 50
+        self.assertEqual(lot, 0.0)
+        self.assertIn("pulada", note)
+
+    def test_session_uses_risk_pct(self):
+        clk = Clock()
+        b = PaperBroker(seed=3, clock=clk, balance=1000)
+        b.connect()
+        s = IASession(b, forward=ForwardLog(None))
+        s.start(IAConfig(symbol="Volatility 10 Index", mode="veloz", risk_pct=5, target_profit=0, loss_limit=0, protect=False))
+        s._stop.set()
+        s.st.running = True
+        for _ in range(300):
+            clk.t += 30
+            s.step()
+            if b._pos:
+                break
+        p = b._pos[0]
+        risk = abs(p["price_open"] - p["sl"]) * p["volume"]
+        self.assertLessEqual(risk, 1000 * 0.05 + 1.0)    # ~5 % (folga do spread/arredondamento)
+        self.assertGreater(risk, 1000 * 0.03)
+
+
 class FakeMT5:
     ACCOUNT_TRADE_MODE_DEMO, TRADE_ACTION_DEAL, ORDER_TYPE_BUY, ORDER_TYPE_SELL = 0, 1, 0, 1
     ORDER_TIME_GTC, ORDER_FILLING_FOK, ORDER_FILLING_IOC, ORDER_FILLING_RETURN, TRADE_RETCODE_DONE, POSITION_TYPE_BUY = 0, 0, 1, 2, 10009, 0

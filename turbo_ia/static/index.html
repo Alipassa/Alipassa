@@ -102,7 +102,7 @@
     <select disabled><option id="stratName">Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH</option></select>
 
     <div class="row">
-      <div><label>Lote</label><input id="volume" type="number" step="0.01" min="0.01" value="0.50"></div>
+      <div><label>Risco % / op.</label><input id="riskpct" type="number" step="0.5" min="0" max="10" value="0" title="0 = usa o lote fixo"></div>
       <div><label>Lucro alvo</label><input id="target" type="number" step="0.01" value="1"></div>
       <div><label>Limite perda</label><input id="loss" type="number" step="0.01" value="100"></div>
     </div>
@@ -111,6 +111,8 @@
       <div><label>Stop (ATR)</label><input id="slatr" type="number" step="0.1" value="1.5"></div>
       <div><label>Duração (velas)</label><input id="dur" type="number" step="1" min="0" value="0"></div>
     </div>
+    <div class="row2"><div><label>Lote fixo (se risco % = 0)</label><input id="volume" type="number" step="0.01" min="0.01" value="0.50"></div><div></div></div>
+    <div class="hint" id="riskHint">Risco % &gt; 0: o lote é recalculado a cada operação pelo saldo e pela distância do stop (máx. 10%)</div>
     <div class="hint">Duração 0 = sai só por SL/TP · N = fecha após N velas (estilo Rise/Fall)</div>
 
     <div class="card">
@@ -184,7 +186,7 @@ const api = async (path, body) => {
 };
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
 const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
-  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · alvo 2× o stop (stop 1 ATR) · histórico: 43,5% de acerto, +0,18 R por operação · ainda não comprovado'};
+  reversao:'TESTE EM DEMO · ouro (XAUUSD) M2 · só 16h e 20h UTC (13h e 17h de Brasília) · alvo 3× o stop (stop 1 ATR) · risco 5%/op · histórico: 35,1% de acerto, +0,28 R/op · com 5% a conta costuma cair ~50% no caminho · ainda não comprovado'};
 
 async function refreshForward() {
   const rr = +$('rr').value || 0;
@@ -297,7 +299,7 @@ async function refreshStatus() {
   running = s.running;
   $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
   $('iaBtn').classList.toggle('on', running);
-  ['symbol','tf','mode','volume','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
+  ['symbol','tf','mode','volume','riskpct','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
   $('sessPnl').textContent = `${s.pnl>=0?'+':''}${fmt(s.pnl)} (${s.trades} ops · ${s.wins}G/${s.losses}P)`;
   $('sessPnl').className = 'pnl' + (s.pnl < 0 ? ' neg' : '');
   $('iaStatus').textContent = running ? `IA operando ${s.config.symbol} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}`
@@ -316,7 +318,7 @@ $('iaBtn').onclick = async () => {
   else {
     const r = await api('/api/ia/start', {symbol:$('symbol').value, timeframe:$('tf').value, mode:$('mode').value, volume:$('volume').value,
       target_profit:$('target').value, loss_limit:$('loss').value, rr:$('rr').value, sl_atr:$('slatr').value, duration_candles:$('dur').value,
-      protect:$('protect').checked, protect_after:$('pafter').value, protect_keep:$('pkeep').value});
+      protect:$('protect').checked, risk_pct:$('riskpct').value, protect_after:$('pafter').value, protect_keep:$('pkeep').value});
     if (!r.ok) alert(r.error);
   }
   $('iaBtn').disabled = false; refreshStatus();
@@ -343,7 +345,10 @@ $('mode').onchange = () => {
   $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (> 1 ATR) · 16h/20h UTC'
                                                               : 'Confluência: SuperTrend + LSMA + Keltner + SAR + CHoCH';
   if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
-    $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 2;   // ganho 2×, perda 1× (3 também testado)
+    $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 3;   // ganho 3×, perda 1×
+    $('riskpct').value = 5; $('target').value = 0; $('protect').checked = false;          // escolha do usuário: 5% por operação, sem meta curta
+    const bal = parseFloat(($('balance').textContent.match(/[\d.]+/) || ['0'])[0]);
+    if (bal) $('loss').value = Math.round(bal * 0.5);                                     // trava: para a IA se perder metade do saldo
     const gold = [...$('symbol').options].find(o => /^(XAUUSD|GOLD)/i.test(o.value));
     if (gold) $('symbol').value = gold.value;
   }
