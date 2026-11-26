@@ -655,3 +655,53 @@ class TestAudit(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TestTelegram(unittest.TestCase):
+    def _n(self):
+        from turbo_ia.notify import TelegramNotifier
+        sent = []
+        n = TelegramNotifier("TOKEN", "12345", post=lambda url, data: (sent.append((url, data)), {"ok": True})[1])
+        return n, sent
+
+    def test_disabled_without_credentials(self):
+        from turbo_ia.notify import TelegramNotifier
+        n = TelegramNotifier("", "")
+        self.assertFalse(n.enabled)
+        self.assertFalse(n.send("x"))
+
+    def test_sends_in_background_and_dedups(self):
+        n, sent = self._n()
+        self.assertTrue(n.send("a", dedup_key="e1"))
+        self.assertFalse(n.send("a de novo", dedup_key="e1"))   # mesmo erro em loop: não repete
+        n.flush()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("botTOKEN/sendMessage", sent[0][0])
+        self.assertEqual(sent[0][1]["chat_id"], "12345")
+
+    def test_bad_token_does_not_retry_forever(self):
+        from turbo_ia.notify import TelegramNotifier
+        calls = []
+        n = TelegramNotifier("T", "1", post=lambda u, d: (calls.append(1), {"ok": False, "error_code": 401, "description": "Unauthorized"})[1])
+        n.send("x")
+        n.flush()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Unauthorized", n.last_error)
+
+    def test_session_notifies_trade_close_and_brake(self):
+        n, sent = self._n()
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        s = IASession(b, forward=ForwardLog(None), notifier=n)
+        s.cfg = IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2", daily_loss_pct=10)
+        s._roll_day()
+        s.st.open_ticket, s.st.open_side, s.st.open_window = 77, "SELL", 1
+        b.closed_profit = lambda t: -120.0
+        b.positions = lambda sym=None: []
+        s._manage_open()
+        self.assertTrue(s._daily_brake())
+        n.flush()
+        texts = "\n".join(d["text"] for _, d in sent)
+        self.assertIn("❌ STOP #77: -120.00", texts)
+        self.assertIn("FREIO DIÁRIO", texts)
+        self.assertIn("DEMO PAPER", texts)

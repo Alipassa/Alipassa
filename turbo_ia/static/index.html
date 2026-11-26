@@ -135,6 +135,12 @@
     <button class="btn ia" id="iaBtn">▶ Iniciar IA</button>
     <div class="status" id="iaStatus">IA parada</div>
 
+    <div class="card" id="tgCard">
+      <div class="tog"><div><b>Alertas no Telegram</b> <span id="tgState" class="m">—</span>
+        <div class="m" style="font-size:11px">entradas, saídas, freio diário, erros e resumo do dia</div></div>
+        <button class="btn sec" id="tgTest" style="width:auto;padding:6px 10px">Enviar teste</button></div>
+    </div>
+
     <div class="card" id="fwdCard">
       <b id="fwdTitle">Registro de acerto</b> <span class="m" id="fwdMode"></span>
       <div style="font-size:24px;font-weight:800;margin:4px 0" id="fwdRate">—</div>
@@ -311,6 +317,9 @@ async function refreshStatus() {
   $('broker').textContent = a.error ? `${a.broker}: ${a.error}` : `${a.broker==='mt5'?'MetaTrader 5':'Simulador (paper)'} · ${a.login} · ${a.server}`;
   $('acctype').textContent = a.demo ? 'Conta demo' : 'CONTA REAL'; $('acctype').className = 'pill ' + (a.demo ? 'demo' : 'real');
   $('balance').textContent = a.balance != null ? `${a.currency||''} ${fmt(a.balance)} · equity ${fmt(a.equity)}` : '—';
+  const tg = d.telegram || {};
+  $('tgState').textContent = tg.enabled ? (tg.last_error ? '⚠ ' + tg.last_error : `ligado · ${tg.sent} enviados`) : 'desligado (.env sem TOKEN_TELEGRAM/CHAT_ID)';
+  $('tgState').className = tg.enabled && !tg.last_error ? 'g' : 'm';
   const s = d.session;
   running = s.running;
   if (running && !window._cfgShown && s.config) {     // página aberta com a IA já rodando: mostra a configuração REAL dela
@@ -360,6 +369,12 @@ const manual = side => async () => {
   refreshStatus(); refreshChart();
 };
 $('buyBtn').onclick = manual('BUY'); $('sellBtn').onclick = manual('SELL');
+$('tgTest').onclick = async () => {
+  $('tgTest').disabled = true; $('tgTest').textContent = 'enviando…';
+  const r = await api('/api/telegram/test', {});
+  alert(r.ok ? 'Mensagem de teste enviada — confira o Telegram.' : 'Não enviou: ' + r.error);
+  $('tgTest').disabled = false; $('tgTest').textContent = 'Enviar teste'; refreshStatus();
+};
 $('positions').onclick = async e => { const t = e.target.dataset.close; if (t && confirm('Fechar posição #' + t + '?')) { await api('/api/close', {ticket:+t}); refreshStatus(); } };
 document.querySelectorAll('[data-ind]').forEach(b => b.onclick = () => { show[b.dataset.ind] = !show[b.dataset.ind]; b.classList.toggle('on'); refreshChart(); });
 document.querySelectorAll('.tabs a').forEach(a => a.onclick = () => {

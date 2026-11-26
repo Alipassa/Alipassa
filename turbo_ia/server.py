@@ -34,7 +34,8 @@ class App:
                 info = self.broker.info()
             except BrokerError as e:
                 info = {"broker": self.broker.name, "error": str(e)}
-            return {"version": __version__, "account": info, "session": self.session.state(), "positions": self.broker.positions()}
+            return {"version": __version__, "account": info, "session": self.session.state(), "positions": self.broker.positions(),
+                    "telegram": self.session.notifier.status()}
 
     def chart(self, symbol: str, tf: str, n: int, mode: str, z_thr: Optional[float] = None) -> dict:
         with self.lock:
@@ -137,6 +138,14 @@ def make_handler(app: App):
                         self._json({"ok": False, "error": "só o modo Reversão ouro está habilitado (os outros deram prejuízo nos testes)"})
                     else:
                         self._json(app.session.start(IAConfig.from_dict({**d, "mode": "reversao"})))
+                elif p == "/api/telegram/test":
+                    n = app.session.notifier
+                    if not n.enabled:
+                        self._json({"ok": False, "error": "Telegram desligado: coloque TOKEN_TELEGRAM e CHAT_ID no arquivo .env e reinicie o painel"})
+                    else:
+                        app.session.notify("🔔 Teste: os alertas da TURBO IA estão chegando aqui.")
+                        n.flush(12)
+                        self._json({"ok": not n.last_error, "error": n.last_error or None})
                 elif p == "/api/ia/stop":
                     self._json(app.session.stop())
                 elif p == "/api/analyze":

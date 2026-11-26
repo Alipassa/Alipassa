@@ -18,6 +18,7 @@ from typing import Any, Optional
 from .analysis import analyze
 from .broker import lot_for_risk
 from .forward import ForwardLog
+from .notify import TelegramNotifier
 
 TF_SECONDS = {"M1": 60, "M2": 120, "M3": 180, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
 
@@ -72,6 +73,9 @@ class SessionState:
     day_start_equity: float = 0.0
     day_pnl: float = 0.0
     day_braked: bool = False
+    day_trades: int = 0
+    day_wins: int = 0
+    summary_sent: str = ""              # dia (UTC) do último resumo enviado ao Telegram
     stopped_reason: str = ""
     pnl: float = 0.0
     peak: float = 0.0
@@ -90,8 +94,10 @@ class SessionState:
 
 
 class IASession:
-    def __init__(self, broker: Any, poll: float = 1.0, forward: Optional[ForwardLog] = None) -> None:
+    def __init__(self, broker: Any, poll: float = 1.0, forward: Optional[ForwardLog] = None,
+                 notifier: Optional[TelegramNotifier] = None) -> None:
         self.broker = broker
+        self.notifier = notifier if notifier is not None else TelegramNotifier()
         self.forward = forward if forward is not None else ForwardLog()
         self.poll = poll
         self.cfg = IAConfig()
@@ -105,6 +111,14 @@ class IASession:
         with self.lock:
             self.st.log.append({"t": time.time(), "kind": kind, "msg": msg})
             del self.st.log[:-200]
+
+    def notify(self, text: str, dedup_key: Optional[str] = None) -> None:
+        try:
+            acct = self.broker.info()
+            tag = f"{'DEMO' if acct.get('demo') else 'REAL'} {acct.get('login', '')}"
+        except Exception:  # noqa: BLE001
+            tag = ""
+        self.notifier.send(f"🤖 TURBO IA · {tag}\n{text}", dedup_key)
 
     def start(self, cfg: IAConfig) -> dict:
         with self.lock:
@@ -132,6 +146,9 @@ class IASession:
         self.log(f"IA iniciada · {cfg.symbol} {cfg.timeframe} · risco {cfg.risk_pct:g}%/op · saldo inicial {eq:.2f} · "
                  f"meta {('+%.2f' % lim['target']) if lim['target'] else 'nenhuma'} · "
                  f"limite de perda {('-%.2f' % lim['loss']) if lim['loss'] else 'nenhum'}", "start")
+        brake_txt = f" · freio diário {cfg.daily_loss_pct:g}%" if cfg.daily_loss_pct > 0 else ""
+        loss_txt = f" · para se perder {lim['loss']:.2f}" if lim["loss"] else ""
+        self.notify(f"▶️ IA iniciada · {cfg.symbol} {cfg.timeframe}\nrisco {cfg.risk_pct:g}%/op · saldo {eq:.2f}{brake_txt}{loss_txt}")
         if self.st.open_ticket is not None:
             self.log(f"posição #{self.st.open_ticket} da IA já estava aberta — acompanhando até fechar (nenhuma nova entrada antes disso)", "start")
         self._thread = threading.Thread(target=self._run, name="turbo-ia", daemon=True)
@@ -145,6 +162,7 @@ class IASession:
                 self.st.running = False
                 self.st.stopped_reason = reason
                 self.log(f"IA parada: {reason}", "stop")
+                self.notify(f"⏹ IA parada: {reason}\nsessão {self.st.pnl:+.2f} · {self.st.trades} operações")
         return {"ok": True}
 
     def state(self) -> dict:
@@ -161,6 +179,7 @@ class IASession:
                 self.step()
             except Exception as e:  # noqa: BLE001
                 self.log(f"erro no ciclo: {e}", "error")
+                self.notify(f"⚠️ erro no ciclo: {e}", dedup_key=f"err:{type(e).__name__}:{str(e)[:60]}")
             self._stop.wait(self.poll)
 
     def step(self) -> None:
@@ -174,6 +193,7 @@ class IASession:
         if not self.st.running:
             return
         self._roll_day()
+        self._daily_summary()
         if self._check_limits():
             return
         candles = b.candles(c.symbol, c.timeframe, 300)
@@ -232,6 +252,7 @@ class IASession:
         res = b.open(c.symbol, a.signal, volume, a.sl, a.tp, f"TurboIA {c.mode}")
         if not res.get("ok"):
             self.log(f"ordem recusada: {res.get('error')}", "error")
+            self.notify(f"⚠️ ordem recusada: {res.get('error')}", dedup_key=f"ref:{str(res.get('error'))[:60]}")
             if "REAL" in str(res.get("error", "")):
                 self.stop("conta real bloqueada")
             return
@@ -245,6 +266,9 @@ class IASession:
             self.st.open_ticket, self.st.open_bar = res["ticket"], bar
             self.st.open_side, self.st.open_window = a.signal, window
             self.st.trades += 1
+            self.st.day_trades += 1
+        self.notify(f"{'🟢 COMPRA' if a.signal == 'BUY' else '🔴 VENDA'} {c.symbol} {res['volume']} @ {res['price']}\n"
+                    f"stop {res['sl']} · alvo {res['tp']}{risk_note.replace(' · ', chr(10), 1) if risk_note else ''}")
         self.log(f"{'COMPRA' if a.signal == 'BUY' else 'VENDA'} #{res['ticket']} {res['volume']} @ {res['price']} · SL {res['sl']} · TP {res['tp']} · "
                  f"força {a.strength:.0f}%{risk_note} · {', '.join(a.reasons[:3])}", "trade")
 
@@ -272,6 +296,7 @@ class IASession:
             self.st.peak = max(self.st.peak, self.st.pnl)
             if profit >= 0:
                 self.st.wins += 1
+                self.st.day_wins += 1
             else:
                 self.st.losses += 1
                 if self.st.open_window is not None:
@@ -281,6 +306,11 @@ class IASession:
             self.st.history.append({"ticket": t, "profit": round(profit, 2), "t": time.time()})
         self._save_day()
         self.log(f"#{t} fechada: {profit:+.2f} · sessão {self.st.pnl:+.2f}", "win" if profit >= 0 else "loss")
+        try:
+            bal = f" · saldo {float(self.broker.info().get('balance') or 0):.2f}"
+        except Exception:  # noqa: BLE001
+            bal = ""
+        self.notify(f"{'✅ GANHO' if profit >= 0 else '❌ STOP'} #{t}: {profit:+.2f}\nhoje {self.st.day_pnl:+.2f} · sessão {self.st.pnl:+.2f}{bal}")
 
     def _day_file(self) -> Optional[str]:
         if getattr(self.forward, "path", None) is None:          # testes sem disco
@@ -322,7 +352,22 @@ class IASession:
                 if self.st.day and self.st.day_braked:
                     self.log("novo dia: freio diário liberado", "start")
                 self.st.day, self.st.day_start_equity, self.st.day_pnl, self.st.day_braked = today, eq, pnl, False
+                self.st.day_trades = self.st.day_wins = 0
             self._save_day()
+
+    def _daily_summary(self) -> None:
+        """Uma vez por dia, depois da última janela (21h UTC = 18h de Brasília), manda o resumo do dia."""
+        s = self.st
+        if not s.day or s.summary_sent == s.day or time.gmtime().tm_hour < 21 or s.open_ticket is not None:
+            return
+        s.summary_sent = s.day
+        if not s.day_trades:
+            text = "📋 Resumo do dia: nenhuma entrada (o preço não esticou o suficiente nas janelas)"
+        else:
+            text = (f"📋 Resumo do dia: {s.day_trades} operações · {s.day_wins} ganhos / {s.day_trades - s.day_wins} stops\n"
+                    f"resultado {s.day_pnl:+.2f} ({s.day_pnl / s.day_start_equity:+.1%} do saldo do início do dia)"
+                    if s.day_start_equity else f"📋 Resumo do dia: {s.day_trades} operações · resultado {s.day_pnl:+.2f}")
+        self.notify(text)
 
     def _daily_brake(self) -> bool:
         c, s = self.cfg, self.st
@@ -334,6 +379,7 @@ class IASession:
                 s.day_braked = True
                 self.log(f"FREIO DIÁRIO: perda de {s.day_pnl:.2f} hoje (limite {c.daily_loss_pct:g}% = -{lim:.2f}) — "
                          "sem novas entradas até o próximo dia (00h UTC = 21h de Brasília)", "stop")
+                self.notify(f"🛑 FREIO DIÁRIO: {s.day_pnl:+.2f} hoje (limite -{lim:.2f})\nsem novas entradas até amanhã — a IA continua ligada")
             return True
         return False
 
