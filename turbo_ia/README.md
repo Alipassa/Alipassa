@@ -283,6 +283,8 @@ pior ano menor, mas com metade da vantagem por operação.
 Nenhuma venceu em tudo → saída atual mantida. "Zero a zero em +2 ATR" chegou perto nos dois gráficos (no H1: mesmo
 total, 9 anos positivos e pior ano −34 em vez de −56; perdeu no total por 6 ATR e no período recente) — fica como
 candidato, junto com o filtro "lado da SMA 200", para serem julgados com dados novos (a partir de 27/11/2026).
+O relatório 11 (`validate.py`) mostra essa comparação; regra fixada em 26/11/2026: com ≥ 100 operações novas, o
+candidato substitui a regra atual se tiver lucro total maior E pior queda não maior.
 
 ### Filtros de mercado lateral no Cruzamento (Pepperstone 2016–2026, regra de adoção fixada antes)
 

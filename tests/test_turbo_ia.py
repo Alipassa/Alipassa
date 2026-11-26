@@ -1011,3 +1011,23 @@ class TestExits(unittest.TestCase):
         self.assertTrue(all(x[1] >= -2.0 - 1e-9 for v in res.values() for x in v))      # nunca perde mais que o stop inicial
         half = res["metade em +3 ATR"]
         self.assertEqual(len(half), len(base))                                          # mesmas entradas
+
+
+class TestCandidates(unittest.TestCase):
+    def test_only_new_data_counts_and_rule(self):
+        import math
+        from turbo_ia.validate import candidates, candidates_report, CAND_START
+        cl = [3000 + 60 * math.sin(i / 40) + 5 * math.sin(i / 3) for i in range(4000)]
+        t0 = CAND_START - 2000 * 3600
+        c = [{"time": t0 + i * 3600, "open": p, "high": p + 3, "low": p - 3, "close": p} for i, p in enumerate(cl)]
+        rows = candidates(c, 0.3)
+        self.assertEqual(len(rows), 3)
+        old = candidates(c, 0.3, start=t0 + 4000 * 3600)               # nada depois do início → 0 operações
+        self.assertTrue(all(r["n"] == 0 for r in old))
+        txt = candidates_report(rows)
+        self.assertIn("referência", txt)
+        self.assertIn("só dados novos", txt)
+        few = [dict(r, n=5) for r in rows]
+        self.assertIn("acompanhando (5/100", candidates_report(few))
+        win = [rows[0], dict(rows[1], n=150, total=rows[0]["total"] + 10, dd=rows[0]["dd"]), rows[2]]
+        self.assertIn("VENCEU", candidates_report(win))

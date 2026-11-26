@@ -119,6 +119,53 @@ def evaluate(rows: list[dict], events: list[dict], login: str = "", now: Optiona
     return res
 
 
+# ---------------------------------------------------------------------------------------------------- candidatos
+# Regra fixada em 26/11/2026, ANTES de existir qualquer dado novo: os candidatos que quase venceram no histórico são
+# julgados só com velas a partir de CAND_START. Um candidato substitui a regra atual quando, com ≥ 100 operações novas,
+# tiver lucro total MAIOR e pior queda NÃO MAIOR que a da regra atual. Antes disso, só se acompanha.
+CAND_START = calendar.timegm((2026, 11, 27, 0, 0, 0))
+CAND_MIN_OPS = 100
+
+
+def candidates(c: list[dict], spread_def: float = 0.3, start: int = CAND_START) -> list[dict]:
+    """Regra atual × candidatos no ouro H1, contando só as operações com entrada a partir de `start`."""
+    from .cross import simulate, simulate_exit
+    runs = {
+        "regra atual (cruzamento contrário)": simulate(c, "sma", 2.0, False, spread_def),
+        "candidato: zero a zero em +2 ATR": simulate_exit(c, ("be", 2.0), spread_def),
+        "candidato: só do lado da SMA 200": simulate(c, "sma", 2.0, False, spread_def, regime="lado da SMA200"),
+    }
+    out = []
+    for name, r in runs.items():
+        rr = [x[1] for x in r if x[0] >= start]
+        eq = pk = dd = 0.0
+        for x in rr:
+            eq += x
+            pk = max(pk, eq)
+            dd = max(dd, pk - eq)
+        out.append({"name": name, "n": len(rr), "total": sum(rr), "exp": sum(rr) / len(rr) if rr else 0.0, "dd": dd,
+                    "win": sum(x > 0 for x in rr) / len(rr) if rr else 0.0})
+    return out
+
+
+def candidates_report(rows: list[dict], start: int = CAND_START) -> str:
+    base = rows[0]
+    lines = [f"CANDIDATOS · só dados novos (entradas desde {time.strftime('%d/%m/%Y', time.gmtime(start))}) · ouro H1 · em ATR",
+             f"  {'':38} {'ops':>4} {'total':>7} {'ATR/op':>7} {'acerto':>6} {'queda':>6} │ situação"]
+    for r in rows:
+        if r is base:
+            sit = "referência"
+        elif r["n"] < CAND_MIN_OPS:
+            sit = f"acompanhando ({r['n']}/{CAND_MIN_OPS} operações)"
+        elif r["total"] > base["total"] and r["dd"] <= base["dd"]:
+            sit = "✔ VENCEU: pode substituir a regra atual"
+        else:
+            sit = "✗ não venceu a regra atual"
+        lines.append(f"  {r['name']:38} {r['n']:4} {r['total']:+7.1f} {r['exp']:+7.3f} {r['win']:6.0%} {r['dd']:6.1f} │ {sit}")
+    lines.append(f"  (regra fixada antes: com ≥ {CAND_MIN_OPS} operações novas, lucro total maior E pior queda não maior)")
+    return "\n".join(lines)
+
+
 def report(checks: list[tuple[str, Optional[bool], str]], demo: Optional[bool] = None) -> str:
     lines = ["VALIDAÇÃO PARA CONTA REAL — critérios combinados antes da demo", ""]
     for name, ok, detail in checks:
@@ -162,6 +209,14 @@ def main(argv=None) -> int:
         print(f"  diagnóstico: {DIAG}")
     print()
     print(report(evaluate(rows, load_events(), login, mode=mode), demo))
+    if mode == "cruzamento":
+        try:
+            from .backtest import SPREAD, load_mt5
+            c = load_mt5("XAUUSD", "H1", 6000)            # ~1 ano: aquecimento das médias (SMA 200) + o período novo
+            print()
+            print(candidates_report(candidates(c, SPREAD.get("XAUUSD", 0.3))))
+        except Exception as e:  # noqa: BLE001
+            print(f"\n(comparação dos candidatos indisponível: {e})")
     return 0
 
 
