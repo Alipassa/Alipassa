@@ -269,6 +269,21 @@ Abaixo de M15 o spread destrói a estratégia (centenas de cruzamentos por mês)
 vantagem por operação (menos sensível a custo) e o de maior lucro mensal → continua o padrão. M30 é a alternativa com
 pior ano menor, mas com metade da vantagem por operação.
 
+### Saídas do Cruzamento (Pepperstone 2016–2026, regra de adoção fixada antes)
+
+| Saída | H1 total | anos+ | pior | cofre | desenv | M30 total | anos+ | pior | cofre | desenv |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **cruzamento contrário (atual)** | **+469** | 8/11 | −56 | +392 | **+77** | +435 | 7/11 | **−35** | +371 | +64 |
+| zero a zero em +2 ATR | +463 | **9/11** | **−34** | **+411** | +52 | **+500** | **8/11** | −87 | **+417** | **+83** |
+| stop móvel 3 ATR | +379 | 8/11 | −35 | +302 | +77 | +324 | 6/11 | −76 | +298 | +26 |
+| metade em +3 ATR | +237 | 6/11 | −46 | +176 | +61 | +288 | 6/11 | −54 | +262 | +27 |
+| stop móvel 2 ATR | +146 | 7/11 | −44 | +124 | +22 | +77 | 5/11 | −85 | +62 | +15 |
+| fechou do outro lado da 9 | +79 | 8/11 | −48 | +79 | +0 | −204 | 4/11 | −86 | −195 | −9 |
+
+Nenhuma venceu em tudo → saída atual mantida. "Zero a zero em +2 ATR" chegou perto nos dois gráficos (no H1: mesmo
+total, 9 anos positivos e pior ano −34 em vez de −56; perdeu no total por 6 ATR e no período recente) — fica como
+candidato, junto com o filtro "lado da SMA 200", para serem julgados com dados novos (a partir de 27/11/2026).
+
 ### Filtros de mercado lateral no Cruzamento (Pepperstone 2016–2026, regra de adoção fixada antes)
 
 | Filtro | Total | Anos + | Pior ano | R/op | Ops | Cofre | Desenv. |
