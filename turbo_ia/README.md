@@ -237,7 +237,22 @@ proteção desligada e limite de perda = metade do saldo. Simulação (60 dias d
 Supõe que a vantagem do histórico se repete — os horários saíram desses mesmos dados. Se a vantagem real for 0,2 R menor,
 o mês típico com 5 % fica perto do zero a zero e a queda no caminho continua grande. Confirme em DEMO antes.
 
-## 📈 Modo Cruzamento 9×20 ouro H1 (padrão desde 26/11/2026)
+## 🧩 Modo Ensemble E3 (padrão desde 27/11/2026)
+
+Três cruzamentos no ouro dividindo o MESMO risco total — 9×20 H1 + 20×50 H1 + 9×20 M30 (1/3 do risco cada, número
+mágico próprio, stop 2 ATR, vira a mão no cruzamento contrário). Robustez: as 25 combinações de médias (5–15 × 20–50)
+deram lucro em 2016–2026 (platô). Ensemble × 9×20 sozinho, mesmo risco total, Pepperstone 2016–2026:
+
+| | Total ATR | Anos + | Pior ano | Maior queda | Lucro÷pior ano | Lucro÷queda | Cofre | Desenv |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 9×20 H1 sozinho | +469 | 8/11 | −56 | 94 | 8,4 | 5,0 | +392 | +77 |
+| **E3** | +412 | 7/11 | **−12** | **64** | **33,8** | **6,4** | +366 | +46 |
+
+Freio diário e limite da sessão são da carteira, pelo patrimônio (equity). Conta mínima: o lote mínimo (0,01 = 1 oz)
+com stop de 2 ATR arrisca dezenas de dólares; com 1/3 de 2 % por sistema, a conta precisa de alguns milhares de dólares
+— o painel avisa ("CONTA PEQUENA") e a IA pula as entradas que não cabem no risco.
+
+## 📈 Modo Cruzamento 9×20 ouro H1
 
 Estratégia do usuário, a única que passou em ~11 anos de XAUUSD H1 na Pepperstone (spread real):
 SMA 9 cruza a SMA 20 para cima → compra; para baixo → venda; sai e vira a mão no cruzamento contrário; stop 2 ATR no

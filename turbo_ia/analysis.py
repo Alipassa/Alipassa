@@ -135,16 +135,16 @@ def analyze_reversion(candles: list[dict], hours=REVERSION_HOURS, z_thr: float =
 CROSS_FAST, CROSS_SLOW, CROSS_SL_ATR = 9, 20, 2.0
 
 
-def analyze_cross(candles: list[dict], sl_atr: float = CROSS_SL_ATR) -> Analysis:
+def analyze_cross(candles: list[dict], sl_atr: float = CROSS_SL_ATR, fast: int = CROSS_FAST, slow: int = CROSS_SLOW) -> Analysis:
     """Cruzamento da SMA 9 com a SMA 20 na ÚLTIMA vela fechada. BUY/SELL só na vela do cruzamento; sem alvo
     (a saída é o cruzamento contrário); stop = sl_atr × ATR(14)."""
     mode = "cruzamento"
-    if len(candles) < CROSS_SLOW + 16:
+    if len(candles) < slow + 16:
         p = float(candles[-1]["close"]) if candles else 0.0
         return Analysis("NONE", 0.0, p, 0.0, None, None, blocked=["poucos candles"], mode=mode, label="Dados insuficientes")
     closes = [float(c["close"]) for c in candles]
     price = closes[-1]
-    f, sl_ = ind.sma(closes, CROSS_FAST), ind.sma(closes, CROSS_SLOW)
+    f, sl_ = ind.sma(closes, fast), ind.sma(closes, slow)
     a = _last(ind.atr(candles, 14)) or 0.0
     up = f[-2] <= sl_[-2] and f[-1] > sl_[-1]
     dn = f[-2] >= sl_[-2] and f[-1] < sl_[-1]
@@ -152,22 +152,22 @@ def analyze_cross(candles: list[dict], sl_atr: float = CROSS_SL_ATR) -> Analysis
     votes = {"cruzamento": 1 if up else -1 if dn else 0, "tendencia_9x20": trend}
     blocked = []
     if not (up or dn):
-        blocked.append(f"sem cruzamento nesta vela (média 9 {'acima' if trend > 0 else 'abaixo'} da 20: "
+        blocked.append(f"sem cruzamento nesta vela (média {fast} {'acima' if trend > 0 else 'abaixo'} da {slow}: "
                        f"{'alta' if trend > 0 else 'baixa'} em curso)")
     if a <= 0:
         blocked.append("ATR zero")
     signal = "NONE" if blocked else ("BUY" if up else "SELL")
     sl = (price - sl_atr * a if up else price + sl_atr * a) if signal != "NONE" else None
-    reasons = [f"média 9 cruzou a 20 para {'cima' if up else 'baixo'}" if (up or dn) else "aguardando cruzamento",
-               f"9 = {f[-1]:.2f} · 20 = {sl_[-1]:.2f} · ATR {a:.2f}"]
+    reasons = [f"média {fast} cruzou a {slow} para {'cima' if up else 'baixo'}" if (up or dn) else "aguardando cruzamento",
+               f"{fast} = {f[-1]:.2f} · {slow} = {sl_[-1]:.2f} · ATR {a:.2f}"]
     label = f"{'Alta' if trend > 0 else 'Baixa'} · {'CRUZOU' if signal != 'NONE' else 'tendência 9×20'}"
     return Analysis(signal, 100.0 if signal != "NONE" else 50.0, price, a, sl, None, votes, reasons, blocked, mode, label)
 
 
 def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5, utc_offset: float = 0.0,
-            z_thr: Optional[float] = None) -> Analysis:
+            z_thr: Optional[float] = None, fast: int = CROSS_FAST, slow: int = CROSS_SLOW) -> Analysis:
     if mode == "cruzamento":
-        return analyze_cross(candles, sl_atr=sl_atr if sl_atr > 0 else CROSS_SL_ATR)
+        return analyze_cross(candles, sl_atr=sl_atr if sl_atr > 0 else CROSS_SL_ATR, fast=fast, slow=slow)
     if mode == "reversao":
         return analyze_reversion(candles, sl_atr=sl_atr, utc_offset=utc_offset, rr=rr,
                                  z_thr=REVERSION_Z if z_thr is None else z_thr)

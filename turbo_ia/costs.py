@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .broker import MAGIC
+from .broker import MAGIC, MAGICS
 
 
 def load_exec_log(path: Optional[str] = None) -> dict:
@@ -41,7 +41,7 @@ DIAG: dict = {}
 
 
 def _is_ours(d: Any) -> bool:
-    return getattr(d, "magic", None) == MAGIC or str(getattr(d, "comment", "")).startswith("TurboIA")
+    return getattr(d, "magic", None) in MAGICS or str(getattr(d, "comment", "")).startswith("TurboIA")
 
 
 def _sl_from_comment(txt: str) -> float:

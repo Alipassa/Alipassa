@@ -15,6 +15,7 @@ from . import __version__
 from .analysis import analyze, series
 from .broker import BrokerError, lot_for_risk, make_broker
 from .engine import IAConfig, IASession
+from .ensemble import EnsembleSession
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -135,9 +136,14 @@ def make_handler(app: App):
                 p = urlparse(self.path).path
                 if p == "/api/ia/start":
                     mode = d.get("mode", "reversao")
-                    if mode not in ("reversao", "cruzamento"):      # só estratégias que passaram nos testes podem operar
-                        self._json({"ok": False, "error": "modo não habilitado (só Reversão ouro e Cruzamento 9×20)"})
+                    if mode not in ("reversao", "cruzamento", "ensemble"):   # só estratégias que passaram nos testes
+                        self._json({"ok": False, "error": "modo não habilitado (Reversão ouro, Cruzamento 9×20 ou Ensemble E3)"})
+                    elif app.session.st.running:
+                        self._json({"ok": False, "error": "IA já está rodando"})
                     else:
+                        want = EnsembleSession if mode == "ensemble" else IASession
+                        if not isinstance(app.session, want):          # troca de sistema único ↔ ensemble (IA parada)
+                            app.session = want(app.broker, forward=app.session.forward, notifier=app.session.notifier)
                         self._json(app.session.start(IAConfig.from_dict(d)))
                 elif p == "/api/telegram/test":
                     n = app.session.notifier

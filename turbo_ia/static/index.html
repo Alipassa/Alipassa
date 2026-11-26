@@ -90,7 +90,8 @@
         <select id="tf"><option>M1</option><option>M2</option><option>M3</option><option>M5</option><option>M15</option><option>M30</option><option>H1</option></select></div>
       <div><label>Modo de negociação</label>
         <select id="mode">
-          <option value="cruzamento" selected>📈 Cruzamento 9×20 ouro H1</option>
+          <option value="ensemble" selected>🧩 Ensemble E3 · 3 cruzamentos ouro</option>
+          <option value="cruzamento">📈 Cruzamento 9×20 ouro H1</option>
           <option value="reversao">🧪 Reversão ouro (não passou no cofre)</option>
         </select></div>
     </div>
@@ -203,11 +204,12 @@ const api = async (path, body) => {
 };
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
 const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
+  ensemble:'TESTE EM DEMO · ouro (XAUUSD) · 3 sistemas de cruzamento dividindo o MESMO risco: 9×20 H1 + 20×50 H1 + 9×20 M30 (cada um 1/3 do risco) · stop 2 ATR, vira a mão no cruzamento contrário · Pepperstone 2016–2026: +412 ATR, pior ano −12 (o 9×20 sozinho: −56), maior queda 64 (× 94) · precisa de conta maior: lote mínimo × stop de 2 ATR',
   cruzamento:'TESTE EM DEMO · ouro (XAUUSD) H1 · média 9 cruza a 20: para cima COMPRA, para baixo VENDE · sai e vira a mão no cruzamento contrário · stop 2 ATR, sem alvo · opera o dia todo (~27 ops/mês) · Pepperstone 2016–2026: 8 de 11 anos positivos, +0,13 ATR/op · espere anos laterais no vermelho (2018: −56 ATR)',
   reversao:'NÃO PASSOU NO COFRE (jan–mai/2026: −0,07 R/op) ·  · ouro (XAUUSD) M2 · só às HL1 e às HL2 no seu relógio (16h e 20h UTC) · entra com o preço > 2 ATR da média 20 · alvo 3× o stop (1 ATR) · Pepperstone: ~63 ops/mês, ~34% de acerto, +0,30 R/op · espere 8+ stops seguidos'};
 
 async function refreshForward() {
-  const isCross = $('mode').value === 'cruzamento';
+  const isCross = ['cruzamento', 'ensemble'].includes($('mode').value);
   $('fwdCard').style.display = isCross ? 'none' : '';      // sem alvo fixo: o acompanhamento é o relatório 11 (MT5)
   if (isCross) return;
   const rr = +$('rr').value || 0;
@@ -254,7 +256,7 @@ function renderChart(d) {
   lsma.setData(show.lsma ? toLine(c, s.lsma) : []);
   kcU.setData(show.kc ? toLine(c, s.kc_up) : []); kcM.setData(show.kc ? toLine(c, s.kc_mid) : []); kcL.setData(show.kc ? toLine(c, s.kc_lo) : []);
   sar.setData(show.sar ? toLine(c, s.sar) : []);
-  const cross = $('mode').value === 'cruzamento';
+  const cross = ['cruzamento', 'ensemble'].includes($('mode').value);
   const showRev = show.rev && !cross;
   revM.setData(showRev ? toLine(c, s.rev_mid) : []); revU.setData(showRev ? toLine(c, s.rev_up) : []); revL.setData(showRev ? toLine(c, s.rev_lo) : []);
   ma9.setData(cross && show.rev ? toLine(c, s.sma9) : []); ma20.setData(cross && show.rev ? toLine(c, s.sma20) : []);
@@ -349,6 +351,7 @@ async function refreshStatus() {
   $('sessPnl').className = 'pnl' + (s.pnl < 0 ? ' neg' : '');
   const lim = s.limits || {};
   $('iaStatus').textContent = running ? `IA operando ${s.config.symbol} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}` +
+      (s.systems ? ' · ' + s.systems.map(x => `${x.label}: ${x.open ? (x.side === 'BUY' ? '🟢' : '🔴') : '·'}`).join('  ') : '') +
       (s.day_braked ? ` · FREIO DIÁRIO ativo (hoje ${fmt(s.day_pnl)}) — volta amanhã` : (lim.daily ? ` · hoje ${fmt(s.day_pnl)} (freio em -${fmt(lim.daily)})` : '')) + (lim.loss ? ` · para se perder ${fmt(lim.loss)}` : '') + (lim.target ? ` · meta +${fmt(lim.target)}` : '')
                                       : (s.stopped_reason ? 'Parada: ' + s.stopped_reason : 'IA parada');
   if (s.last_analysis) { renderAnaCard(s.last_analysis); $('anaWhen').textContent = '(IA)'; }
@@ -367,6 +370,7 @@ $('iaBtn').onclick = async () => {
       target_pct:$('target').value || 0, loss_pct:$('loss').value || 0, target_profit:0, loss_limit:0, rr:$('rr').value, sl_atr:$('slatr').value, duration_candles:$('dur').value,
       protect:$('protect').checked, risk_pct:$('riskpct').value, daily_loss_pct:$('dailyloss').value || 0, z_thr:$('zthr').value, stop_block:$('stopblock').value, protect_after_pct:$('pafter').value || 0, protect_keep_pct:$('pkeep').value || 0});
     if (!r.ok) alert(r.error);
+    else if (r.warning) alert(r.warning);
   }
   $('iaBtn').disabled = false; refreshStatus();
 };
@@ -398,8 +402,9 @@ $('mode').onchange = () => {
   const lh = h => { const d = new Date(); d.setUTCHours(h, 0, 0, 0); return String(d.getHours()).padStart(2, '0') + 'h–' + String(d.getHours()).padStart(2, '0') + 'h59'; };
   $('modeHint').textContent = MODE_HINT[$('mode').value].replace('HL1', lh(16)).replace('HL2', lh(20));
   $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (esticada mín. em ATR) · 16h/20h UTC'
+                              : $('mode').value === 'ensemble' ? 'Ensemble: SMA 9×20 H1 + 20×50 H1 + 9×20 M30 · risco dividido'
                               : 'Cruzamento SMA 9 × SMA 20 · stop 2 ATR · vira a mão no cruzamento contrário';
-  if ($('mode').value === 'cruzamento') {         // configuração validada em 2016–2026 (escolha do usuário: 2 %)
+  if (['cruzamento', 'ensemble'].includes($('mode').value)) {         // configuração validada em 2016–2026 (escolha do usuário: 2 %)
     $('tf').value = 'H1'; $('dur').value = 0; $('slatr').value = 2; $('rr').value = 0;
     $('riskpct').value = 2; $('target').value = 0; $('protect').checked = false; $('stopblock').value = '';
     syncRisk();

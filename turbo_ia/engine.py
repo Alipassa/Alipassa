@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 from .analysis import analyze
-from .broker import lot_for_risk
+from .broker import MAGIC, lot_for_risk
 from .forward import ForwardLog
 from .notify import TelegramNotifier
 
@@ -31,6 +31,10 @@ class IAConfig:
     volume: float = 0.5                 # lote fixo por operação (usado quando risk_pct = 0)
     risk_pct: float = 0.0               # > 0: lote calculado a cada operação para perder este % do saldo no stop
     z_thr: float = 2.0                  # reversão: distância mínima da média 20, em ATRs, para entrar
+    fast: int = 9                       # cruzamento: média rápida
+    slow: int = 20                      # cruzamento: média lenta
+    magic: int = MAGIC                  # número mágico das ordens (cada sistema do ensemble tem o seu)
+    label: str = ""                     # nome do sistema nos registros/alertas (ensemble)
     stop_block: str = ""                # trava após stop na mesma janela de 1 h: "" (nenhuma) · "dir" (não repete o lado)
                                         # · "2stops" (encerra a janela após 2 stops) · "window" (encerra após 1 stop)
     rr: float = 1.5                     # alvo = rr × distância do stop
@@ -106,9 +110,13 @@ class IASession:
         self.lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self.block_entries = False          # ensemble: freio diário da carteira bloqueia novas entradas
+        self.summary_enabled = True         # ensemble: o resumo do dia sai uma vez só, pela carteira
 
     # ------------------------------------------------------------------ controle
     def log(self, msg: str, kind: str = "info") -> None:
+        if self.cfg.label:
+            msg = f"[{self.cfg.label}] {msg}"
         with self.lock:
             self.st.log.append({"t": time.time(), "kind": kind, "msg": msg})
             del self.st.log[:-200]
@@ -142,9 +150,32 @@ class IASession:
             tag = f"{'DEMO' if acct.get('demo') else 'REAL'} {acct.get('login', '')}"
         except Exception:  # noqa: BLE001
             tag = ""
-        self.notifier.send(f"🤖 TURBO IA · {tag}\n{text}", dedup_key)
+        lbl = f" · {self.cfg.label}" if self.cfg.label else ""
+        self.notifier.send(f"🤖 TURBO IA · {tag}{lbl}\n{text}", dedup_key)
 
-    def start(self, cfg: IAConfig) -> dict:
+    def min_lot_check(self) -> str:
+        """Cruzamento: o lote mínimo cabe no risco? Com stop de 2 ATR no H1, contas pequenas pulam quase tudo."""
+        c = self.cfg
+        if c.mode != "cruzamento" or c.risk_pct <= 0:
+            return ""
+        try:
+            from . import indicators as ind
+            cs = self.broker.candles(c.symbol, c.timeframe, 60)
+            a = [x for x in ind.atr(cs, 14) if x][-1]
+            spec = self.broker.spec(c.symbol)
+            eq = float(self.broker.info().get("equity") or 0)
+        except Exception:  # noqa: BLE001
+            return ""
+        vpu = float(spec.get("value_per_unit") or spec.get("contract_size") or 1.0)
+        need = float(spec.get("volume_min") or 0.01) * c.sl_atr * a * vpu
+        budget = eq * c.risk_pct / 100.0
+        if need > budget:
+            return (f"⚠️ CONTA PEQUENA para {c.symbol} {c.timeframe}: o lote mínimo arrisca {need:.2f} no stop de {c.sl_atr:g} ATR, "
+                    f"mas o risco por operação é {budget:.2f} ({c.risk_pct:g}% de {eq:.2f}). A IA vai PULAR as entradas até o "
+                    f"stop caber — saldo necessário ≈ {need / (c.risk_pct / 100.0):,.0f}.")
+        return ""
+
+    def start(self, cfg: IAConfig, spawn: bool = True, quiet: bool = False) -> dict:
         with self.lock:
             if self.st.running:
                 return {"ok": False, "error": "IA já está rodando"}
@@ -160,7 +191,8 @@ class IASession:
             self.st = SessionState(running=True, started_at=time.time(), start_equity=eq)
             self._stop.clear()
             try:
-                mine = sorted(self.broker.positions(cfg.symbol), key=lambda p: p.get("time", 0))
+                mine = sorted([p for p in self.broker.positions(cfg.symbol) if p.get("magic", MAGIC) == cfg.magic],
+                              key=lambda p: p.get("time", 0))
             except Exception:  # noqa: BLE001
                 mine = []
             if mine:                                   # painel reiniciado com operação aberta: acompanha em vez de abrir outra
@@ -171,14 +203,20 @@ class IASession:
                  f"meta {('+%.2f' % lim['target']) if lim['target'] else 'nenhuma'} · "
                  f"limite de perda {('-%.2f' % lim['loss']) if lim['loss'] else 'nenhum'}", "start")
         self._event({"kind": "start", "symbol": cfg.symbol, "tf": cfg.timeframe, "risk": cfg.risk_pct})
+        warn = self.min_lot_check()
+        if warn:
+            self.log(warn, "error")
         brake_txt = f" · freio diário {cfg.daily_loss_pct:g}%" if cfg.daily_loss_pct > 0 else ""
         loss_txt = f" · para se perder {lim['loss']:.2f}" if lim["loss"] else ""
-        self.notify(f"▶️ IA iniciada · {cfg.symbol} {cfg.timeframe}\nrisco {cfg.risk_pct:g}%/op · saldo {eq:.2f}{brake_txt}{loss_txt}")
+        if not quiet:
+            self.notify(f"▶️ IA iniciada · {cfg.symbol} {cfg.timeframe}\nrisco {cfg.risk_pct:g}%/op · saldo {eq:.2f}{brake_txt}{loss_txt}"
+                        + (f"\n{warn}" if warn else ""))
         if self.st.open_ticket is not None:
             self.log(f"posição #{self.st.open_ticket} da IA já estava aberta — acompanhando até fechar (nenhuma nova entrada antes disso)", "start")
-        self._thread = threading.Thread(target=self._run, name="turbo-ia", daemon=True)
-        self._thread.start()
-        return {"ok": True}
+        if spawn:
+            self._thread = threading.Thread(target=self._run, name="turbo-ia", daemon=True)
+            self._thread.start()
+        return {"ok": True, "warning": warn or None}
 
     def stop(self, reason: str = "parada pelo usuário") -> dict:
         self._stop.set()
@@ -235,7 +273,7 @@ class IASession:
             return
         self.st.last_bar = bar
         closed = candles[:-1]                     # só candles fechados: sem repintura
-        a = analyze(closed, c.mode, c.rr, c.sl_atr, getattr(b, "utc_offset", 0.0), c.z_thr)
+        a = analyze(closed, c.mode, c.rr, c.sl_atr, getattr(b, "utc_offset", 0.0), c.z_thr, fast=c.fast, slow=c.slow)
         with self.lock:
             self.st.last_analysis = a.to_dict()
         if c.mode == "cruzamento" and self.st.open_ticket is not None and a.signal not in ("NONE", self.st.open_side):
@@ -255,6 +293,9 @@ class IASession:
             self.log(f"sem entrada ({a.label}): {'; '.join(a.blocked)}", "skip")
             return
         if self._daily_brake():
+            return
+        if self.block_entries:
+            self.log("sem entrada (freio diário da carteira ativo)", "skip")
             return
         window = int((int(closed[-1]["time"]) - getattr(b, "utc_offset", 0.0) * 3600) // 3600)
         ws = self.st.window_stops
@@ -291,7 +332,7 @@ class IASession:
             q_bid, q_ask = b.tick(c.symbol)                 # preço no instante do envio (para medir custo real)
         except Exception:  # noqa: BLE001
             q_bid = q_ask = None
-        res = b.open(c.symbol, a.signal, volume, a.sl, a.tp, f"TurboIA {c.mode}")
+        res = b.open(c.symbol, a.signal, volume, a.sl, a.tp, f"TurboIA {c.label or c.mode}", magic=c.magic)
         if not res.get("ok"):
             self.log(f"ordem recusada: {res.get('error')}", "error")
             self.notify(f"⚠️ ordem recusada: {res.get('error')}", dedup_key=f"ref:{str(res.get('error'))[:60]}")
@@ -432,6 +473,8 @@ class IASession:
 
     def _daily_summary(self) -> None:
         """Uma vez por dia, depois da última janela (21h UTC = 18h de Brasília), manda o resumo do dia."""
+        if not self.summary_enabled:
+            return
         s = self.st
         if not s.day or s.summary_sent == s.day or time.gmtime().tm_hour < 21 or s.open_ticket is not None:
             return

@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 TF_SECONDS = {"M1": 60, "M2": 120, "M3": 180, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
 MAGIC = 260_611
+MAGICS = range(MAGIC, MAGIC + 10)          # 260611 = sistema único; 260612… = cada sistema do ensemble
 
 
 class BrokerError(RuntimeError):
@@ -134,14 +135,16 @@ class PaperBroker:
         return {"digits": self._digits(symbol), "volume_min": 0.01, "volume_step": 0.01, "volume_max": 100.0, "contract_size": 1.0,
                 "value_per_unit": 1.0}
 
-    def open(self, symbol: str, side: str, volume: float, sl: Optional[float] = None, tp: Optional[float] = None, comment: str = "TurboIA") -> dict:
+    def open(self, symbol: str, side: str, volume: float, sl: Optional[float] = None, tp: Optional[float] = None, comment: str = "TurboIA",
+             magic: int = MAGIC) -> dict:
         with self.lock:
             bid, ask = self.tick(symbol)
             price = ask if side == "BUY" else bid
             self._ticket += 1
             d = self._digits(symbol)
             p = {"ticket": self._ticket, "symbol": symbol, "side": side, "volume": round(volume, 2), "price_open": round(price, d),
-                 "sl": round(sl, d) if sl else 0.0, "tp": round(tp, d) if tp else 0.0, "time": self.clock(), "comment": comment}
+                 "sl": round(sl, d) if sl else 0.0, "tp": round(tp, d) if tp else 0.0, "time": self.clock(), "comment": comment,
+                 "magic": magic}
             self._pos.append(p)
             return {"ok": True, "ticket": p["ticket"], "price": p["price_open"], "volume": p["volume"], "sl": p["sl"], "tp": p["tp"]}
 
@@ -374,7 +377,8 @@ class MT5Broker:
         dec = max(0, -int(math.floor(math.log10(step)))) if step < 1 else 0
         return round(v, dec)
 
-    def open(self, symbol: str, side: str, volume: float, sl: Optional[float] = None, tp: Optional[float] = None, comment: str = "TurboIA") -> dict:
+    def open(self, symbol: str, side: str, volume: float, sl: Optional[float] = None, tp: Optional[float] = None, comment: str = "TurboIA",
+             magic: int = MAGIC) -> dict:
         with self.lock:
             acc = self.mt5.account_info()
             if acc is None:
@@ -396,7 +400,7 @@ class MT5Broker:
             req = {"action": self.mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": vol,
                    "type": self.mt5.ORDER_TYPE_BUY if buy else self.mt5.ORDER_TYPE_SELL, "price": price,
                    "sl": round(sl, d) if sl else 0.0, "tp": round(tp, d) if tp else 0.0, "deviation": self.deviation,
-                   "magic": MAGIC, "comment": comment[:31], "type_time": self.mt5.ORDER_TIME_GTC, "type_filling": self._filling(spec)}
+                   "magic": int(magic), "comment": comment[:31], "type_time": self.mt5.ORDER_TIME_GTC, "type_filling": self._filling(spec)}
             res = self.mt5.order_send(req)
             if res is None:
                 return {"ok": False, "error": f"order_send None: {self.mt5.last_error()}"}
@@ -409,11 +413,11 @@ class MT5Broker:
         ps = (self.mt5.positions_get(symbol=symbol) if symbol else self.mt5.positions_get()) or []
         out = []
         for p in ps:
-            if getattr(p, "magic", MAGIC) != MAGIC:
+            if getattr(p, "magic", MAGIC) not in MAGICS:
                 continue                          # só mexe no que a IA abriu
             out.append({"ticket": int(p.ticket), "symbol": p.symbol, "side": "BUY" if p.type == self.mt5.POSITION_TYPE_BUY else "SELL",
                         "volume": float(p.volume), "price_open": float(p.price_open), "sl": float(p.sl), "tp": float(p.tp),
-                        "profit": float(p.profit), "time": int(p.time)})
+                        "profit": float(p.profit), "time": int(p.time), "magic": int(getattr(p, "magic", MAGIC))})
         return out
 
     def close(self, ticket: int, reason: str = "manual") -> dict:
@@ -426,7 +430,7 @@ class MT5Broker:
             buy = p["side"] == "BUY"
             req = {"action": self.mt5.TRADE_ACTION_DEAL, "position": ticket, "symbol": p["symbol"], "volume": p["volume"],
                    "type": self.mt5.ORDER_TYPE_SELL if buy else self.mt5.ORDER_TYPE_BUY, "price": bid if buy else ask,
-                   "deviation": self.deviation, "magic": MAGIC, "comment": f"TurboIA {reason}"[:31],
+                   "deviation": self.deviation, "magic": int(p.get("magic", MAGIC)), "comment": f"TurboIA {reason}"[:31],
                    "type_time": self.mt5.ORDER_TIME_GTC, "type_filling": self._filling(spec)}
             res = self.mt5.order_send(req)
             ok = res is not None and res.retcode == self.mt5.TRADE_RETCODE_DONE

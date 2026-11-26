@@ -1045,3 +1045,105 @@ class TestRobust(unittest.TestCase):
         st = _year_stats([(t, r) for t, r, _ in a], [2020])
         self.assertAlmostEqual(st["tot"], sum(r for _, r, _ in a))
         self.assertGreaterEqual(st["dd"], 0)
+
+
+class TestEnsemble(unittest.TestCase):
+    def _ens(self, balance=10_000, **kw):
+        from turbo_ia.ensemble import EnsembleSession
+        b = PaperBroker(seed=2, balance=balance)
+        b.connect()
+        e = EnsembleSession(b, forward=ForwardLog(None))
+        e.start(IAConfig(mode="ensemble", symbol="XAUUSD", risk_pct=2, daily_loss_pct=10, loss_pct=50, **kw))
+        e._stop.set()                                   # sem thread: o teste dirige os ciclos
+        e.st.running = True
+        return e, b
+
+    def test_three_systems_own_magic_and_risk(self):
+        from turbo_ia.analysis import Analysis
+        import turbo_ia.engine as eng
+        e, b = self._ens()
+        self.assertEqual([c.cfg.label for c in e.children], ["9×20 H1", "20×50 H1", "9×20 M30"])
+        self.assertEqual(len({c.cfg.magic for c in e.children}), 3)
+        self.assertTrue(all(abs(c.cfg.risk_pct - 2 / 3) < 1e-9 for c in e.children))
+        price = b.tick("XAUUSD")[0]
+        orig = eng.analyze
+        try:
+            eng.analyze = lambda *a, **k: Analysis("BUY", 100, price, 3.0, price - 6.0, None, mode="cruzamento", label="x")
+            for c in e.children:
+                c.st.last_bar = 0
+            e.step()
+        finally:
+            eng.analyze = orig
+        self.assertEqual(len(b._pos), 3)                                    # uma posição por sistema
+        self.assertEqual(sorted(p["magic"] for p in b._pos), sorted(c.cfg.magic for c in e.children))
+        st = e.state()
+        self.assertEqual(st["trades"], 3)
+        self.assertEqual(len(st["open_tickets"]), 3)
+
+    def test_reversal_closes_only_its_own_position(self):
+        from turbo_ia.analysis import Analysis
+        import turbo_ia.engine as eng
+        e, b = self._ens()
+        price = b.tick("XAUUSD")[0]
+        orig = eng.analyze
+        try:
+            eng.analyze = lambda *a, **k: Analysis("BUY", 100, price, 3.0, price - 6.0, None, mode="cruzamento", label="x")
+            for c in e.children:
+                c.st.last_bar = 0
+            e.step()
+            first = e.children[0]
+            first.st.last_bar = 0
+            eng.analyze = lambda *a, **k: Analysis("SELL", 100, price, 3.0, price + 6.0, None, mode="cruzamento", label="x")
+            first.step()                                                  # só o 1º sistema vê o cruzamento contrário
+        finally:
+            eng.analyze = orig
+        sides = sorted(p["side"] for p in b._pos)
+        self.assertEqual(sides, ["BUY", "BUY", "SELL"])
+
+    def test_portfolio_daily_brake_and_loss_limit(self):
+        e, b = self._ens()
+        e.st.day_start_equity = b.info()["equity"] / 0.85                   # patrimônio 15 % abaixo do começo do dia
+        e._portfolio_limits()
+        self.assertTrue(e.st.day_braked)
+        self.assertTrue(all(c.block_entries for c in e.children))
+        e.st.start_equity = b.info()["equity"] / 0.4                        # 60 % abaixo do início → para
+        e._portfolio_limits()
+        self.assertFalse(e.st.running)
+        self.assertIn("limite de perda", e.st.stopped_reason)
+
+    def test_small_account_warning(self):
+        b = PaperBroker(seed=2, balance=1000)
+        b.connect()
+        b.spec = lambda sym: {"digits": 2, "volume_min": 0.01, "volume_step": 0.01, "volume_max": 100, "value_per_unit": 100.0}
+        s = IASession(b, forward=ForwardLog(None))
+        s.cfg = IAConfig(mode="cruzamento", symbol="XAUUSD", timeframe="H1", risk_pct=0.5, sl_atr=2.0)
+        self.assertIn("CONTA PEQUENA", s.min_lot_check())
+        s.cfg = IAConfig(mode="cruzamento", symbol="XAUUSD", timeframe="H1", risk_pct=50, sl_atr=2.0)
+        self.assertEqual(s.min_lot_check(), "")
+
+    def test_server_switches_to_ensemble(self):
+        import json
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        from turbo_ia.server import App, make_handler
+        from turbo_ia.ensemble import EnsembleSession
+        b = PaperBroker(seed=1)
+        b.connect()
+        app = App(b)
+        app.session.forward = ForwardLog(None)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}/api/ia/start",
+                                         json.dumps({"mode": "ensemble", "symbol": "XAUUSD", "risk_pct": 2}).encode(),
+                                         {"Content-Type": "application/json"})
+            self.assertTrue(json.loads(urllib.request.urlopen(req).read())["ok"])
+            self.assertIsInstance(app.session, EnsembleSession)
+            st = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{srv.server_port}/api/status").read())
+            self.assertTrue(st["session"]["running"])
+            self.assertEqual(len(st["session"]["systems"]), 3)
+        finally:
+            app.session.stop()
+            srv.shutdown()
+            srv.server_close()
