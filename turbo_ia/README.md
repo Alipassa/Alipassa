@@ -237,6 +237,28 @@ proteção desligada e limite de perda = metade do saldo. Simulação (60 dias d
 Supõe que a vantagem do histórico se repete — os horários saíram desses mesmos dados. Se a vantagem real for 0,2 R menor,
 o mês típico com 5 % fica perto do zero a zero e a queda no caminho continua grande. Confirme em DEMO antes.
 
+## Programa de validação (itens 2–7) — `program.py` e `costs.py`
+
+Regras escritas ANTES dos resultados. Dados divididos no tempo:
+**desenvolvimento** = a partir de 20/05/2026 (já usado para criar a regra) · **cofre** = antes de 20/05/2026 (nunca usado).
+
+| Item | O que testa | Variações fixadas antes |
+| --- | --- | --- |
+| 2 | Filtro de movimento impulsivo (velocidade da esticada, não tendência) | andou > 3 ATR em 5 velas · > 4 ATR em 5 velas · vela do sinal > 2 ATR · 5+ velas seguidas na mesma direção |
+| 3 | Entrada após rejeição | espera até 3 velas por uma vela que feche voltando · idem com stop além do extremo |
+| 4 | M2 × M3 walk-forward | todo mês escolhe o gráfico que rendeu mais nos 60 dias anteriores |
+| 5 | Saída parcial × 3R fixo | 50 % em +1R / +1,5R / +2R, resto no zero a zero buscando 3R |
+| 6 | Custo real de execução | derrapagem na entrada (× pedido e × fechamento da vela), spread no envio, derrapagem no stop/alvo, comissão — em R |
+| 7 | Adoção | só se ganhar da regra atual nas 2 metades do desenvolvimento **e** no cofre (≥ 30 operações) |
+
+```bash
+python -m turbo_ia.program --source mt5 --symbol XAUUSD     # itens 2, 3, 4, 5, 7
+python -m turbo_ia.costs --days 30                          # item 6 (usa turbo_ia_execucao.jsonl gravado pela IA)
+```
+
+Para haver cofre, o MT5 precisa entregar velas M2 de antes de 20/05/2026: Ferramentas → Opções → Gráficos →
+Máx. barras no gráfico = Ilimitado, reiniciar o MT5 e abrir um gráfico XAUUSD M2 rolando bem para trás.
+
 ## Auditoria (26/11/2026)
 
 | # | Falha | Risco | Correção |

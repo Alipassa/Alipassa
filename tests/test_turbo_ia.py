@@ -705,3 +705,75 @@ class TestTelegram(unittest.TestCase):
         self.assertIn("❌ STOP #77: -120.00", texts)
         self.assertIn("FREIO DIÁRIO", texts)
         self.assertIn("DEMO PAPER", texts)
+
+
+class TestProgram(unittest.TestCase):
+    """Itens 2–5 e 7: cada variação faz o que diz, sem olhar o futuro, e o cofre fica antes do corte."""
+
+    def bars(self, closes, t0=0, tf=120, rng=0.2):
+        out, prev = [], closes[0]
+        for i, cl in enumerate(closes):
+            out.append({"time": t0 + i * tf, "open": prev, "high": max(prev, cl) + rng, "low": min(prev, cl) - rng, "close": cl})
+            prev = cl
+        return out
+
+    def test_impulse_rules(self):
+        from turbo_ia.program import impulsive
+        c = self.bars([100] * 10 + [101, 102, 103, 104, 105])
+        self.assertTrue(impulsive(c, 1.0, 14, False, ("move", 5, 3.0)))     # subiu 5 em 5 velas → venda bloqueada
+        self.assertFalse(impulsive(c, 1.0, 14, True, ("move", 5, 3.0)))     # o filtro só olha o lado da entrada
+        self.assertTrue(impulsive(c, 1.0, 14, False, ("streak", 5)))
+        self.assertFalse(impulsive(c, 1.0, 14, False, ("streak", 6)))
+        self.assertFalse(impulsive(c, 1.0, 14, False, ("bar", 2.0)))
+
+    def _sim(self, v, path):
+        from turbo_ia import program as pg
+        hour16 = 16 * 3600
+        closes = [100.0] * 40 + path
+        c = self.bars(closes, t0=hour16 - 40 * 120, rng=0.0)
+        f = {"sma": [100.0] * len(c), "atr": [1.0] * len(c)}
+        c[40]["close"] = 103.0                                 # esticada de +3 ATR às 16h → VENDA
+        c[40]["high"] = max(c[40]["high"], 103.0)
+        return pg.simulate(c, f, {**pg.BASE, **v}, 0, len(c), 0.0)
+
+    def test_fixed_3r_and_partial(self):
+        down = [103.0, 102.0, 100.5, 99.0, 98.0, 97.0]         # cai 6 → alvo 3R (3 abaixo de 103)
+        self.assertAlmostEqual(self._sim({}, down)[0][1], 3.0)
+        r = self._sim({"exit": ("partial", 1.0)}, [103.0, 101.8, 102.5, 104.5])  # +1R parcial, volta e passa do zero a zero
+        self.assertAlmostEqual(r[0][1], 0.5)                   # 50 % × 1R; o resto saiu no zero a zero (0)
+
+    def test_rejection_waits_for_reversal_candle(self):
+        r_now = self._sim({}, [104.5, 104.5])                   # entra a 103 e é stopado a 104
+        self.assertAlmostEqual(r_now[0][1], -1.0)
+        r_rej = self._sim({"entry": "reject"}, [104.0, 105.0, 106.0, 107.0])  # nunca rejeita → não entra
+        self.assertEqual(r_rej, [])
+
+    def test_cofre_is_before_cutoff(self):
+        from turbo_ia import program as pg
+        c = self.bars([100 + (i % 7) * 0.3 for i in range(4000)], t0=pg.CUTOFF - 2000 * 120)
+        res = pg.evaluate(c, 0.0, pg.CUTOFF)
+        self.assertAlmostEqual(res["cofre_dias"], 2000 * 120 / 86400, delta=0.01)
+        self.assertIn("COFRE", res["rows"]["regra atual"])
+
+
+class TestCosts(unittest.TestCase):
+    def test_real_stop_from_25_11(self):
+        from turbo_ia.costs import analyze_positions, report
+        from turbo_ia.broker import MAGIC
+        D = lambda **k: SimpleNamespace(magic=MAGIC, position_id=433283554, commission=0.0, swap=0.0, fee=0.0, **k)  # noqa: E731
+        deals = [D(entry=0, type=1, order=433283554, price=3552.45, volume=0.12, profit=0.0, time=1764108120),
+                 D(entry=1, type=0, order=433283600, price=3556.89, volume=0.12, profit=-53.28, time=1764108420)]
+        orders = [SimpleNamespace(ticket=433283554, sl=3556.89, tp=3541.14, price_open=3552.50)]
+        mt5 = SimpleNamespace(DEAL_ENTRY_IN=0, DEAL_ENTRY_OUT=1, DEAL_TYPE_BUY=0,
+                              history_deals_get=lambda a, b: deals, history_orders_get=lambda position=None: orders)
+        ex = {433283554: {"signal_close": 3552.60, "bid": 3552.50, "ask": 3552.60, "sl": 3556.89, "tp": 3541.14}}
+        rows = analyze_positions(mt5, 30, ex, now=1764108420)
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["kind"], "stop")
+        self.assertAlmostEqual(r["exit_slip"], 0.0)            # saiu exatamente no stop
+        self.assertAlmostEqual(r["entry_slip_req"], 0.05, places=6)   # vendeu 5 centavos ABAIXO do pedido = pior
+        self.assertAlmostEqual(r["entry_slip_bar"], 0.15, places=6)   # e 15 centavos abaixo do fechamento da vela
+        self.assertAlmostEqual(r["spread"], 0.10, places=6)
+        txt = report(rows)
+        self.assertIn("CUSTO TOTAL REAL", txt)

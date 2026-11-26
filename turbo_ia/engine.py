@@ -249,6 +249,10 @@ class IASession:
                 self.log(note, "skip")
                 return
             risk_note = f" · risco {risk_money:.2f} ({risk_money / eq:.1%} do saldo {eq:.2f})"
+        try:
+            q_bid, q_ask = b.tick(c.symbol)                 # preço no instante do envio (para medir custo real)
+        except Exception:  # noqa: BLE001
+            q_bid = q_ask = None
         res = b.open(c.symbol, a.signal, volume, a.sl, a.tp, f"TurboIA {c.mode}")
         if not res.get("ok"):
             self.log(f"ordem recusada: {res.get('error')}", "error")
@@ -262,6 +266,10 @@ class IASession:
             acct = ""
         self.forward.add(c.symbol, c.timeframe, c.mode, a.signal, int(closed[-1]["time"]), float(closed[-1]["close"]), c.expiry_min, acct,
                          getattr(b, "name", ""), sl=a.sl, tp=a.tp)
+        self._log_execution({"t": time.time(), "ticket": res["ticket"], "symbol": c.symbol, "tf": c.timeframe, "side": a.signal,
+                             "signal_close": float(closed[-1]["close"]), "signal_time": int(closed[-1]["time"]),
+                             "bid": q_bid, "ask": q_ask, "fill": res.get("price"), "sl": res.get("sl"), "tp": res.get("tp"),
+                             "volume": res.get("volume"), "broker": getattr(b, "name", "")})
         with self.lock:
             self.st.open_ticket, self.st.open_bar = res["ticket"], bar
             self.st.open_side, self.st.open_window = a.signal, window
@@ -311,6 +319,17 @@ class IASession:
         except Exception:  # noqa: BLE001
             bal = ""
         self.notify(f"{'✅ GANHO' if profit >= 0 else '❌ STOP'} #{t}: {profit:+.2f}\nhoje {self.st.day_pnl:+.2f} · sessão {self.st.pnl:+.2f}{bal}")
+
+    def _log_execution(self, rec: dict) -> None:
+        """Item 6: cada entrada grava preço da vela (o que o backtest supõe) × bid/ask no envio × preço executado."""
+        path = getattr(self.forward, "path", None)
+        if not path:
+            return
+        try:
+            with open(os.path.join(os.path.dirname(path) or ".", "turbo_ia_execucao.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _day_file(self) -> Optional[str]:
         if getattr(self.forward, "path", None) is None:          # testes sem disco
