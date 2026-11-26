@@ -336,6 +336,12 @@ class IASession:
             return None
         return os.path.join(os.path.dirname(self.forward.path) or ".", ".turbo_ia_dia.json")
 
+    def _login(self) -> str:
+        try:
+            return str(self.broker.info().get("login", ""))
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _save_day(self) -> None:
         f = self._day_file()
         if not f:
@@ -343,7 +349,7 @@ class IASession:
         try:
             with open(f, "w", encoding="utf-8") as fh:
                 json.dump({"day": self.st.day, "start_equity": self.st.day_start_equity, "pnl": self.st.day_pnl,
-                           "symbol": self.cfg.symbol, "broker": getattr(self.broker, "name", "")}, fh)
+                           "symbol": self.cfg.symbol, "broker": getattr(self.broker, "name", ""), "login": self._login()}, fh)
         except Exception:  # noqa: BLE001
             pass
 
@@ -362,7 +368,8 @@ class IASession:
                 try:
                     with open(f, encoding="utf-8") as fh:
                         saved = json.load(fh)
-                    if saved.get("day") == today and saved.get("broker") == getattr(self.broker, "name", ""):
+                    if (saved.get("day") == today and saved.get("broker") == getattr(self.broker, "name", "")
+                            and str(saved.get("login", "")) == self._login()):   # conta nova não herda o dia da antiga
                         eq, pnl = float(saved.get("start_equity") or eq), float(saved.get("pnl") or 0.0)
                         self.log(f"retomando o dia: resultado de hoje {pnl:+.2f} (saldo de referência {eq:.2f})", "start")
                 except Exception:  # noqa: BLE001

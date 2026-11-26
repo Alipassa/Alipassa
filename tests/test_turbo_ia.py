@@ -766,6 +766,8 @@ class TestCosts(unittest.TestCase):
         orders = [SimpleNamespace(ticket=433283554, sl=3556.89, tp=3541.14, price_open=3552.50)]
         mt5 = SimpleNamespace(DEAL_ENTRY_IN=0, DEAL_ENTRY_OUT=1, DEAL_TYPE_BUY=0,
                               history_deals_get=lambda a, b: deals, history_orders_get=lambda position=None: orders)
+        for d in deals:
+            d.comment = ""
         ex = {433283554: {"signal_close": 3552.60, "bid": 3552.50, "ask": 3552.60, "sl": 3556.89, "tp": 3541.14}}
         rows = analyze_positions(mt5, 30, ex, now=1764108420)
         self.assertEqual(len(rows), 1)
@@ -777,3 +779,39 @@ class TestCosts(unittest.TestCase):
         self.assertAlmostEqual(r["spread"], 0.10, places=6)
         txt = report(rows)
         self.assertIn("CUSTO TOTAL REAL", txt)
+
+
+class TestCostsFallbacks(unittest.TestCase):
+    def test_exit_deal_without_magic_and_sl_from_comment(self):
+        from turbo_ia.costs import analyze_positions
+        from turbo_ia.broker import MAGIC
+        deals = [SimpleNamespace(magic=MAGIC, position_id=9, entry=0, type=1, order=9, price=3552.45, volume=0.12, profit=0.0,
+                                 time=1, commission=0, swap=0, fee=0, comment="TurboIA reversao"),
+                 SimpleNamespace(magic=0, position_id=9, entry=1, type=0, order=10, price=3556.89, volume=0.12, profit=-53.28,
+                                 time=2, commission=0, swap=0, fee=0, comment="[sl 3556.89]")]
+        mt5 = SimpleNamespace(DEAL_ENTRY_IN=0, DEAL_TYPE_BUY=0, history_deals_get=lambda a, b: deals,
+                              history_orders_get=lambda position=None: [SimpleNamespace(ticket=9, sl=0, tp=0, price_open=3552.45)])
+        rows = analyze_positions(mt5, 30, {}, now=100)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "stop")
+        self.assertAlmostEqual(rows[0]["dist"], 4.44, places=2)
+
+
+class TestNewAccount(unittest.TestCase):
+    def test_new_account_does_not_inherit_day(self):
+        import os
+        import tempfile
+        f = ForwardLog(os.path.join(tempfile.mkdtemp(), "reg.jsonl"))
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        s1 = IASession(b, forward=f)
+        s1.cfg = IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2")
+        s1._roll_day()
+        s1.st.day_pnl = -90.0
+        s1._save_day()
+        info = b.info
+        b.info = lambda: {**info(), "login": "NOVA"}            # outra conta, mesmo dia
+        s2 = IASession(b, forward=f)
+        s2.cfg = s1.cfg
+        s2._roll_day()
+        self.assertEqual(s2.st.day_pnl, 0.0)

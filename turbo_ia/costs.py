@@ -37,11 +37,33 @@ def load_exec_log(path: Optional[str] = None) -> dict:
     return out
 
 
+DIAG: dict = {}
+
+
+def _is_ours(d: Any) -> bool:
+    return getattr(d, "magic", None) == MAGIC or str(getattr(d, "comment", "")).startswith("TurboIA")
+
+
+def _sl_from_comment(txt: str) -> float:
+    """Fechamento por stop no MT5 vem com comentário "[sl 3556.89]"; por alvo, "[tp 3541.14]"."""
+    import re
+    m = re.search(r"\[(?:sl|tp)\s+([0-9.]+)\]", txt or "")
+    return float(m.group(1)) if m else 0.0
+
+
 def analyze_positions(mt5: Any, days: int = 30, exec_log: Optional[dict] = None, now: Optional[float] = None) -> list[dict]:
     now = now or time.time()
-    frm = datetime.fromtimestamp(now - days * 86400, tz=timezone.utc)
-    to = datetime.fromtimestamp(now + 86400, tz=timezone.utc)
-    deals = [d for d in (mt5.history_deals_get(frm, to) or []) if getattr(d, "magic", None) == MAGIC]
+    frm, to = int(now - days * 86400), int(now + 86400)          # segundos desde 1970: aceito por todas as versões do pacote
+    raw = mt5.history_deals_get(frm, to)
+    if raw is None and hasattr(mt5, "last_error"):
+        DIAG["erro_mt5"] = str(mt5.last_error())
+        raw = mt5.history_deals_get(datetime.fromtimestamp(frm, tz=timezone.utc), datetime.fromtimestamp(to, tz=timezone.utc))
+    raw = list(raw or [])
+    deals = [d for d in raw if _is_ours(d)]
+    # posições abertas pela IA: os negócios de saída por SL/TP às vezes vêm com magic 0 → junta tudo da mesma posição
+    ours = {int(d.position_id) for d in deals}
+    deals = [d for d in raw if int(getattr(d, "position_id", 0)) in ours]
+    DIAG.update(negocios_no_periodo=len(raw), posicoes_da_ia=len(ours), sem_stop=0)
     IN, OUT = getattr(mt5, "DEAL_ENTRY_IN", 0), getattr(mt5, "DEAL_ENTRY_OUT", 1)
     by_pos: dict = {}
     for d in deals:
@@ -63,9 +85,16 @@ def analyze_positions(mt5: Any, days: int = 30, exec_log: Optional[dict] = None,
         ex = exec_log.get(pid) or exec_log.get(int(din.order))
         if ex:
             sl, tp = sl or float(ex.get("sl") or 0), tp or float(ex.get("tp") or 0)
+        for d in douts:                                   # último recurso: "[sl 3556.89]" no comentário do fechamento
+            lv = _sl_from_comment(str(getattr(d, "comment", "")))
+            if lv and "[sl" in str(getattr(d, "comment", "")) and not sl:
+                sl = lv
+            elif lv and "[tp" in str(getattr(d, "comment", "")) and not tp:
+                tp = lv
         fill = float(din.price)
         dist = abs(fill - sl) if sl else 0.0
         if dist <= 0:
+            DIAG["sem_stop"] = DIAG.get("sem_stop", 0) + 1
             continue
         vol = float(din.volume)
         out_px = sum(float(d.price) * float(d.volume) for d in douts) / max(sum(float(d.volume) for d in douts), 1e-9)
@@ -88,7 +117,11 @@ def analyze_positions(mt5: Any, days: int = 30, exec_log: Optional[dict] = None,
 
 def report(rows: list[dict], backtest_cost_r: float = 0.033) -> str:
     if not rows:
-        return "Nenhuma operação da IA fechada no período (número mágico 260611)."
+        d = DIAG
+        return ("Nenhuma operação da IA fechada no período (número mágico 260611).\n"
+                f"  diagnóstico: {d.get('negocios_no_periodo', '?')} negócios no histórico · {d.get('posicoes_da_ia', '?')} posições da IA · "
+                f"{d.get('sem_stop', 0)} sem stop identificável" + (f" · erro MT5: {d['erro_mt5']}" if d.get("erro_mt5") else "") +
+                "\n  Se aparecer 0 negócios: no MT5, aba Histórico → clique direito → 'Todo o histórico', e rode de novo.")
     n = len(rows)
     avg = lambda xs: sum(xs) / len(xs) if xs else None  # noqa: E731
     sl_req = [r["entry_slip_req"] / r["dist"] for r in rows if r["entry_slip_req"] is not None]
