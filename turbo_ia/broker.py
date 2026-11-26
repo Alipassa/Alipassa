@@ -326,8 +326,12 @@ class MT5Broker:
         acc = self.mt5.account_info()
         if acc is None:
             raise BrokerError(f"sem conta logada: {self.mt5.last_error()}")
+        try:
+            algo = bool(getattr(self.mt5.terminal_info(), "trade_allowed", True))
+        except Exception:  # noqa: BLE001
+            algo = True
         return {"broker": "mt5", "login": acc.login, "server": acc.server, "demo": self._is_demo(acc), "balance": acc.balance,
-                "equity": acc.equity, "currency": acc.currency, "allow_real": self.allow_real}
+                "equity": acc.equity, "currency": acc.currency, "allow_real": self.allow_real, "algo_trading": algo}
 
     def symbols(self) -> list[str]:
         syms = self.mt5.symbols_get() or []

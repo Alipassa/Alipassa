@@ -79,6 +79,8 @@
 <main>
   <!-- ESQUERDA: configurações da IA -->
   <aside>
+    <button class="btn ia" id="allBtn" style="margin-top:0;margin-bottom:6px">⚡ LIGAR TUDO</button>
+    <div class="hint" id="allHint" style="margin-bottom:12px">Liga a IA com a configuração testada (risco 2%) · para desligar, o mesmo botão</div>
     <h3>Configurações da IA</h3>
     <div class="pnl" id="sessPnl">0.00 (0 ops)</div>
 
@@ -354,7 +356,11 @@ async function refreshStatus() {
     if (![...$('symbol').options].some(o => o.value === c.symbol)) $('symbol').add(new Option(c.symbol, c.symbol));
     $('symbol').value = c.symbol;
   }
-  $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
+  $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA (com os campos abaixo)';
+  $('allBtn').textContent = running ? '■ DESLIGAR IA' : '⚡ LIGAR TUDO'; $('allBtn').classList.toggle('on', running);
+  $('allHint').textContent = running ? `ligada · ${s.config.symbol}${s.trade_symbol && s.trade_symbol !== s.config.symbol ? ' → ' + s.trade_symbol : ''} ${s.config.timeframe} · risco ${s.config.risk_pct}%`
+                                     : 'Liga a IA com a configuração testada (risco 2%) · para desligar, o mesmo botão';
+  if (a.algo_trading === false) $('allHint').textContent = '⚠️ ligue o botão Algo Trading no MetaTrader (fica verde) — sem ele as ordens são recusadas';
   $('iaBtn').classList.toggle('on', running);
   ['symbol','tf','mode','volume','riskpct','dailyloss','zthr','stopblock','target','loss','rr','slatr','dur','protect','pafter','pkeep'].forEach(id => $(id).disabled = running);
   $('sessPnl').textContent = `${s.pnl>=0?'+':''}${fmt(s.pnl)} (${s.trades} ops · ${s.wins}G/${s.losses}P)`;
@@ -372,6 +378,12 @@ async function refreshStatus() {
 }
 
 // ---------- ações
+$('allBtn').onclick = async () => {
+  $('allBtn').disabled = true;
+  if (running) await api('/api/ia/stop', {});
+  else { const r = await api('/api/ia/autostart', {}); if (!r.ok) alert(r.error); else if (r.warning) alert(r.warning); window._cfgShown = false; }
+  $('allBtn').disabled = false; refreshStatus();
+};
 $('iaBtn').onclick = async () => {
   $('iaBtn').disabled = true;
   if (running) await api('/api/ia/stop', {});

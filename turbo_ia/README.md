@@ -348,6 +348,9 @@ Execução (`b3.py` + `engine.py`):
 - swing exige a **margem cheia** do contrato (a de day trade é bem menor) — confirme com a XP;
 - ordem manual no `WIN@` também vai para o contrato vigente; conta real bloqueada sem `TURBO_IA_ALLOW_REAL=1`;
 - pacote B3: `.env` com `MT5_PATH` da XP, `TURBO_IA_UTC_OFFSET=-3` e `TURBO_IA_PRESET=b3` (o painel abre no modo B3).
+- **LIGAR TUDO**: `python -m turbo_ia --broker mt5 --autostart` abre o MT5 (o `initialize` do pacote abre o terminal), o painel
+  e liga a IA com a configuração validada do pacote (`TURBO_IA_PRESET=b3` → WIN M15; sem preset → ensemble E3 no ouro), risco 2 %.
+  Só liga em conta DEMO; avisa se o botão Algo Trading do MT5 estiver desligado. No painel, o botão **⚡ LIGAR TUDO** faz o mesmo.
 
 ## Programa de validação (itens 2–7) — `program.py` e `costs.py`
 

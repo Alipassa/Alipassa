@@ -420,6 +420,42 @@ class TestMT5BrokerB3(unittest.TestCase):
         self.assertEqual([q["type_filling"] for q in m.sent], [FakeMT5.ORDER_FILLING_FOK, FakeMT5.ORDER_FILLING_RETURN])
 
 
+class TestLigarTudo(unittest.TestCase):
+    def test_preset_and_autostart(self):
+        import os
+        from turbo_ia.server import App
+        b = PaperBroker(seed=2)
+        b.connect()
+        app = App(b)
+        app.session.forward = ForwardLog(None)
+        old = os.environ.pop("TURBO_IA_PRESET", None)
+        try:
+            d = app.preset_config()
+            self.assertEqual((d["mode"], d["symbol"], d["risk_pct"], d["daily_loss_pct"]), ("ensemble", "XAUUSD", 2, 10))
+            os.environ["TURBO_IA_PRESET"] = "b3"
+            d = app.preset_config()
+            self.assertEqual((d["mode"], d["symbol"], d["timeframe"]), ("b3", "WIN@", "M15"))
+        finally:
+            os.environ.pop("TURBO_IA_PRESET", None)
+            if old is not None:
+                os.environ["TURBO_IA_PRESET"] = old
+        r = app.start_ia({**app.preset_config(), "symbol": "XAUUSD"})
+        self.assertTrue(r["ok"])
+        self.assertTrue(app.session.st.running)
+        self.assertFalse(app.start_ia(app.preset_config())["ok"])          # não liga duas vezes
+        app.session.stop()
+
+    def test_real_account_never_autostarts(self):
+        from turbo_ia.server import App
+        b = PaperBroker(seed=2)
+        b.connect()
+        b.info = lambda: {"demo": False, "allow_real": False, "equity": 100}
+        app = App(b)
+        r = app.start_ia({"mode": "cruzamento", "symbol": "XAUUSD"})
+        self.assertFalse(r["ok"])
+        self.assertIn("REAL", r["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -55,6 +55,56 @@ class App:
             return self.broker.positions(symbol)
         return [p for p in self.broker.positions() if b3.root_of(p["symbol"]) == root]   # WIN@ no gráfico, posição no contrato
 
+    def start_ia(self, d: dict) -> dict:
+        mode = d.get("mode", "reversao")
+        if mode == "b3":                           # WIN M15 swing: o mesmo cruzamento, aprovado na robustez da B3
+            if b3.root_of(str(d.get("symbol", ""))) not in ("WIN", "IND"):
+                return {"ok": False, "error": "modo B3 só no mini índice: escolha WIN@ (o WDO reprovou nos testes)"}
+            d = {**d, "mode": "cruzamento", "timeframe": "M15", "fast": 9, "slow": 20, "sl_atr": 2.0, "rr": 0}
+            mode = "cruzamento"
+        if mode not in ("reversao", "cruzamento", "ensemble"):   # só estratégias que passaram nos testes
+            return {"ok": False, "error": "modo não habilitado (Reversão ouro, Cruzamento 9×20, Ensemble E3 ou B3 WIN M15)"}
+        with self.lock:
+            if self.session.st.running:
+                return {"ok": False, "error": "IA já está rodando"}
+            try:
+                info = self.broker.info()
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"MT5 sem conta logada: {e}"}
+            if not info.get("demo") and not info.get("allow_real"):
+                return {"ok": False, "error": "conta REAL no MT5 — a IA só liga em conta DEMO (TURBO_IA_ALLOW_REAL=0)"}
+            want = EnsembleSession if mode == "ensemble" else IASession
+            if not isinstance(self.session, want):          # troca de sistema único ↔ ensemble (IA parada)
+                self.session = want(self.broker, forward=self.session.forward, notifier=self.session.notifier)
+            r = self.session.start(IAConfig.from_dict(d))
+        if r.get("ok") and info.get("algo_trading") is False:
+            w = "⚠️ o botão Algo Trading do MetaTrader está DESLIGADO: ligue (fica verde) ou as ordens serão recusadas"
+            self.session.log(w, "error")
+            r["warning"] = (r.get("warning") + "\n" if r.get("warning") else "") + w
+        return r
+
+    def preset_config(self) -> dict:
+        """Configuração validada de cada pacote: b3 = WIN M15 cruzamento swing; padrão = ensemble E3 no ouro. Risco 2 %."""
+        base = {"risk_pct": 2, "sl_atr": 2, "rr": 0, "duration_candles": 0, "target_pct": 0, "loss_pct": 50,
+                "daily_loss_pct": 10, "protect": False, "stop_block": "", "target_profit": 0, "loss_limit": 0}
+        try:
+            syms = self.broker.symbols()
+        except Exception:  # noqa: BLE001
+            syms = []
+        if os.environ.get("TURBO_IA_PRESET", "") == "b3":
+            sym = next((s for s in ("WIN@", "WIN$N", "WIN$", "WIN@N") if s in syms), None)
+            if sym is None:                         # fora da Observação do Mercado: tenta habilitar
+                for s in ("WIN@", "WIN$N", "WIN$"):
+                    try:
+                        self.broker.candles(s, "M15", 5)
+                        sym = s
+                        break
+                    except Exception:  # noqa: BLE001
+                        continue
+            return {**base, "mode": "b3", "symbol": sym or "WIN@", "timeframe": "M15"}
+        gold = next((s for s in syms if s.upper().startswith(("XAUUSD", "GOLD"))), "XAUUSD")
+        return {**base, "mode": "ensemble", "symbol": gold, "timeframe": "H1"}
+
     def manual_order(self, d: dict) -> dict:
         symbol, side = d.get("symbol"), str(d.get("side", "")).upper()
         if side not in ("BUY", "SELL"):
@@ -152,21 +202,9 @@ def make_handler(app: App):
                 d = self._body()
                 p = urlparse(self.path).path
                 if p == "/api/ia/start":
-                    mode = d.get("mode", "reversao")
-                    if mode == "b3":                           # WIN M15 swing: o mesmo cruzamento, aprovado na robustez da B3
-                        if b3.root_of(str(d.get("symbol", ""))) not in ("WIN", "IND"):
-                            return self._json({"ok": False, "error": "modo B3 só no mini índice: escolha WIN@ (o WDO reprovou nos testes)"})
-                        d = {**d, "mode": "cruzamento", "timeframe": "M15", "fast": 9, "slow": 20, "sl_atr": 2.0, "rr": 0}
-                        mode = "cruzamento"
-                    if mode not in ("reversao", "cruzamento", "ensemble"):   # só estratégias que passaram nos testes
-                        self._json({"ok": False, "error": "modo não habilitado (Reversão ouro, Cruzamento 9×20, Ensemble E3 ou B3 WIN M15)"})
-                    elif app.session.st.running:
-                        self._json({"ok": False, "error": "IA já está rodando"})
-                    else:
-                        want = EnsembleSession if mode == "ensemble" else IASession
-                        if not isinstance(app.session, want):          # troca de sistema único ↔ ensemble (IA parada)
-                            app.session = want(app.broker, forward=app.session.forward, notifier=app.session.notifier)
-                        self._json(app.session.start(IAConfig.from_dict(d)))
+                    self._json(app.start_ia(d))
+                elif p == "/api/ia/autostart":                 # botão "LIGAR TUDO": configuração validada do pacote
+                    self._json(app.start_ia(app.preset_config()))
                 elif p == "/api/telegram/test":
                     n = app.session.notifier
                     if not n.enabled:
@@ -200,6 +238,7 @@ def main(argv=None) -> int:
     ap.add_argument("--broker", choices=["auto", "mt5", "paper"], default="auto")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--autostart", action="store_true", help="liga a IA sozinho com a configuração validada (LIGAR TUDO)")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
@@ -211,6 +250,12 @@ def main(argv=None) -> int:
     print(f"TURBO IA {__version__} · corretora: {broker.name} · conta {info.get('login')} ({'DEMO' if info.get('demo') else 'REAL'})"
           + (f" · terminal {broker.path}" if getattr(broker, "path", None) else ""))
     print(f"painel: {url}   (Ctrl+C para sair)")
+    if a.autostart:
+        r = app.start_ia(app.preset_config())
+        cfg = app.session.cfg
+        print(("IA LIGADA · " + f"{cfg.symbol} {cfg.timeframe} · risco {cfg.risk_pct:g}%") if r.get("ok") else f"IA NÃO ligou: {r.get('error')}")
+        if r.get("warning"):
+            print(r["warning"])
     if not a.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
