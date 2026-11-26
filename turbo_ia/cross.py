@@ -23,6 +23,36 @@ from .research import summary
 
 CUTOFF = calendar.timegm((2026, 5, 20, 0, 0, 0))
 
+# B3 — custo de uma operação completa de 1 contrato, em PONTOS (mesmas premissas do B3 AI):
+#   WIN: 2 ticks de escorregamento (2 × 5 pts × R$ 0,20) + R$ 0,60 fixo = R$ 2,60 = 13 pontos
+#   WDO: 2 × 0,5 pt × R$ 10 + R$ 2,60 fixo = R$ 12,60 = 1,26 ponto
+# Proxies do Yahoo: ^BVSP (Ibovespa, mesma escala do WIN) e BRL=X (dólar em R$; WDO = × 1000).
+B3_COST = {"WIN": 13.0, "WDO": 1.26, "^BVSP": 13.0, "BRL=X": 0.00126}
+# Pregão dos minicontratos (horário de Brasília = UTC−3, sem horário de verão): day trade entra das 09h15 às 17h30 e zera às 17h50
+B3_SESSION_UTC = (12 * 60 + 15, 20 * 60 + 30, 20 * 60 + 50)
+
+
+def b3_key(sym: str) -> Optional[str]:
+    s = sym.upper()
+    for k in ("WIN", "WDO"):
+        if s.startswith(k):
+            return k
+    return sym if sym in B3_COST else None
+
+
+def load(a, sym: str, tf: str) -> list[dict]:
+    """Carrega velas (MT5 ou Yahoo). Em ativos da B3 o custo de cada operação vira o custo B3 completo (não só o spread)."""
+    c = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+    k = b3_key(sym)
+    if k:
+        for x in c:
+            x["spread"] = B3_COST[k]
+    return c
+
+
+def session_of(a) -> Optional[tuple]:
+    return B3_SESSION_UTC if getattr(a, "daytrade", False) else None
+
 
 REGIME = {
     "ADX>20": ("adx", 20), "ADX>25": ("adx", 25), "CHOP<61.8": ("chop", 61.8), "CHOP<50": ("chop", 50),
@@ -59,7 +89,7 @@ def regime_ok(rs: dict, c: list[dict], atr: list, i: int, side: int, rule: Optio
 
 def simulate(c: list[dict], kind: str = "ema", stop_atr: Optional[float] = None, atr_filter: bool = True,
              spread_def: float = 0.3, lo: int = 0, hi: Optional[int] = None, regime: Optional[str] = None,
-             rs: Optional[dict] = None, fast: int = 9, slow: int = 20) -> list[tuple[int, float, float]]:
+             rs: Optional[dict] = None, fast: int = 9, slow: int = 20, session: Optional[tuple] = None) -> list[tuple[int, float, float]]:
     """Devolve [(tempo da entrada, R, pontos)] — uma posição por vez. `regime`: filtro de lateralidade na ENTRADA
     (a saída no cruzamento contrário acontece sempre; se o filtro barra a nova entrada, fica de fora até o próximo cruzamento)."""
     hi = hi or len(c)
@@ -72,7 +102,16 @@ def simulate(c: list[dict], kind: str = "ema", stop_atr: Optional[float] = None,
     atr_avg = ind.sma([a or 0.0 for a in atr], 50)
     out: list[tuple[int, float, float]] = []
     pos = None                                        # (lado, entrada, índice, atr, stop)
+    bar_min = max(1, int((c[min(len(c) - 1, 101)]["time"] - c[min(len(c) - 2, 100)]["time"]) // 60)) if len(c) > 2 else 60
     for i in range(max(lo, 70, slow + 2), hi):
+        if session:                                   # DAY TRADE: zera no fim do pregão; só entra dentro do horário
+            tod = (c[i]["time"] % 86400) // 60
+            if pos and (tod + bar_min > session[2] or c[i]["time"] // 86400 != c[pos[2]]["time"] // 86400):
+                side, e, k, a, _ = pos
+                pts = (c[i]["open"] - e) * side
+                sp = c[k].get("spread") or spread_def
+                out.append((c[k]["time"], (pts - sp) / a, pts - sp))
+                pos = None
         if f9[i] is None or f20[i] is None or f9[i - 1] is None or f20[i - 1] is None or not atr[i]:
             continue
         x = c[i]
@@ -95,6 +134,10 @@ def simulate(c: list[dict], kind: str = "ema", stop_atr: Optional[float] = None,
                 out.append((c[k]["time"], (pts - sp) / a, pts - sp))
                 pos = None
         if pos is None:
+            if session:
+                tod = (c[i]["time"] % 86400) // 60
+                if not (session[0] <= tod and tod + bar_min <= session[1]):
+                    continue                          # fora da janela de entrada do day trade
             if atr_filter and (atr_avg[i] is None or atr[i] <= atr_avg[i]):
                 continue                              # mercado lateral (ATR abaixo da média): não entra
             side = 1 if up else -1
@@ -116,6 +159,7 @@ def main(argv=None) -> int:
     ap.add_argument("--regime", action="store_true", help="testa filtros de mercado lateral no SMA 9×20 stop 2 ATR")
     ap.add_argument("--exits", action="store_true", help="testa saídas alternativas no SMA 9×20")
     ap.add_argument("--robust", action="store_true", help="robustez dos parâmetros e ensembles")
+    ap.add_argument("--daytrade", action="store_true", help="B3: zera às 17h50 e só entra das 09h15 às 17h30 (Brasília)")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
@@ -125,13 +169,14 @@ def main(argv=None) -> int:
         return exits_main(a)
     if a.robust:
         return robust_main(a)
-    print("CRUZAMENTO 9 × 20 + filtro ATR · saída no cruzamento contrário · spread descontado · 1 R = 1 ATR na entrada")
+    print("CRUZAMENTO 9 × 20 + filtro ATR · saída no cruzamento contrário · spread descontado · 1 R = 1 ATR na entrada"
+          + (" · DAY TRADE (zera 17h50)" if getattr(a, "daytrade", False) else ""))
     summary_rows = []
     tf_summary: list = []
     for sym, tf in [(s_, t_) for s_ in a.symbol.split(",") for t_ in a.tfs.split(",")]:
         spread_def = SPREAD.get(sym, 0.0)
         try:
-            c = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+            c = load(a, sym, tf)
         except Exception as e:  # noqa: BLE001
             print(f"  {sym} {tf}: sem dados ({str(e)[:80]})")
             continue
@@ -153,7 +198,7 @@ def main(argv=None) -> int:
             for stop in (None, 2.0):
                 for filt in (True, False):
                     tag = f"{kind.upper()} 9×20 {'+ATR' if filt else 'sem filtro'}{' stop 2ATR' if stop else ''}"
-                    r = simulate(c, kind, stop, filt, spread_def, cut, n)
+                    r = simulate(c, kind, stop, filt, spread_def, cut, n, session=session_of(a))
                     rs = [x[1] for x in r]
                     s = summary(rs)
                     gp, gl = sum(x for x in rs if x > 0), -sum(x for x in rs if x < 0)
@@ -164,7 +209,7 @@ def main(argv=None) -> int:
                             f"{(gp / gl if gl else 0):5.2f} {s['dd']:5.0f}R │ {sum(ra) / days(cut, mid) * 30:+7.1f} │ {sum(rb) / days(mid, n) * 30:+7.1f}")
                     rc_m = None
                     if cut > 500:
-                        rc = [x[1] for x in simulate(c, kind, stop, filt, spread_def, 0, cut)]
+                        rc = [x[1] for x in simulate(c, kind, stop, filt, spread_def, 0, cut, session=session_of(a))]
                         rc_m = sum(rc) / days(0, cut) * 30
                         line += f" │ {rc_m:+7.1f} ({summary(rc)['exp']:+.3f}/op)"
                     print(line, flush=True)
@@ -172,7 +217,7 @@ def main(argv=None) -> int:
                     summary_rows.append((sym, tf, tag, ok, s["exp"], rc_m))
         if a.years:
             # resumo do modo do painel (SMA 9×20 sem filtro, stop 2 ATR) para comparar tempos gráficos
-            rp = simulate(c, "sma", 2.0, False, spread_def, 0, n)
+            rp = simulate(c, "sma", 2.0, False, spread_def, 0, n, session=session_of(a))
             import time as _tt
             dense = [y for y in sorted({_tt.gmtime(x["time"]).tm_year for x in c})
                      if len([1 for x in c if _tt.gmtime(x["time"]).tm_year == y]) > 1000]
@@ -190,7 +235,7 @@ def main(argv=None) -> int:
             print("      " + "".join(f"{y:>16}" for y in yrs))
             for kind, stop, filt in (("sma", None, False), ("sma", 2.0, False), ("sma", None, True), ("ema", None, False)):
                 tag = f"{kind.upper()} 9×20 {'+ATR' if filt else 'sem filtro'}{' stop 2ATR' if stop else ''}"
-                r = simulate(c, kind, stop, filt, spread_def, 0, n)
+                r = simulate(c, kind, stop, filt, spread_def, 0, n, session=session_of(a))
                 cells = []
                 pos_years = 0
                 for y in yrs:
@@ -319,7 +364,7 @@ def robust_main(a) -> int:
     data = {}
     for tf in ("H1", "M30"):
         try:
-            data[tf] = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+            data[tf] = load(a, sym, tf)
         except Exception as e:  # noqa: BLE001
             print(f"  {tf}: sem dados ({e})")
     c = data["H1"]
@@ -330,7 +375,8 @@ def robust_main(a) -> int:
     def run(tf: str, fast: int, slow: int) -> list[tuple[int, float]]:
         key = (tf, fast, slow)
         if key not in runs and tf in data:
-            runs[key] = [(t, r) for t, r, _ in simulate(data[tf], "sma", 2.0, False, spread_def, fast=fast, slow=slow)]
+            runs[key] = [(t, r) for t, r, _ in simulate(data[tf], "sma", 2.0, False, spread_def, fast=fast, slow=slow,
+                                                         session=session_of(a))]
         return runs.get(key, [])
 
     print(f"\n1) ROBUSTEZ DOS PARÂMETROS · {sym} H1 · SMA rápida × lenta · stop 2 ATR · {yrs[0]}–{yrs[-1]} · total em ATR (anos positivos)")
@@ -383,7 +429,7 @@ def exits_main(a) -> int:
     for sym in a.symbol.split(","):
         for tf in a.tfs.split(","):
             spread_def = SPREAD.get(sym, 0.0)
-            c = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+            c = load(a, sym, tf)
             yrs = [y for y in sorted({_t.gmtime(x["time"]).tm_year for x in c})
                    if len([1 for x in c if _t.gmtime(x["time"]).tm_year == y]) > 1000]
             print(f"\nTESTE DE SAÍDAS · {sym} {tf} · entrada SMA 9×20 (stop inicial 2 ATR) · spread real · {yrs[0]}–{yrs[-1]}")
@@ -418,7 +464,7 @@ def regime_main(a) -> int:
     for sym in a.symbol.split(","):
         for tf in a.tfs.split(","):
             spread_def = SPREAD.get(sym, 0.0)
-            c = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+            c = load(a, sym, tf)
             rs = regime_series(c)
             yrs = [y for y in sorted({_t.gmtime(x["time"]).tm_year for x in c})
                    if len([1 for x in c if _t.gmtime(x["time"]).tm_year == y]) > 1000]          # anos com histórico denso

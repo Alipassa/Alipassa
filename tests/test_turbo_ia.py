@@ -1156,3 +1156,23 @@ class TestVersionMatch(unittest.TestCase):
         import turbo_ia
         html = open(os.path.join(os.path.dirname(turbo_ia.__file__), "static", "index.html"), encoding="utf-8").read()
         self.assertEqual(re.search(r"const UI_VERSION = '([^']+)'", html).group(1), turbo_ia.__version__)
+
+
+class TestB3(unittest.TestCase):
+    def test_cost_and_daytrade_session(self):
+        import math
+        from types import SimpleNamespace as NS
+        from turbo_ia.cross import B3_SESSION_UTC, b3_key, simulate
+        self.assertEqual(b3_key("WIN@"), "WIN")
+        self.assertEqual(b3_key("WDOZ26"), "WDO")
+        self.assertIsNone(b3_key("XAUUSD"))
+        # 10 dias de velas de 15 min o dia todo, com tendência longa: o swing dorme posicionado; o day trade não
+        cl = [120000 + 3000 * math.sin(i / 300) for i in range(96 * 10)]
+        c = [{"time": 1_767_225_600 + i * 900, "open": p, "high": p + 20, "low": p - 20, "close": p, "spread": 13.0}
+             for i, p in enumerate(cl)]
+        swing = simulate(c, "sma", 2.0, False, 13.0)
+        day = simulate(c, "sma", 2.0, False, 13.0, session=B3_SESSION_UTC)
+        tod = lambda t: (t % 86400) // 60  # noqa: E731
+        self.assertTrue(all(B3_SESSION_UTC[0] <= tod(t) < B3_SESSION_UTC[1] for t, _, _ in day))   # entradas só no horário
+        self.assertGreaterEqual(len(day), 1)
+        self.assertNotEqual(sum(x[2] for x in swing), sum(x[2] for x in day))
