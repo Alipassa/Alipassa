@@ -209,6 +209,17 @@ Nenhum filtro de tendência ganhou nas duas metades (a estratégia lucra justame
 O freio diário de 5 × o risco foi o único ajuste igual ou melhor nas duas metades do M2, com queda menor; no M3 ficou
 neutro (A +3,3 × +4,5 · B +12,9 × +12,9). Configuração final: M2 · esticada 2 · 3R · 2 % · freio diário 10 % · sem meta.
 
+## Outros mercados (Pepperstone, M2, mesma regra sem ajuste, 26/11/2026)
+
+R/op nas metades A | B (16h/20h UTC): XAUUSD +0,158 | +0,308 ✔ · US30 +0,181 | +0,083 ✔ · AUDUSD +0,104 | +0,213 ✔ ·
+XAGUSD −0,201 | +0,073 · US500 +0,044 | +0,036 · NAS100 −0,057 | +0,250 · GER40 +0,073 | −0,037 · UK100 −0,693 | −0,336 ·
+SpotCrude −0,231 | −0,101 · NatGas −0,723 | −1,426 · BTCUSD −0,070 | −0,251 · ETHUSD −0,216 | −0,221 · EURUSD +0,027 | −0,513 ·
+GBPUSD +0,260 | −0,109 · USDJPY +0,414 | −0,041.
+
+Com 14 mercados testados, 2 a 3 "aprovados" por acaso já seriam esperados; US30 e AUDUSD passaram por pouco e os
+vizinhos (US500, NAS100, outras moedas) não confirmam → tratados como ruído. A prata, que no Yahoo parecia ótima, era
+efeito de spread zero. Decisão: operar só o ouro.
+
 ## Lote pelo risco (% do saldo)
 
 Campo **Risco % / op.** > 0: a cada entrada o lote é `saldo × risco % ÷ (distância do stop × valor de 1,0 de preço por lote)`,
