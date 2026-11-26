@@ -815,3 +815,43 @@ class TestNewAccount(unittest.TestCase):
         s2.cfg = s1.cfg
         s2._roll_day()
         self.assertEqual(s2.st.day_pnl, 0.0)
+
+
+class TestValidate(unittest.TestCase):
+    def rows(self, rs, slip=0.0):
+        return [{"r": r, "dist": 1.0, "kind": "stop" if r < 0 else "alvo", "exit_slip": 0.0, "fee_r": 0.0,
+                 "entry_slip_bar": slip} for r in rs]
+
+    def events(self, now, cover=True, errors=0):
+        from turbo_ia.validate import expected_windows
+        ev = [{"t": now - 3600, "kind": "janela", "janela": w, "login": "1"} for w in (expected_windows(now) if cover else [])]
+        ev += [{"t": now - 60, "kind": "error", "msg": "x", "login": "1"} for _ in range(errors)]
+        return ev
+
+    def test_all_pass(self):
+        from turbo_ia.validate import evaluate, report
+        now = 1_764_000_000
+        rs = ([3.0, -1.0, -1.0] * 40)[:120]                    # +0,33 R/op, PF 1,5
+        checks = evaluate(self.rows(rs, slip=0.02), self.events(now), "1", now=now)
+        self.assertTrue(all(ok for _, ok, _ in checks), checks)
+        self.assertIn("VALIDADO", report(checks))
+
+    def test_fails_with_few_trades_and_bad_halves(self):
+        from turbo_ia.validate import evaluate, report
+        now = 1_764_000_000
+        rs = [3.0, -1.0] * 20 + [-1.0] * 20                     # 60 ops, últimas 30 negativas
+        checks = dict((n.split(" · ")[0], ok) for n, ok, _ in evaluate(self.rows(rs), self.events(now, errors=5), "1", now=now))
+        self.assertFalse(checks["1"])
+        self.assertFalse(checks["3"])
+        self.assertFalse(checks["7"])                            # 5 erros
+        self.assertIn("AINDA NÃO", report(evaluate(self.rows(rs), [], "1", now=now)))
+
+    def test_cost_criterion_needs_20_logged_trades(self):
+        from turbo_ia.validate import evaluate
+        now = 1_764_000_000
+        rows = self.rows([1.0] * 10)
+        c6 = [ok for n, ok, _ in evaluate(rows, [], "1", now=now) if n.startswith("6")][0]
+        self.assertIsNone(c6)
+        rows = self.rows([1.0] * 30, slip=0.20)                  # 0,20 R de derrapagem: reprova
+        c6 = [ok for n, ok, _ in evaluate(rows, [], "1", now=now) if n.startswith("6")][0]
+        self.assertFalse(c6)

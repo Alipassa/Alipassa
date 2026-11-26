@@ -108,10 +108,11 @@ def analyze_positions(mt5: Any, days: int = 30, exec_log: Optional[dict] = None,
         entry_slip_bar = (fill - float(ex["signal_close"])) * sgn if ex and ex.get("signal_close") else None
         spread = (float(ex["ask"]) - float(ex["bid"])) if ex and ex.get("ask") and ex.get("bid") else None
         fee_r = (-fees / money_per_r) if money_per_r else None
+        r_net = (out_px - fill) * sgn / dist - (fee_r or 0.0)    # resultado da operação em R, já com comissão/swap
         rows.append({"pos": pid, "time": int(din.time), "side": "BUY" if buy else "SELL", "volume": vol, "fill": fill, "sl": sl, "tp": tp,
                      "exit": out_px, "kind": kind, "dist": dist, "profit": profit, "fees": fees,
                      "entry_slip_req": entry_slip_req, "entry_slip_bar": entry_slip_bar, "exit_slip": exit_slip, "spread": spread,
-                     "fee_r": fee_r})
+                     "fee_r": fee_r, "r": r_net})
     return sorted(rows, key=lambda r: r["time"])
 
 

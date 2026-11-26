@@ -259,6 +259,13 @@ python -m turbo_ia.costs --days 30                          # item 6 (usa turbo_
 Para haver cofre, o MT5 precisa entregar velas M2 de antes de 20/05/2026: Ferramentas → Opções → Gráficos →
 Máx. barras no gráfico = Ilimitado, reiniciar o MT5 e abrir um gráfico XAUUSD M2 rolando bem para trás.
 
+## Validação para conta real (`validate.py`)
+
+Critérios combinados ANTES da demo (conta demo nova, 26/11/2026): ≥ 100 operações · média ≥ +0,10 R · primeiras e
+últimas 50 positivas · fator de lucro ≥ 1,15 · pior queda ≤ 25 R · custo real ≤ backtest + 0,05 R · 2 semanas com a IA
+ligada em ≥ 90 % das janelas e ≤ 2 erros. Com os 7 ✔: conta real com 1 % de risco, 2 % depois de mais 50 operações
+positivas. A IA grava `~/turbo_ia_eventos.jsonl` (presença nas janelas e erros) e `~/turbo_ia_execucao.jsonl` (preços).
+
 ## Auditoria (26/11/2026)
 
 | # | Falha | Risco | Correção |

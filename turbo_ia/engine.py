@@ -111,6 +111,29 @@ class IASession:
         with self.lock:
             self.st.log.append({"t": time.time(), "kind": kind, "msg": msg})
             del self.st.log[:-200]
+        if kind == "error":
+            self._event({"kind": "error", "msg": msg[:200]})
+
+    def _event(self, rec: dict) -> None:
+        """Registro permanente para a validação (critério 7): erros e presença nas janelas de operação."""
+        path = getattr(self.forward, "path", None)
+        if not path:
+            return
+        try:
+            rec = {"t": time.time(), "login": self._login(), **rec}
+            with open(os.path.join(os.path.dirname(path) or ".", "turbo_ia_eventos.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _heartbeat(self) -> None:
+        """Uma marca por janela (dia + hora UTC) em que a IA estava ligada e conectada."""
+        from .analysis import REVERSION_HOURS
+        g = time.gmtime()
+        key = f"{g.tm_year:04d}-{g.tm_mon:02d}-{g.tm_mday:02d} {g.tm_hour:02d}"
+        if g.tm_hour in REVERSION_HOURS and getattr(self, "_hb", "") != key:
+            self._hb = key
+            self._event({"kind": "janela", "janela": key})
 
     def notify(self, text: str, dedup_key: Optional[str] = None) -> None:
         try:
@@ -193,6 +216,7 @@ class IASession:
         if not self.st.running:
             return
         self._roll_day()
+        self._heartbeat()
         self._daily_summary()
         if self._check_limits():
             return
