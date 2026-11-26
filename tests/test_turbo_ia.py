@@ -865,3 +865,16 @@ class TestValidate(unittest.TestCase):
         rows = self.rows([1.0] * 30, slip=0.20)                  # 0,20 R de derrapagem: reprova
         c6 = [ok for n, ok, _ in evaluate(rows, [], "1", now=now) if n.startswith("6")][0]
         self.assertFalse(c6)
+
+
+class TestCross(unittest.TestCase):
+    def test_cross_follows_trend_and_reverses(self):
+        import math
+        from turbo_ia.cross import simulate
+        closes = [100 + 10 * math.sin(i / 25) for i in range(600)]   # ondas longas: cruzamentos claros
+        c = [{"time": i * 60, "open": p, "high": p + 0.3, "low": p - 0.3, "close": p} for i, p in enumerate(closes)]
+        r = simulate(c, "ema", None, False, 0.0)
+        self.assertGreater(len(r), 3)
+        self.assertGreater(sum(x[2] for x in r), 0)                  # em tendências longas o cruzamento ganha
+        r_stop = simulate(c, "ema", 2.0, False, 0.0)
+        self.assertTrue(all(x[1] >= -2.0 - 1e-9 for x in r_stop))   # stop de 2 ATR limita a perda
