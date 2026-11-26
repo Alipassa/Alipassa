@@ -1147,3 +1147,12 @@ class TestEnsemble(unittest.TestCase):
             app.session.stop()
             srv.shutdown()
             srv.server_close()
+
+
+class TestVersionMatch(unittest.TestCase):
+    def test_page_and_server_versions_match(self):
+        import os
+        import re
+        import turbo_ia
+        html = open(os.path.join(os.path.dirname(turbo_ia.__file__), "static", "index.html"), encoding="utf-8").read()
+        self.assertEqual(re.search(r"const UI_VERSION = '([^']+)'", html).group(1), turbo_ia.__version__)

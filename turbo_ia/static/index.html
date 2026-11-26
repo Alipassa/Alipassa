@@ -325,12 +325,19 @@ async function refreshChart() {
   } catch(e) { $('tSub').textContent = 'servidor indisponível'; }
 }
 
+const UI_VERSION = '1.1.0';               // precisa bater com turbo_ia.__version__ (servidor)
+let versionWarned = false;
 async function refreshStatus() {
   let d; try { d = await api('/api/status'); } catch(e) { return; }
   const a = d.account || {};
   $('broker').textContent = a.error ? `${a.broker}: ${a.error}` : `${a.broker==='mt5'?'MetaTrader 5':'Simulador (paper)'} · ${a.login} · ${a.server}`;
   $('acctype').textContent = a.demo ? 'Conta demo' : 'CONTA REAL'; $('acctype').className = 'pill ' + (a.demo ? 'demo' : 'real');
   $('balance').textContent = a.balance != null ? `${a.currency||''} ${fmt(a.balance)} · equity ${fmt(a.equity)}` : '—';
+  if (d.version !== UI_VERSION && !versionWarned) {
+    versionWarned = true;
+    alert(`A janela preta está rodando a versão ${d.version} e esta página é a ${UI_VERSION}.\n\n` +
+          'Feche a janela preta do TURBO IA e abra de novo o "1 - INICIAR TURBO IA.bat" para usar a versão nova.');
+  }
   const tg = d.telegram || {};
   $('tgState').textContent = tg.enabled ? (tg.last_error ? '⚠ ' + tg.last_error : `ligado · ${tg.sent} enviados`) : 'desligado (.env sem TOKEN_TELEGRAM/CHAT_ID)';
   $('tgState').className = tg.enabled && !tg.last_error ? 'g' : 'm';
