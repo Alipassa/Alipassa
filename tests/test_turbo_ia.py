@@ -1167,7 +1167,7 @@ class TestB3(unittest.TestCase):
         self.assertEqual(b3_key("WDOZ26"), "WDO")
         self.assertIsNone(b3_key("XAUUSD"))
         # 10 dias de velas de 15 min o dia todo, com tendência longa: o swing dorme posicionado; o day trade não
-        cl = [120000 + 3000 * math.sin(i / 300) for i in range(96 * 10)]
+        cl = [120000 + 3000 * math.sin(i / 40) for i in range(96 * 10)]
         c = [{"time": 1_767_225_600 + i * 900, "open": p, "high": p + 20, "low": p - 20, "close": p, "spread": 13.0}
              for i, p in enumerate(cl)]
         swing = simulate(c, "sma", 2.0, False, 13.0)
