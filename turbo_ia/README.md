@@ -253,6 +253,24 @@ diário 10 %, limite da sessão 50 %. Validação (`validate.py --modo cruzament
 ≥ 100 operações · média ≥ +0,05 R · primeiras/últimas 50 positivas · PF ≥ 1,10 · queda ≤ 30 R · custo ≤ backtest + 0,03 R ·
 IA ligada ≥ 90 % das horas dos dias úteis com ≤ 2 erros. Testes da estratégia: `python -m turbo_ia.cross --years`.
 
+### Filtros de mercado lateral no Cruzamento (Pepperstone 2016–2026, regra de adoção fixada antes)
+
+| Filtro | Total | Anos + | Pior ano | R/op | Ops | Cofre | Desenv. |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **sem filtro (atual)** | **+469** | 8/11 | −56 | +0,132 | 3.559 | +392 | **+77** |
+| lado da SMA 200 | +504 | **9/11** | −65 | **+0,279** | 1.808 | **+456** | +48 |
+| CHOP < 61,8 | +373 | 6/11 | −73 | +0,117 | 3.180 | +310 | +63 |
+| SMA 50 inclinada | +64 | 7/11 | −30 | +0,195 | 327 | +53 | +11 |
+| CHOP < 50 | +38 | 6/11 | −66 | +0,026 | 1.445 | +22 | +17 |
+| ADX > 20 | −16 | 4/11 | −72 | −0,008 | 2.028 | −43 | +27 |
+| ER > 0,3 | −27 | 5/11 | −28 | −0,090 | 301 | −25 | −2 |
+| ADX > 25 | −91 | 5/11 | −91 | −0,070 | 1.292 | −111 | +20 |
+
+Nenhum venceu em tudo → nenhum adotado. Os filtros barram justamente o começo das tendências (ADX ainda baixo), que é
+onde está o lucro (2020: +192 sem filtro × +74 com ADX > 20). O "lado da SMA 200" chegou perto (mais total, mais anos
+positivos, o dobro de R por operação), mas teve pior ano mais fundo e menos lucro no período recente — fica como
+candidato a reavaliar com os dados da demo, não como regra.
+
 ## Programa de validação (itens 2–7) — `program.py` e `costs.py`
 
 Regras escritas ANTES dos resultados. Dados divididos no tempo:
