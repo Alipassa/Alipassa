@@ -1031,3 +1031,17 @@ class TestCandidates(unittest.TestCase):
         self.assertIn("acompanhando (5/100", candidates_report(few))
         win = [rows[0], dict(rows[1], n=150, total=rows[0]["total"] + 10, dd=rows[0]["dd"]), rows[2]]
         self.assertIn("VENCEU", candidates_report(win))
+
+
+class TestRobust(unittest.TestCase):
+    def test_custom_periods_and_year_stats(self):
+        import math
+        from turbo_ia.cross import simulate, _year_stats
+        cl = [100 + 10 * math.sin(i / 30) for i in range(1500)]
+        c = [{"time": 1_600_000_000 + i * 3600, "open": p, "high": p + 0.3, "low": p - 0.3, "close": p} for i, p in enumerate(cl)]
+        a = simulate(c, "sma", 2.0, False, 0.0, fast=9, slow=20)
+        b = simulate(c, "sma", 2.0, False, 0.0, fast=20, slow=50)
+        self.assertNotEqual(len(a), len(b))                       # médias diferentes, cruzamentos diferentes
+        st = _year_stats([(t, r) for t, r, _ in a], [2020])
+        self.assertAlmostEqual(st["tot"], sum(r for _, r, _ in a))
+        self.assertGreaterEqual(st["dd"], 0)

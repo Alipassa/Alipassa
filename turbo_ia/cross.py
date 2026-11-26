@@ -59,20 +59,20 @@ def regime_ok(rs: dict, c: list[dict], atr: list, i: int, side: int, rule: Optio
 
 def simulate(c: list[dict], kind: str = "ema", stop_atr: Optional[float] = None, atr_filter: bool = True,
              spread_def: float = 0.3, lo: int = 0, hi: Optional[int] = None, regime: Optional[str] = None,
-             rs: Optional[dict] = None) -> list[tuple[int, float, float]]:
+             rs: Optional[dict] = None, fast: int = 9, slow: int = 20) -> list[tuple[int, float, float]]:
     """Devolve [(tempo da entrada, R, pontos)] — uma posição por vez. `regime`: filtro de lateralidade na ENTRADA
     (a saída no cruzamento contrário acontece sempre; se o filtro barra a nova entrada, fica de fora até o próximo cruzamento)."""
     hi = hi or len(c)
     if regime and rs is None:
         rs = regime_series(c)
     cl = [x["close"] for x in c]
-    f9 = ind.ema(cl, 9) if kind == "ema" else ind.sma(cl, 9)
-    f20 = ind.ema(cl, 20) if kind == "ema" else ind.sma(cl, 20)
+    f9 = ind.ema(cl, fast) if kind == "ema" else ind.sma(cl, fast)
+    f20 = ind.ema(cl, slow) if kind == "ema" else ind.sma(cl, slow)
     atr = ind.atr(c, 14)
     atr_avg = ind.sma([a or 0.0 for a in atr], 50)
     out: list[tuple[int, float, float]] = []
     pos = None                                        # (lado, entrada, índice, atr, stop)
-    for i in range(max(lo, 70), hi):
+    for i in range(max(lo, 70, slow + 2), hi):
         if f9[i] is None or f20[i] is None or f9[i - 1] is None or f20[i - 1] is None or not atr[i]:
             continue
         x = c[i]
@@ -115,6 +115,7 @@ def main(argv=None) -> int:
     ap.add_argument("--years", action="store_true", help="mostra o resultado ano a ano")
     ap.add_argument("--regime", action="store_true", help="testa filtros de mercado lateral no SMA 9×20 stop 2 ATR")
     ap.add_argument("--exits", action="store_true", help="testa saídas alternativas no SMA 9×20")
+    ap.add_argument("--robust", action="store_true", help="robustez dos parâmetros e ensembles")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
@@ -122,6 +123,8 @@ def main(argv=None) -> int:
         return regime_main(a)
     if a.exits:
         return exits_main(a)
+    if a.robust:
+        return robust_main(a)
     print("CRUZAMENTO 9 × 20 + filtro ATR · saída no cruzamento contrário · spread descontado · 1 R = 1 ATR na entrada")
     summary_rows = []
     tf_summary: list = []
@@ -286,6 +289,91 @@ def simulate_exit(c: list[dict], exit_rule, spread_def: float = 0.3) -> list[tup
             a = atr[i]
             pos = (side, x["close"], i, a, x["close"] - side * 2.0 * a, x["close"], 1.0, 0.0)
     return out
+
+
+def _year_stats(trades: list[tuple[int, float]], yrs: list[int]) -> dict:
+    import time as _t
+    tr = sorted((t, r) for t, r in trades if _t.gmtime(t).tm_year >= yrs[0])
+    by = {y: 0.0 for y in yrs}
+    for t, r in tr:
+        by[_t.gmtime(t).tm_year] += r
+    eq = pk = dd = 0.0
+    for _, r in tr:
+        eq += r
+        pk = max(pk, eq)
+        dd = max(dd, pk - eq)
+    tot = sum(by.values())
+    worst = min(by.values())
+    return {"by": by, "tot": tot, "pos": sum(v > 0 for v in by.values()), "worst": worst, "dd": dd, "n": len(tr),
+            "cof": sum(r for t, r in tr if t < CUTOFF), "dev": sum(r for t, r in tr if t >= CUTOFF),
+            "per_worst": tot / abs(worst) if worst < 0 else float("inf"), "per_dd": tot / dd if dd else float("inf")}
+
+
+def robust_main(a) -> int:
+    """1) Robustez: grade de médias rápida × lenta (SMA, stop 2 ATR, sem filtro) no ouro H1, anos densos.
+    2) Ensembles com o MESMO risco total dividido entre sistemas (cada operação vale 1/k do risco).
+    Adoção (fixada antes): lucro/|pior ano| E lucro/queda máxima maiores que o 9×20 sozinho, cofre e desenv. positivos."""
+    import time as _t
+    sym = a.symbol.split(",")[0]
+    spread_def = SPREAD.get(sym, 0.0)
+    data = {}
+    for tf in ("H1", "M30"):
+        try:
+            data[tf] = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+        except Exception as e:  # noqa: BLE001
+            print(f"  {tf}: sem dados ({e})")
+    c = data["H1"]
+    yrs = [y for y in sorted({_t.gmtime(x["time"]).tm_year for x in c})
+           if len([1 for x in c if _t.gmtime(x["time"]).tm_year == y]) > 1000]
+    runs = {}
+
+    def run(tf: str, fast: int, slow: int) -> list[tuple[int, float]]:
+        key = (tf, fast, slow)
+        if key not in runs and tf in data:
+            runs[key] = [(t, r) for t, r, _ in simulate(data[tf], "sma", 2.0, False, spread_def, fast=fast, slow=slow)]
+        return runs.get(key, [])
+
+    print(f"\n1) ROBUSTEZ DOS PARÂMETROS · {sym} H1 · SMA rápida × lenta · stop 2 ATR · {yrs[0]}–{yrs[-1]} · total em ATR (anos positivos)")
+    fasts, slows = (5, 7, 9, 12, 15), (20, 26, 30, 40, 50)
+    print("   rápida\\lenta " + "".join(f"{sl:>14}" for sl in slows))
+    grid = {}
+    for fa in fasts:
+        cells = []
+        for sl in slows:
+            st = _year_stats(run("H1", fa, sl), yrs)
+            grid[(fa, sl)] = st
+            cells.append(f"{st['tot']:+7.0f} ({st['pos']:2}/{len(yrs)})")
+        print(f"   {fa:>12} " + "".join(f"{x:>14}" for x in cells), flush=True)
+    pos_cells = sum(1 for v in grid.values() if v["tot"] > 0)
+    print(f"   → {pos_cells} de {len(grid)} combinações positivas" +
+          (" — PLATÔ: a vantagem não depende do 9×20 exato" if pos_cells >= 0.7 * len(grid) else
+           " — poucas combinações positivas: o 9×20 pode ter sido sorte"))
+
+    ensembles = {
+        "9×20 H1 sozinho (atual)": [("H1", 9, 20)],
+        "E1 · 9×20 + 12×26 + 20×50 (H1)": [("H1", 9, 20), ("H1", 12, 26), ("H1", 20, 50)],
+        "E2 · 9×20 H1 + 9×20 M30": [("H1", 9, 20), ("M30", 9, 20)],
+        "E3 · 9×20 H1 + 20×50 H1 + 9×20 M30": [("H1", 9, 20), ("H1", 20, 50), ("M30", 9, 20)],
+    }
+    print(f"\n2) ENSEMBLES · mesmo risco total dividido entre os sistemas · {yrs[0]}–{yrs[-1]} · em ATR do risco total")
+    print(f"   {'':38} " + "".join(f"{y:>6}" for y in yrs) + f" │ {'total':>6} {'anos+':>5} {'pior':>5} {'queda':>6} │ {'÷pior':>6} {'÷queda':>6} │ cofre desenv │ veredito")
+    base = None
+    for name, parts in ensembles.items():
+        k = len(parts)
+        tr = [(t, r / k) for tf, fa, sl in parts for t, r in run(tf, fa, sl)]
+        st = _year_stats(tr, yrs)
+        if base is None:
+            base, ver = st, "referência"
+        else:
+            worst_ok = (st["worst"] >= base["worst"]) if base["worst"] >= 0 else st["per_worst"] > base["per_worst"]
+            ok = worst_ok and st["per_dd"] > base["per_dd"] and st["cof"] > 0 and st["dev"] > 0
+            ver = "✔ ADOTAR" if ok else "✗"
+        pw = "∞" if st["per_worst"] == float("inf") else f"{st['per_worst']:.1f}"
+        print(f"   {name:38} " + "".join(f"{st['by'][y]:+6.0f}" for y in yrs) +
+              f" │ {st['tot']:+6.0f} {st['pos']:3}/{len(yrs):<2} {st['worst']:+5.0f} {st['dd']:6.0f} │ {pw:>6} {st['per_dd']:6.1f} │ {st['cof']:+5.0f} {st['dev']:+6.0f} │ {ver}", flush=True)
+    print("\n÷pior = lucro total ÷ perda do pior ano · ÷queda = lucro total ÷ maior queda (quanto maior, melhor a relação lucro/risco).")
+    print("Com o risco total igual, um ensemble melhor permite o MESMO lucro com menos susto — ou mais lucro com o mesmo susto.")
+    return 0
 
 
 def exits_main(a) -> int:
