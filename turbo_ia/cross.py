@@ -24,10 +24,47 @@ from .research import summary
 CUTOFF = calendar.timegm((2026, 5, 20, 0, 0, 0))
 
 
+REGIME = {
+    "ADX>20": ("adx", 20), "ADX>25": ("adx", 25), "CHOP<61.8": ("chop", 61.8), "CHOP<50": ("chop", 50),
+    "ER>0.3": ("er", 0.3), "lado da SMA200": ("sma200", None), "SMA50 inclinada": ("slope50", 1.0),
+}
+
+
+def regime_series(c: list[dict]) -> dict:
+    cl = [x["close"] for x in c]
+    s50 = ind.sma(cl, 50)
+    return {"adx": ind.adx(c, 14), "chop": ind.choppiness(c, 14), "er": ind.efficiency_ratio(cl, 20),
+            "sma200": ind.sma(cl, 200), "sma50": s50}
+
+
+def regime_ok(rs: dict, c: list[dict], atr: list, i: int, side: int, rule: Optional[str]) -> bool:
+    """True = pode entrar. Só olha o passado (valores até a vela i)."""
+    if not rule:
+        return True
+    kind, thr = REGIME[rule]
+    if kind == "adx":
+        return rs["adx"][i] is not None and rs["adx"][i] > thr
+    if kind == "chop":
+        return rs["chop"][i] is not None and rs["chop"][i] < thr
+    if kind == "er":
+        return rs["er"][i] is not None and rs["er"][i] > thr
+    if kind == "sma200":
+        m = rs["sma200"][i]
+        return m is not None and ((c[i]["close"] > m) if side > 0 else (c[i]["close"] < m))
+    if kind == "slope50":
+        a, b_ = rs["sma50"][i], rs["sma50"][i - 10] if i >= 10 else None
+        return a is not None and b_ is not None and bool(atr[i]) and ((a - b_) * side > thr * atr[i])
+    return True
+
+
 def simulate(c: list[dict], kind: str = "ema", stop_atr: Optional[float] = None, atr_filter: bool = True,
-             spread_def: float = 0.3, lo: int = 0, hi: Optional[int] = None) -> list[tuple[int, float, float]]:
-    """Devolve [(tempo da entrada, R, pontos)] — uma posição por vez."""
+             spread_def: float = 0.3, lo: int = 0, hi: Optional[int] = None, regime: Optional[str] = None,
+             rs: Optional[dict] = None) -> list[tuple[int, float, float]]:
+    """Devolve [(tempo da entrada, R, pontos)] — uma posição por vez. `regime`: filtro de lateralidade na ENTRADA
+    (a saída no cruzamento contrário acontece sempre; se o filtro barra a nova entrada, fica de fora até o próximo cruzamento)."""
     hi = hi or len(c)
+    if regime and rs is None:
+        rs = regime_series(c)
     cl = [x["close"] for x in c]
     f9 = ind.ema(cl, 9) if kind == "ema" else ind.sma(cl, 9)
     f20 = ind.ema(cl, 20) if kind == "ema" else ind.sma(cl, 20)
@@ -61,6 +98,8 @@ def simulate(c: list[dict], kind: str = "ema", stop_atr: Optional[float] = None,
             if atr_filter and (atr_avg[i] is None or atr[i] <= atr_avg[i]):
                 continue                              # mercado lateral (ATR abaixo da média): não entra
             side = 1 if up else -1
+            if not regime_ok(rs, c, atr, i, side, regime):
+                continue
             a = atr[i]
             sl = (x["close"] - side * stop_atr * a) if stop_atr else None
             pos = (side, x["close"], i, a, sl)
@@ -74,9 +113,12 @@ def main(argv=None) -> int:
     ap.add_argument("--tfs", default="M5,M15,H1")
     ap.add_argument("--bars", type=int, default=2_000_000)
     ap.add_argument("--years", action="store_true", help="mostra o resultado ano a ano")
+    ap.add_argument("--regime", action="store_true", help="testa filtros de mercado lateral no SMA 9×20 stop 2 ATR")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
+    if a.regime:
+        return regime_main(a)
     print("CRUZAMENTO 9 × 20 + filtro ATR · saída no cruzamento contrário · spread descontado · 1 R = 1 ATR na entrada")
     summary_rows = []
     for sym, tf in [(s_, t_) for s_ in a.symbol.split(",") for t_ in a.tfs.split(",")]:
@@ -148,6 +190,42 @@ def main(argv=None) -> int:
     tested = len(summary_rows)
     print(f"  ({tested} combinações testadas: espere ~{max(1, tested // 8)} 'aprovação' só por acaso — desconfie de casos isolados)")
     print("\nLeitura: R/op > 0 nas metades A e B (e no cofre) = vantagem que se repete. Spread pesa mais em gráficos curtos.")
+    return 0
+
+
+def regime_main(a) -> int:
+    """Filtros de lateralidade sobre o modo do painel (SMA 9×20, sem filtro de ATR, stop 2 ATR), ano a ano.
+    Adoção (fixada antes): mais R total E pelo menos tantos anos positivos quanto sem filtro E pior ano não pior,
+    olhando 2016+ (histórico denso) — e melhor também no cofre (antes de 20/05/2026) e no desenvolvimento."""
+    import time as _t
+    for sym in a.symbol.split(","):
+        for tf in a.tfs.split(","):
+            spread_def = SPREAD.get(sym, 0.0)
+            c = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+            rs = regime_series(c)
+            yrs = [y for y in sorted({_t.gmtime(x["time"]).tm_year for x in c})
+                   if len([1 for x in c if _t.gmtime(x["time"]).tm_year == y]) > 1000]          # anos com histórico denso
+            print(f"\nFILTROS DE LATERALIDADE · {sym} {tf} · SMA 9×20 stop 2 ATR · spread real · anos com dados densos: {yrs[0]}–{yrs[-1]}")
+            print(f"  {'filtro':18} " + "".join(f"{y:>6}" for y in yrs) + f" │ {'total':>6} {'anos+':>5} {'pior':>5} {'R/op':>6} {'ops':>5} │ cofre  desenv │ veredito")
+            base = None
+            for name in [None] + list(REGIME):
+                r = simulate(c, "sma", 2.0, False, spread_def, 0, len(c), regime=name, rs=rs)
+                by = {y: sum(x[1] for x in r if _t.gmtime(x[0]).tm_year == y) for y in yrs}
+                rr = [x for x in r if _t.gmtime(x[0]).tm_year >= yrs[0]]
+                tot, pos, worst = sum(by.values()), sum(v > 0 for v in by.values()), min(by.values())
+                cof = sum(x[1] for x in rr if x[0] < CUTOFF)
+                dev = sum(x[1] for x in rr if x[0] >= CUTOFF)
+                row = {"tot": tot, "pos": pos, "worst": worst, "cof": cof, "dev": dev}
+                if name is None:
+                    base, ver = row, "referência"
+                else:
+                    ok = (tot > base["tot"] and pos >= base["pos"] and worst >= base["worst"]
+                          and cof > base["cof"] and dev > base["dev"])
+                    ver = "✔ ADOTAR" if ok else "✗"
+                print(f"  {(name or 'sem filtro'):18} " + "".join(f"{by[y]:+6.0f}" for y in yrs) +
+                      f" │ {tot:+6.0f} {pos:3}/{len(yrs):<2} {worst:+5.0f} {tot / max(len(rr), 1):+6.3f} {len(rr):5} │ {cof:+5.0f} {dev:+6.0f} │ {ver}",
+                      flush=True)
+    print("\n7 filtros testados: uma vitória pequena pode ser sorte. Só adoto o que vencer em TUDO (total, anos, pior ano, cofre e desenvolvimento).")
     return 0
 
 

@@ -969,3 +969,30 @@ class TestValidateCross(unittest.TestCase):
         from turbo_ia.validate import expected_windows
         now = 1_764_000_000
         self.assertGreater(len(expected_windows(now, hours=tuple(range(1, 21)))), 5 * len(expected_windows(now)))
+
+
+class TestRegimeIndicators(unittest.TestCase):
+    def series(self, trend):
+        import math
+        cl = [100 + (0.5 * i if trend else 3 * math.sin(i / 2)) for i in range(120)]
+        return [{"time": i * 3600, "open": p, "high": p + 0.6, "low": p - 0.6, "close": p} for i, p in enumerate(cl)], cl
+
+    def test_trend_vs_range(self):
+        from turbo_ia import indicators as ind
+        ct, clt = self.series(True)
+        cr, clr = self.series(False)
+        self.assertGreater(ind.adx(ct)[-1], 40)                    # tendência forte
+        self.assertLess(ind.adx(cr)[-1], ind.adx(ct)[-1])
+        self.assertLess(ind.choppiness(ct)[-1], 38.2)              # tendência → CHOP baixo
+        self.assertGreater(ind.choppiness(cr)[-1], 50)             # zigue-zague → CHOP alto
+        self.assertGreater(ind.efficiency_ratio(clt)[-1], 0.9)
+        self.assertLess(ind.efficiency_ratio(clr)[-1], 0.3)
+
+    def test_filter_blocks_entry_but_not_exit(self):
+        from turbo_ia.cross import simulate
+        import math
+        cl = [100 + 10 * math.sin(i / 25) for i in range(800)]
+        c = [{"time": i * 3600, "open": p, "high": p + 0.3, "low": p - 0.3, "close": p} for i, p in enumerate(cl)]
+        base = simulate(c, "sma", 2.0, False, 0.0)
+        filt = simulate(c, "sma", 2.0, False, 0.0, regime="ADX>25")
+        self.assertLessEqual(len(filt), len(base))

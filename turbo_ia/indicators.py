@@ -215,3 +215,58 @@ def support_resistance(pivots: list[dict], price: float, k: int = 2) -> dict:
     highs = sorted({round(p["price"], 10) for p in pivots[-30:] if p["price"] > price})
     lows = sorted({round(p["price"], 10) for p in pivots[-30:] if p["price"] < price}, reverse=True)
     return {"resistance": highs[:k], "support": lows[:k]}
+
+
+def adx(candles: list[dict], n: int = 14) -> Series:
+    """ADX de Wilder: força da tendência (0–100), sem dizer a direção. < 20 costuma ser mercado sem tendência."""
+    m = len(candles)
+    out: Series = [None] * m
+    if m < 2 * n + 1:
+        return out
+    tr, pdm, ndm = [0.0] * m, [0.0] * m, [0.0] * m
+    for i in range(1, m):
+        h, l, ph, pl, pc = (_c(candles[i], "high"), _c(candles[i], "low"), _c(candles[i - 1], "high"),
+                            _c(candles[i - 1], "low"), _c(candles[i - 1], "close"))
+        up, dn = h - ph, pl - l
+        pdm[i] = up if up > dn and up > 0 else 0.0
+        ndm[i] = dn if dn > up and dn > 0 else 0.0
+        tr[i] = max(h - l, abs(h - pc), abs(l - pc))
+    atr_s, p_s, n_s = sum(tr[1:n + 1]), sum(pdm[1:n + 1]), sum(ndm[1:n + 1])
+    dx: list[float] = []
+    for i in range(n + 1, m):
+        atr_s = atr_s - atr_s / n + tr[i]
+        p_s = p_s - p_s / n + pdm[i]
+        n_s = n_s - n_s / n + ndm[i]
+        pdi = 100 * p_s / atr_s if atr_s else 0.0
+        ndi = 100 * n_s / atr_s if atr_s else 0.0
+        dx.append(100 * abs(pdi - ndi) / (pdi + ndi) if (pdi + ndi) else 0.0)
+        if len(dx) == n:
+            val = sum(dx) / n
+            out[i] = val
+        elif len(dx) > n:
+            val = (out[i - 1] * (n - 1) + dx[-1]) / n
+            out[i] = val
+    return out
+
+
+def choppiness(candles: list[dict], n: int = 14) -> Series:
+    """Choppiness Index: 100·log10(Σ TR / (máx − mín)) / log10(n). Alto (> 61,8) = lateral; baixo (< 38,2) = tendência."""
+    import math
+    tr = true_range(candles)
+    out: Series = [None] * len(candles)
+    for i in range(n, len(candles)):
+        hi = max(_c(c, "high") for c in candles[i - n + 1:i + 1])
+        lo = min(_c(c, "low") for c in candles[i - n + 1:i + 1])
+        s = sum(tr[i - n + 1:i + 1])
+        if hi > lo and s > 0:
+            out[i] = 100 * math.log10(s / (hi - lo)) / math.log10(n)
+    return out
+
+
+def efficiency_ratio(values: list[float], n: int = 20) -> Series:
+    """Efficiency Ratio de Kaufman: |deslocamento em n| ÷ soma dos movimentos. 1 = linha reta; perto de 0 = zigue-zague."""
+    out: Series = [None] * len(values)
+    for i in range(n, len(values)):
+        path = sum(abs(values[j] - values[j - 1]) for j in range(i - n + 1, i + 1))
+        out[i] = abs(values[i] - values[i - n]) / path if path else 0.0
+    return out
