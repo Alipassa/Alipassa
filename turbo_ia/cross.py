@@ -160,6 +160,7 @@ def main(argv=None) -> int:
     ap.add_argument("--exits", action="store_true", help="testa saídas alternativas no SMA 9×20")
     ap.add_argument("--robust", action="store_true", help="robustez dos parâmetros e ensembles")
     ap.add_argument("--daytrade", action="store_true", help="B3: zera às 17h50 e só entra das 09h15 às 17h30 (Brasília)")
+    ap.add_argument("--grid-tf", dest="grid_tf", default="H1", help="tempo gráfico da grade de robustez (padrão H1)")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
@@ -362,12 +363,13 @@ def robust_main(a) -> int:
     sym = a.symbol.split(",")[0]
     spread_def = SPREAD.get(sym, 0.0)
     data = {}
-    for tf in ("H1", "M30"):
+    grid_tf = getattr(a, "grid_tf", "H1") or "H1"
+    for tf in dict.fromkeys((grid_tf, "H1", "M30")):
         try:
             data[tf] = load(a, sym, tf)
         except Exception as e:  # noqa: BLE001
             print(f"  {tf}: sem dados ({e})")
-    c = data["H1"]
+    c = data[grid_tf]
     yrs = [y for y in sorted({_t.gmtime(x["time"]).tm_year for x in c})
            if len([1 for x in c if _t.gmtime(x["time"]).tm_year == y]) > 1000]
     runs = {}
@@ -379,14 +381,15 @@ def robust_main(a) -> int:
                                                          session=session_of(a))]
         return runs.get(key, [])
 
-    print(f"\n1) ROBUSTEZ DOS PARÂMETROS · {sym} H1 · SMA rápida × lenta · stop 2 ATR · {yrs[0]}–{yrs[-1]} · total em ATR (anos positivos)")
+    print(f"\n1) ROBUSTEZ DOS PARÂMETROS · {sym} {grid_tf} · SMA rápida × lenta · stop 2 ATR · {yrs[0]}–{yrs[-1]} · total em ATR (anos positivos)"
+          + (" · DAY TRADE" if getattr(a, "daytrade", False) else ""))
     fasts, slows = (5, 7, 9, 12, 15), (20, 26, 30, 40, 50)
     print("   rápida\\lenta " + "".join(f"{sl:>14}" for sl in slows))
     grid = {}
     for fa in fasts:
         cells = []
         for sl in slows:
-            st = _year_stats(run("H1", fa, sl), yrs)
+            st = _year_stats(run(grid_tf, fa, sl), yrs)
             grid[(fa, sl)] = st
             cells.append(f"{st['tot']:+7.0f} ({st['pos']:2}/{len(yrs)})")
         print(f"   {fa:>12} " + "".join(f"{x:>14}" for x in cells), flush=True)
@@ -395,6 +398,9 @@ def robust_main(a) -> int:
           (" — PLATÔ: a vantagem não depende do 9×20 exato" if pos_cells >= 0.7 * len(grid) else
            " — poucas combinações positivas: o 9×20 pode ter sido sorte"))
 
+    if grid_tf != "H1":                                   # os ensembles validados são do H1/M30; aqui só a grade importa
+        print("\n(ensembles omitidos: grade feita em " + grid_tf + ")")
+        return 0
     ensembles = {
         "9×20 H1 sozinho (atual)": [("H1", 9, 20)],
         "E1 · 9×20 + 12×26 + 20×50 (H1)": [("H1", 9, 20), ("H1", 12, 26), ("H1", 20, 50)],
