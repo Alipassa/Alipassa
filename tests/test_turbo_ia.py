@@ -974,7 +974,7 @@ class TestValidateCross(unittest.TestCase):
 class TestRegimeIndicators(unittest.TestCase):
     def series(self, trend):
         import math
-        cl = [100 + (0.5 * i if trend else 3 * math.sin(i / 2)) for i in range(120)]
+        cl = [100 + (0.5 * i if trend else (1.5 if i % 2 else -1.5) + 0.3 * math.sin(i / 7)) for i in range(120)]
         return [{"time": i * 3600, "open": p, "high": p + 0.6, "low": p - 0.6, "close": p} for i, p in enumerate(cl)], cl
 
     def test_trend_vs_range(self):
