@@ -121,6 +121,7 @@ def main(argv=None) -> int:
         return regime_main(a)
     print("CRUZAMENTO 9 × 20 + filtro ATR · saída no cruzamento contrário · spread descontado · 1 R = 1 ATR na entrada")
     summary_rows = []
+    tf_summary: list = []
     for sym, tf in [(s_, t_) for s_ in a.symbol.split(",") for t_ in a.tfs.split(",")]:
         spread_def = SPREAD.get(sym, 0.0)
         try:
@@ -164,6 +165,19 @@ def main(argv=None) -> int:
                     ok = (ra and rb and sum(ra) > 0 and sum(rb) > 0 and (rc_m is None or rc_m > 0) and s["n"] >= 30)
                     summary_rows.append((sym, tf, tag, ok, s["exp"], rc_m))
         if a.years:
+            # resumo do modo do painel (SMA 9×20 sem filtro, stop 2 ATR) para comparar tempos gráficos
+            rp = simulate(c, "sma", 2.0, False, spread_def, 0, n)
+            import time as _tt
+            dense = [y for y in sorted({_tt.gmtime(x["time"]).tm_year for x in c})
+                     if len([1 for x in c if _tt.gmtime(x["time"]).tm_year == y]) > 1000]
+            if dense:
+                by = {y: sum(x[1] for x in rp if _tt.gmtime(x[0]).tm_year == y) for y in dense}
+                rd = [x for x in rp if _tt.gmtime(x[0]).tm_year >= dense[0]]
+                months = max(days(next(i for i, x in enumerate(c) if _tt.gmtime(x["time"]).tm_year >= dense[0]), n) / 30, 1)
+                sp_c = [x["spread"] for x in c if x.get("spread")]
+                tf_summary.append((sym, tf, dense[0], dense[-1], sum(by.values()), sum(v > 0 for v in by.values()), len(dense),
+                                   min(by.values()), sum(x[1] for x in rd) / max(len(rd), 1), len(rd) / months,
+                                   sum(x[1] for x in rd) / months, sum(x[1] for x in rd if x[0] < CUTOFF), sum(x[1] for x in rd if x[0] >= CUTOFF)))
             print(f"    ano a ano ({sym} {tf}) — R por operação · total R · operações:")
             import time as _t
             yrs = sorted({_t.gmtime(x["time"]).tm_year for x in c})
@@ -181,6 +195,18 @@ def main(argv=None) -> int:
                     else:
                         cells.append("—")
                 print(f"      {tag:28}" + "".join(f"{x:>16}" for x in cells) + f"   → {pos_years}/{len([1 for x in cells if x != '—'])} anos positivos")
+    if tf_summary:
+        print("\nCOMPARAÇÃO DE TEMPOS GRÁFICOS · modo do painel (SMA 9×20, stop 2 ATR, sem filtro) · anos com dados densos")
+        print("  (com risco de 2 % no stop de 2 ATR, 1 ATR ≈ 1 % do saldo → 'ATR/mês' ≈ '% ao mês' em qualquer gráfico)")
+        print(f"  {'mercado':8} {'gráfico':7} {'anos':>9} │ {'total':>7} {'anos+':>6} {'pior ano':>8} │ {'ATR/op':>7} {'ops/mês':>7} {'ATR/mês':>8} │ {'cofre':>6} {'desenv':>6}")
+        for sym, tf, y0, y1, tot, pos, ny, worst, rop, opm, rpm, cof, dev in tf_summary:
+            print(f"  {sym:8} {tf:7} {y0}-{str(y1)[2:]:>2} │ {tot:+7.0f} {pos:3}/{ny:<2} {worst:+8.0f} │ {rop:+7.3f} {opm:7.1f} {rpm:+8.2f} │ {cof:+6.0f} {dev:+6.0f}")
+        longos = [r for r in tf_summary if r[6] >= 5]
+        if longos:
+            best = max(longos, key=lambda r: (r[5] / r[6], r[10]))
+            print(f"  → mais consistente (proporção de anos positivos) e depois mais lucrativo, entre os com ≥ 5 anos: {best[1]}")
+        else:
+            print("  → histórico curto demais (< 5 anos) para escolher — rode no MT5 da Pepperstone")
     good = [r for r in summary_rows if r[3]]
     print("\nPOSITIVO EM TODOS OS PERÍODOS (A, B" + (" e cofre" if any(r[5] is not None for r in summary_rows) else "") + "):")
     for sym, tf, tag, _, e, rc in good:
