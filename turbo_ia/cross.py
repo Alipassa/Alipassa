@@ -114,11 +114,14 @@ def main(argv=None) -> int:
     ap.add_argument("--bars", type=int, default=2_000_000)
     ap.add_argument("--years", action="store_true", help="mostra o resultado ano a ano")
     ap.add_argument("--regime", action="store_true", help="testa filtros de mercado lateral no SMA 9×20 stop 2 ATR")
+    ap.add_argument("--exits", action="store_true", help="testa saídas alternativas no SMA 9×20")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
     if a.regime:
         return regime_main(a)
+    if a.exits:
+        return exits_main(a)
     print("CRUZAMENTO 9 × 20 + filtro ATR · saída no cruzamento contrário · spread descontado · 1 R = 1 ATR na entrada")
     summary_rows = []
     tf_summary: list = []
@@ -217,6 +220,105 @@ def main(argv=None) -> int:
         else:
             print("  → histórico curto demais (< 5 anos) para escolher — rode no MT5 da Pepperstone")
 
+    return 0
+
+
+EXITS = {
+    "cruzamento contrário (atual)": "cross",
+    "fechou do outro lado da 9": "ma9",
+    "stop móvel 3 ATR": ("trail", 3.0),
+    "stop móvel 2 ATR": ("trail", 2.0),
+    "zero a zero em +2 ATR": ("be", 2.0),
+    "metade em +3 ATR": ("half", 3.0),
+}
+
+
+def simulate_exit(c: list[dict], exit_rule, spread_def: float = 0.3) -> list[tuple[int, float, float]]:
+    """Entrada = modo do painel (SMA 9×20, sem filtro, stop inicial 2 ATR). Saídas alternativas — o cruzamento contrário
+    sempre fecha (e vira a mão) se vier antes. Stop móvel/zero a zero usam só velas fechadas e valem a partir da vela
+    seguinte; stop sempre antes de qualquer ganho dentro da mesma vela. Devolve [(tempo, R em ATR, pontos)]."""
+    cl = [x["close"] for x in c]
+    f9, f20 = ind.sma(cl, 9), ind.sma(cl, 20)
+    atr = ind.atr(c, 14)
+    out: list[tuple[int, float, float]] = []
+    pos = None
+    kind = exit_rule if isinstance(exit_rule, str) else exit_rule[0]
+    par = None if isinstance(exit_rule, str) else exit_rule[1]
+
+    def close_pos(i: int, px: float) -> None:
+        nonlocal pos
+        side, e, k, a, sl, peak, frac, banked = pos
+        pts = banked + frac * (px - e) * side - (c[k].get("spread") or spread_def)
+        out.append((c[k]["time"], pts / a, pts))
+        pos = None
+
+    for i in range(70, len(c)):
+        if f9[i] is None or f20[i] is None or f9[i - 1] is None or f20[i - 1] is None or not atr[i]:
+            continue
+        x = c[i]
+        if pos:
+            side, e, k, a, sl, peak, frac, banked = pos
+            if (x["low"] <= sl) if side > 0 else (x["high"] >= sl):              # 1) stop (fixo, zero a zero ou móvel)
+                close_pos(i, sl)
+            else:
+                if kind == "half" and frac == 1.0:                                # 2) parcial no alvo
+                    lvl = e + side * par * a
+                    if (x["high"] >= lvl) if side > 0 else (x["low"] <= lvl):
+                        banked, frac = 0.5 * par * a, 0.5
+                peak = max(peak, x["high"]) if side > 0 else min(peak, x["low"])
+                new_sl = sl
+                if kind == "trail":                                               # 3) stop móvel pela vela fechada
+                    t = peak - side * par * atr[i]
+                    new_sl = max(sl, t) if side > 0 else min(sl, t)
+                if kind == "be" and ((peak - e) * side >= par * a):
+                    new_sl = max(sl, e) if side > 0 else min(sl, e)
+                if kind == "half" and frac < 1.0:
+                    new_sl = max(sl, e) if side > 0 else min(sl, e)
+                pos = (side, e, k, a, new_sl, peak, frac, banked)
+                if kind == "ma9" and ((x["close"] < f9[i]) if side > 0 else (x["close"] > f9[i])):
+                    close_pos(i, x["close"])                                      # 4) fechou do outro lado da média 9
+        up = f9[i - 1] <= f20[i - 1] and f9[i] > f20[i]
+        dn = f9[i - 1] >= f20[i - 1] and f9[i] < f20[i]
+        if pos and ((pos[0] > 0 and dn) or (pos[0] < 0 and up)):
+            close_pos(i, x["close"])                                              # 5) cruzamento contrário
+        if pos is None and (up or dn):
+            side = 1 if up else -1
+            a = atr[i]
+            pos = (side, x["close"], i, a, x["close"] - side * 2.0 * a, x["close"], 1.0, 0.0)
+    return out
+
+
+def exits_main(a) -> int:
+    """Compara saídas no modo do painel, ano a ano. Adoção (fixada antes): vencer a saída atual em lucro total, anos
+    positivos, pior ano, cofre (antes de 20/05/2026) e desenvolvimento (depois), nos anos com dados densos."""
+    import time as _t
+    for sym in a.symbol.split(","):
+        for tf in a.tfs.split(","):
+            spread_def = SPREAD.get(sym, 0.0)
+            c = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
+            yrs = [y for y in sorted({_t.gmtime(x["time"]).tm_year for x in c})
+                   if len([1 for x in c if _t.gmtime(x["time"]).tm_year == y]) > 1000]
+            print(f"\nTESTE DE SAÍDAS · {sym} {tf} · entrada SMA 9×20 (stop inicial 2 ATR) · spread real · {yrs[0]}–{yrs[-1]}")
+            print(f"  {'saída':30} " + "".join(f"{y:>6}" for y in yrs) +
+                  f" │ {'total':>6} {'anos+':>5} {'pior':>5} {'ATR/op':>7} {'acerto':>6} {'ops':>5} │ cofre desenv │ veredito")
+            base = None
+            for name, rule in EXITS.items():
+                r = simulate_exit(c, rule, spread_def)
+                rr = [x for x in r if _t.gmtime(x[0]).tm_year >= yrs[0]]
+                by = {y: sum(x[1] for x in rr if _t.gmtime(x[0]).tm_year == y) for y in yrs}
+                tot, pos, worst = sum(by.values()), sum(v > 0 for v in by.values()), min(by.values())
+                cof = sum(x[1] for x in rr if x[0] < CUTOFF)
+                dev = sum(x[1] for x in rr if x[0] >= CUTOFF)
+                win = sum(x[1] > 0 for x in rr) / max(len(rr), 1)
+                if base is None:
+                    base, ver = {"tot": tot, "pos": pos, "worst": worst, "cof": cof, "dev": dev}, "referência"
+                else:
+                    ok = (tot > base["tot"] and pos >= base["pos"] and worst >= base["worst"] and cof > base["cof"] and dev > base["dev"])
+                    ver = "✔ ADOTAR" if ok else "✗"
+                print(f"  {name:30} " + "".join(f"{by[y]:+6.0f}" for y in yrs) +
+                      f" │ {tot:+6.0f} {pos:3}/{len(yrs):<2} {worst:+5.0f} {tot / max(len(rr), 1):+7.3f} {win:6.0%} {len(rr):5} │ {cof:+5.0f} {dev:+6.0f} │ {ver}",
+                      flush=True)
+    print("\n5 saídas alternativas testadas: só adoto a que vencer em TUDO (total, anos, pior ano, cofre e desenvolvimento).")
     return 0
 
 

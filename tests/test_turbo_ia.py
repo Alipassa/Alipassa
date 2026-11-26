@@ -996,3 +996,18 @@ class TestRegimeIndicators(unittest.TestCase):
         base = simulate(c, "sma", 2.0, False, 0.0)
         filt = simulate(c, "sma", 2.0, False, 0.0, regime="ADX>25")
         self.assertLessEqual(len(filt), len(base))
+
+
+class TestExits(unittest.TestCase):
+    def test_exit_rules(self):
+        import math
+        from turbo_ia.cross import EXITS, simulate_exit
+        cl = [100 + 10 * math.sin(i / 25) for i in range(800)]
+        c = [{"time": i * 3600, "open": p, "high": p + 0.3, "low": p - 0.3, "close": p} for i, p in enumerate(cl)]
+        res = {n: simulate_exit(c, r, 0.0) for n, r in EXITS.items()}
+        self.assertTrue(all(len(v) > 3 for v in res.values()))
+        base = res["cruzamento contrário (atual)"]
+        self.assertGreater(sum(x[2] for x in base), 0)
+        self.assertTrue(all(x[1] >= -2.0 - 1e-9 for v in res.values() for x in v))      # nunca perde mais que o stop inicial
+        half = res["metade em +3 ATR"]
+        self.assertEqual(len(half), len(base))                                          # mesmas entradas
