@@ -195,6 +195,15 @@ def main(argv=None) -> int:
                     else:
                         cells.append("—")
                 print(f"      {tag:28}" + "".join(f"{x:>16}" for x in cells) + f"   → {pos_years}/{len([1 for x in cells if x != '—'])} anos positivos")
+    good = [r for r in summary_rows if r[3]]
+    print("\nPOSITIVO EM TODOS OS PERÍODOS (A, B" + (" e cofre" if any(r[5] is not None for r in summary_rows) else "") + "):")
+    for sym, tf, tag, _, e, rc in good:
+        print(f"  ✔ {sym:10} {tf:4} {tag:30} {e:+.3f} R/op" + (f" · cofre {rc:+.1f} R/mês" if rc is not None else ""))
+    if not good:
+        print("  nenhum")
+    tested = len(summary_rows)
+    print(f"  ({tested} combinações testadas: espere ~{max(1, tested // 8)} 'aprovação' só por acaso — desconfie de casos isolados)")
+    print("\nLeitura: R/op > 0 nas metades A e B (e no cofre) = vantagem que se repete. Spread pesa mais em gráficos curtos.")
     if tf_summary:
         print("\nCOMPARAÇÃO DE TEMPOS GRÁFICOS · modo do painel (SMA 9×20, stop 2 ATR, sem filtro) · anos com dados densos")
         print("  (com risco de 2 % no stop de 2 ATR, 1 ATR ≈ 1 % do saldo → 'ATR/mês' ≈ '% ao mês' em qualquer gráfico)")
@@ -207,15 +216,7 @@ def main(argv=None) -> int:
             print(f"  → mais consistente (proporção de anos positivos) e depois mais lucrativo, entre os com ≥ 5 anos: {best[1]}")
         else:
             print("  → histórico curto demais (< 5 anos) para escolher — rode no MT5 da Pepperstone")
-    good = [r for r in summary_rows if r[3]]
-    print("\nPOSITIVO EM TODOS OS PERÍODOS (A, B" + (" e cofre" if any(r[5] is not None for r in summary_rows) else "") + "):")
-    for sym, tf, tag, _, e, rc in good:
-        print(f"  ✔ {sym:10} {tf:4} {tag:30} {e:+.3f} R/op" + (f" · cofre {rc:+.1f} R/mês" if rc is not None else ""))
-    if not good:
-        print("  nenhum")
-    tested = len(summary_rows)
-    print(f"  ({tested} combinações testadas: espere ~{max(1, tested // 8)} 'aprovação' só por acaso — desconfie de casos isolados)")
-    print("\nLeitura: R/op > 0 nas metades A e B (e no cofre) = vantagem que se repete. Spread pesa mais em gráficos curtos.")
+
     return 0
 
 
