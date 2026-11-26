@@ -1,4 +1,5 @@
 import random
+import urllib.error
 import unittest
 from types import SimpleNamespace
 
@@ -530,3 +531,127 @@ class TestDailyBrake(unittest.TestCase):
         self.assertEqual(s.st.day_pnl, 0.0)
         self.assertFalse(s._daily_brake())
         self.assertTrue(s.st.running)                 # o freio não encerra a sessão
+
+
+class TestAudit(unittest.TestCase):
+    """Auditoria 26/11/2026: um teste por falha corrigida."""
+
+    def test_offset_ignores_stale_tick_and_uses_cache(self):
+        import os
+        import tempfile
+        from turbo_ia import broker as br
+        old = br.OFFSET_CACHE
+        br.OFFSET_CACHE = os.path.join(tempfile.mkdtemp(), "off.json")
+        try:
+            now = 1_700_000_000
+            fresh = SimpleNamespace(symbol_info_tick=lambda s: SimpleNamespace(time=now + 2 * 3600 + 20))
+            stale = SimpleNamespace(symbol_info_tick=lambda s: SimpleNamespace(time=now - 40 * 3600 + 7 * 60))  # fim de semana
+            self.assertIsNone(br.fresh_offset(stale, now))
+            self.assertEqual(br.detect_offset(stale, now), 0.0)        # sem cache ainda
+            self.assertEqual(br.detect_offset(fresh, now), 2.0)        # grava o bom
+            self.assertEqual(br.detect_offset(stale, now), 2.0)        # fim de semana: usa o último bom, não 0
+        finally:
+            br.OFFSET_CACHE = old
+
+    def test_mt5_calls_are_locked_and_constants_pass(self):
+        from turbo_ia.broker import _LockedMT5
+        import threading
+        lk = threading.RLock()
+        m = _LockedMT5(FakeMT5(), lk)
+        self.assertEqual(m.TRADE_RETCODE_DONE, 10009)
+        self.assertEqual(m.symbol_info_tick("X").bid, 100.0)
+
+    def test_closed_profit_waits_for_exit_deal(self):
+        fm = FakeMT5()
+        fm.DEAL_ENTRY_IN, fm.DEAL_ENTRY_OUT = 0, 1
+        deals = [SimpleNamespace(entry=0, profit=0.0, commission=-0.7, swap=0.0)]
+        fm.history_deals_get = lambda position=None: deals
+        b = MT5Broker(mt5=fm)
+        self.assertIsNone(b.closed_profit(1))                      # antes: devolvia -0,70 e contava como perda
+        deals.append(SimpleNamespace(entry=1, profit=150.0, commission=-0.7, swap=0.0))
+        self.assertAlmostEqual(b.closed_profit(1), 148.6)
+
+    def test_from_dict_int_fields_accept_decimals(self):
+        self.assertEqual(IAConfig.from_dict({"duration_candles": "1.5", "max_trades": "3"}).duration_candles, 1)
+
+    def test_start_adopts_open_ai_position(self):
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        r = b.open("XAUUSD", "SELL", 0.05, None, None)
+        s = IASession(b, forward=ForwardLog(None))
+        s.start(IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2"))
+        s.stop()
+        self.assertEqual(s.st.open_ticket, r["ticket"])
+        self.assertTrue(any("já estava aberta" in l["msg"] for l in s.st.log))
+
+    def _forced_signal_session(self, spread):
+        from turbo_ia.analysis import Analysis
+        import turbo_ia.engine as eng
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        price = b.tick("XAUUSD")[0]
+        b.tick = lambda sym: (price, price + spread)
+        s = IASession(b, forward=ForwardLog(None))
+        s.start(IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2", risk_pct=2, daily_loss_pct=0))
+        s._stop.set()
+        s.st.running, s.st.last_bar = True, 0
+        orig = eng.analyze
+        eng.analyze = lambda *a, **k: Analysis("SELL", 80, price, 1.0, price + 1.0, price - 3.0, mode="reversao", label="x")
+        try:
+            s.step()
+        finally:
+            eng.analyze = orig
+        return s, b
+
+    def test_normal_spread_trades_with_live_price(self):
+        s, b = self._forced_signal_session(0.05)
+        self.assertEqual(len(b._pos), 1)
+        risk = abs(b._pos[0]["sl"] - b._pos[0]["price_open"]) * b._pos[0]["volume"]
+        self.assertLessEqual(risk, 1000 * 0.02 + 0.5)
+
+    def test_abnormal_spread_skips(self):
+        s, b = self._forced_signal_session(0.5)                    # spread 0,5 com stop de 1,0
+        self.assertEqual(b._pos, [])
+        self.assertTrue(any("spread anormal" in l["msg"] for l in s.st.log))
+
+    def test_daily_result_survives_restart(self):
+        import os
+        import tempfile
+        d = tempfile.mkdtemp()
+        f = ForwardLog(os.path.join(d, "reg.jsonl"))
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        s1 = IASession(b, forward=f)
+        s1.cfg = IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2")
+        s1._roll_day()
+        s1.st.day_pnl = -80.0
+        s1._save_day()
+        s2 = IASession(b, forward=f)                               # painel reiniciado no mesmo dia
+        s2.cfg = IAConfig(mode="reversao", symbol="XAUUSD", timeframe="M2", daily_loss_pct=10)
+        s2._roll_day()
+        self.assertEqual(s2.st.day_pnl, -80.0)
+        s2.st.day_pnl -= 25
+        self.assertTrue(s2._daily_brake())                         # −105 de 1000 passa do freio de 10 %
+
+    def test_server_rejects_foreign_host_header(self):
+        import json
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+        from turbo_ia.server import App, make_handler
+        b = PaperBroker(seed=1)
+        b.connect()
+        app = App(b)
+        app.session.forward = ForwardLog(None)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{srv.server_port}/api/status"
+            self.assertEqual(urllib.request.urlopen(url).status, 200)
+            req = urllib.request.Request(url, headers={"Host": "evil.example.com"})
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req)
+            self.assertEqual(e.exception.code, 403)
+        finally:
+            srv.shutdown()
+            srv.server_close()

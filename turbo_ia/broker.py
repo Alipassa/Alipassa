@@ -7,6 +7,7 @@ Interface comum:
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
@@ -176,23 +177,49 @@ class PaperBroker:
 
 
 # ---------------------------------------------------------------------------------------------------- fuso do servidor
-def detect_offset(mt5: Any, now: Optional[float] = None) -> float:
-    """Candles do MT5 vêm no horário do SERVIDOR. Compara o tick mais recente com o relógio UTC; TURBO_IA_UTC_OFFSET força."""
-    forced = os.environ.get("TURBO_IA_UTC_OFFSET") or os.environ.get("MT5_UTC_OFFSET_HOURS")
-    if forced not in (None, ""):
-        return float(forced)
+OFFSET_CACHE = os.environ.get("TURBO_IA_OFFSET_CACHE") or os.path.join(os.path.expanduser("~"), ".turbo_ia_offset.json")
+
+
+def fresh_offset(mt5: Any, now: Optional[float] = None) -> Optional[float]:
+    """Fuso do servidor pelo tick MAIS RECENTE entre vários símbolos — só quando o tick é fresco (≤ 15 min).
+    Fim de semana / mercado parado → None (um tick velho daria um fuso errado)."""
     ts = 0.0
-    for sym in ("EURUSD", "XAUUSD", "GBPUSD", "USDJPY", "Volatility 10 Index"):
+    for sym in ("EURUSD", "XAUUSD", "GBPUSD", "USDJPY", "AUDUSD", "BTCUSD", "Volatility 10 Index"):
         try:
             t = mt5.symbol_info_tick(sym)
             ts = max(ts, float(getattr(t, "time", 0) or 0))
         except Exception:  # noqa: BLE001
             continue
     if not ts:
-        return 0.0
+        return None
     raw = (ts - (now if now is not None else time.time())) / 3600
     off = round(raw)
-    return float(off) if abs(raw - off) < 0.25 and abs(off) <= 14 else 0.0
+    return float(off) if abs(raw - off) < 0.25 and abs(off) <= 14 else None
+
+
+def _cache_offset(off: Optional[float] = None) -> Optional[float]:
+    try:
+        if off is None:
+            with open(OFFSET_CACHE, encoding="utf-8") as f:
+                return float(json.load(f)["offset"])
+        with open(OFFSET_CACHE, "w", encoding="utf-8") as f:
+            json.dump({"offset": off, "t": time.time()}, f)
+    except Exception:  # noqa: BLE001
+        return None
+    return off
+
+
+def detect_offset(mt5: Any, now: Optional[float] = None) -> float:
+    """Candles do MT5 vêm no horário do SERVIDOR. Ordem: TURBO_IA_UTC_OFFSET → tick fresco (e guarda) → último valor guardado → 0."""
+    forced = os.environ.get("TURBO_IA_UTC_OFFSET") or os.environ.get("MT5_UTC_OFFSET_HOURS")
+    if forced not in (None, ""):
+        return float(forced)
+    off = fresh_offset(mt5, now)
+    if off is not None:
+        _cache_offset(off)
+        return off
+    cached = _cache_offset()
+    return cached if cached is not None else 0.0
 
 
 def us_dst(utc_ts: float) -> bool:
@@ -217,6 +244,24 @@ def server_to_utc(ts: int, offset_now: float) -> int:
 
 
 # ---------------------------------------------------------------------------------------------------- MT5
+class _LockedMT5:
+    """Embrulha o módulo MetaTrader5: toda função passa pelo mesmo cadeado (o pacote não é seguro entre threads)."""
+
+    def __init__(self, mod: Any, lock: Any) -> None:
+        self._mod, self._lock = mod, lock
+
+    def __getattr__(self, name: str) -> Any:
+        v = getattr(self._mod, name)
+        if not callable(v):
+            return v
+        lock = self._lock
+
+        def call(*a: Any, **k: Any) -> Any:
+            with lock:
+                return v(*a, **k)
+        return call
+
+
 class MT5Broker:
     """MetaTrader 5 via pacote oficial `MetaTrader5` (Windows, terminal aberto e logado).
 
@@ -234,7 +279,9 @@ class MT5Broker:
                 import MetaTrader5 as mt5  # type: ignore
             except Exception as e:  # noqa: BLE001
                 raise BrokerError("pacote MetaTrader5 não instalado — no Windows: pip install MetaTrader5") from e
-        self.mt5 = mt5
+        self.lock = threading.RLock()
+        self.mt5 = _LockedMT5(mt5, self.lock)
+        self._offset_checked = 0.0
         from .settings import clean_path, mt5_path
         self.path = clean_path(path) or mt5_path()
         lg = login or os.environ.get("MT5_LOGIN")
@@ -243,7 +290,6 @@ class MT5Broker:
         self.server = server or os.environ.get("MT5_SERVER")
         self.allow_real = allow_real if allow_real is not None else os.environ.get("TURBO_IA_ALLOW_REAL") == "1"
         self.deviation = deviation
-        self.lock = threading.RLock()
 
     def connect(self) -> None:
         kw: dict[str, Any] = {}
@@ -257,10 +303,18 @@ class MT5Broker:
         self.utc_offset = self.detect_offset()
 
     def detect_offset(self) -> float:
+        self._offset_checked = time.time()
         return detect_offset(self.mt5)
 
     def update(self) -> None:
-        pass
+        """A cada 10 min confere o fuso do servidor (muda 2× por ano no horário de verão dos EUA, com o painel ligado)."""
+        if time.time() - self._offset_checked < 600 or os.environ.get("TURBO_IA_UTC_OFFSET"):
+            return
+        self._offset_checked = time.time()
+        off = fresh_offset(self.mt5)
+        if off is not None and off != self.utc_offset:
+            self.utc_offset = off
+            _cache_offset(off)
 
     def _is_demo(self, acc: Any) -> bool:
         return getattr(acc, "trade_mode", None) == getattr(self.mt5, "ACCOUNT_TRADE_MODE_DEMO", 0)
@@ -380,8 +434,9 @@ class MT5Broker:
 
     def closed_profit(self, ticket: int) -> Optional[float]:
         deals = self.mt5.history_deals_get(position=ticket) or []
-        if not deals:
-            return None
+        outs = {getattr(self.mt5, "DEAL_ENTRY_OUT", 1), getattr(self.mt5, "DEAL_ENTRY_INOUT", 2), getattr(self.mt5, "DEAL_ENTRY_OUT_BY", 3)}
+        if not deals or not any(getattr(d, "entry", None) in outs for d in deals):
+            return None                           # só o negócio de entrada chegou: o fechamento ainda não está no histórico
         return float(sum(getattr(d, "profit", 0.0) + getattr(d, "commission", 0.0) + getattr(d, "swap", 0.0) for d in deals))
 
 

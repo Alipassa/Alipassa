@@ -237,6 +237,29 @@ proteção desligada e limite de perda = metade do saldo. Simulação (60 dias d
 Supõe que a vantagem do histórico se repete — os horários saíram desses mesmos dados. Se a vantagem real for 0,2 R menor,
 o mês típico com 5 % fica perto do zero a zero e a queda no caminho continua grande. Confirme em DEMO antes.
 
+## Auditoria (26/11/2026)
+
+| # | Falha | Risco | Correção |
+| --- | --- | --- | --- |
+| 1 | Painel reiniciado com operação aberta: a IA não sabia dela e podia abrir outra (risco dobrado) | alto | ao iniciar, adota a posição da IA que já está aberta |
+| 2 | Painel ligado no fim de semana / mercado parado: fuso do servidor detectado como 0 → horários errados a semana toda | alto | só aceita tick fresco; senão usa o último fuso bom guardado em `~/.turbo_ia_offset.json` |
+| 3 | Troca de horário de verão dos EUA (mar/nov) com o painel ligado: fuso ficava velho → opera 1 h fora | alto | re-detecta o fuso a cada 10 min |
+| 4 | Resultado lido antes do negócio de fechamento chegar ao histórico → contava só a comissão (perda falsa) | médio | espera o negócio de saída |
+| 5 | Painel e IA chamando o MT5 ao mesmo tempo (o pacote não é seguro entre threads) | médio | todas as chamadas passam por um cadeado |
+| 6 | Sem proteção contra spread anormal (notícia, abertura) | médio | pula a entrada se o spread > 30 % do stop |
+| 7 | Freio diário "esquecia" as perdas do dia ao reiniciar o painel | médio | resultado do dia gravado em `~/.turbo_ia_dia.json` |
+| 8 | Lote calculado pelo fechamento da vela, não pelo preço de execução (25/11: 5,2 % em vez de 5 %) | baixo | lote pelo bid/ask do momento; pula se o preço já passou do stop |
+| 9 | Servidor aceitava Host externo (DNS rebinding poderia ler o saldo) | baixo | só atende 127.0.0.1/localhost |
+| 10 | Número decimal num campo inteiro derrubava o início da IA | baixo | conversão tolerante |
+
+Conferido e correto: só velas fechadas (sem olhar o futuro); entrada, hora, esticada, stop e alvo ao vivo iguais aos do
+backtest; conta real bloqueada; a IA só mexe nas posições com o número mágico dela; SL/TP ficam no servidor da
+corretora (protegem mesmo com o PC desligado); senha não aparece em registro.
+
+Riscos que continuam: o registro de acerto mede pelas velas (sem spread/derrapagem reais — confira o lucro no MT5);
+o spread de cada vela no MT5 é o mínimo da vela (backtest levemente otimista); o PC, o MT5 e a janela preta precisam
+estar ligados nas janelas.
+
 ## Segurança
 
 - O servidor só escuta em `127.0.0.1` e recusa POSTs de outras origens.

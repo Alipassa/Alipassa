@@ -90,7 +90,13 @@ def make_handler(app: App):
             n = int(self.headers.get("Content-Length") or 0)
             return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
+        def _local_host(self) -> bool:
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+            return host in ("127.0.0.1", "localhost", "")
+
         def do_GET(self):  # noqa: N802
+            if not self._local_host():
+                return self._json({"error": "acesso só pelo próprio computador"}, 403)
             u = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             try:
@@ -118,6 +124,8 @@ def make_handler(app: App):
 
         def do_POST(self):  # noqa: N802
             # o painel só aceita chamadas da própria origem (evita outro site disparar ordens no seu MT5)
+            if not self._local_host():
+                return self._json({"error": "acesso só pelo próprio computador"}, 403)
             origin = self.headers.get("Origin")
             if origin and urlparse(origin).hostname not in ("127.0.0.1", "localhost"):
                 return self._json({"error": "origem não permitida"}, 403)

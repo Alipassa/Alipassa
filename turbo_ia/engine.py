@@ -8,6 +8,8 @@ Ciclo (a cada `poll` segundos):
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -52,7 +54,12 @@ class IAConfig:
         for k, v in (d or {}).items():
             if hasattr(c, k) and v is not None and v != "":
                 cur = getattr(c, k)
-                setattr(c, k, type(cur)(v) if not isinstance(cur, bool) else (v in (True, "true", "1", 1, "on")))
+                if isinstance(cur, bool):
+                    setattr(c, k, v in (True, "true", "1", 1, "on"))
+                elif isinstance(cur, int):
+                    setattr(c, k, int(float(v)))           # "1.5" no campo de velas não derruba o servidor
+                else:
+                    setattr(c, k, type(cur)(v))
         return c
 
 
@@ -114,10 +121,19 @@ class IASession:
                 eq = 0.0
             self.st = SessionState(running=True, started_at=time.time(), start_equity=eq)
             self._stop.clear()
+            try:
+                mine = sorted(self.broker.positions(cfg.symbol), key=lambda p: p.get("time", 0))
+            except Exception:  # noqa: BLE001
+                mine = []
+            if mine:                                   # painel reiniciado com operação aberta: acompanha em vez de abrir outra
+                p = mine[-1]
+                self.st.open_ticket, self.st.open_side = p["ticket"], p["side"]
         lim = self.limits()
         self.log(f"IA iniciada · {cfg.symbol} {cfg.timeframe} · risco {cfg.risk_pct:g}%/op · saldo inicial {eq:.2f} · "
                  f"meta {('+%.2f' % lim['target']) if lim['target'] else 'nenhuma'} · "
                  f"limite de perda {('-%.2f' % lim['loss']) if lim['loss'] else 'nenhum'}", "start")
+        if self.st.open_ticket is not None:
+            self.log(f"posição #{self.st.open_ticket} da IA já estava aberta — acompanhando até fechar (nenhuma nova entrada antes disso)", "start")
         self._thread = threading.Thread(target=self._run, name="turbo-ia", daemon=True)
         self._thread.start()
         return {"ok": True}
@@ -200,7 +216,15 @@ class IASession:
                 self.log("risco % exige stop — operação pulada", "error")
                 return
             eq = float(b.info().get("equity") or 0)
-            volume, risk_money, note = lot_for_risk(b.spec(c.symbol), a.price, a.sl, eq, min(c.risk_pct, 10.0))
+            bid, ask = b.tick(c.symbol)
+            fill = ask if a.signal == "BUY" else bid
+            if (a.signal == "BUY" and fill <= a.sl) or (a.signal == "SELL" and fill >= a.sl):
+                self.log(f"preço já passou do stop ({fill} × SL {a.sl}) — operação pulada", "skip")
+                return
+            if (ask - bid) > 0.3 * abs(fill - a.sl):
+                self.log(f"spread anormal agora ({ask - bid:.2f} > 30 % do stop {abs(fill - a.sl):.2f}) — operação pulada", "skip")
+                return
+            volume, risk_money, note = lot_for_risk(b.spec(c.symbol), fill, a.sl, eq, min(c.risk_pct, 10.0))
             if not volume:
                 self.log(note, "skip")
                 return
@@ -255,20 +279,50 @@ class IASession:
                     ws[str(w)] = ws.get(str(w), 0) + 1
                     ws[f"{w}|{self.st.open_side}"] = ws.get(f"{w}|{self.st.open_side}", 0) + 1
             self.st.history.append({"ticket": t, "profit": round(profit, 2), "t": time.time()})
+        self._save_day()
         self.log(f"#{t} fechada: {profit:+.2f} · sessão {self.st.pnl:+.2f}", "win" if profit >= 0 else "loss")
 
+    def _day_file(self) -> Optional[str]:
+        if getattr(self.forward, "path", None) is None:          # testes sem disco
+            return None
+        return os.path.join(os.path.dirname(self.forward.path) or ".", ".turbo_ia_dia.json")
+
+    def _save_day(self) -> None:
+        f = self._day_file()
+        if not f:
+            return
+        try:
+            with open(f, "w", encoding="utf-8") as fh:
+                json.dump({"day": self.st.day, "start_equity": self.st.day_start_equity, "pnl": self.st.day_pnl,
+                           "symbol": self.cfg.symbol, "broker": getattr(self.broker, "name", "")}, fh)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _roll_day(self) -> None:
-        """Novo dia (UTC): zera o resultado do dia e guarda o saldo de referência do freio diário."""
+        """Novo dia (UTC): zera o resultado do dia e guarda o saldo de referência do freio diário.
+        Se o painel for reiniciado no mesmo dia, retoma o resultado do dia gravado (o freio não "esquece" as perdas)."""
         today = time.strftime("%Y-%m-%d", time.gmtime())
         if self.st.day != today:
             try:
                 eq = float(self.broker.info().get("equity") or 0)
             except Exception:  # noqa: BLE001
                 eq = self.st.start_equity
+            pnl = 0.0
+            f = self._day_file()
+            if f and os.path.exists(f) and not self.st.day:
+                try:
+                    with open(f, encoding="utf-8") as fh:
+                        saved = json.load(fh)
+                    if saved.get("day") == today and saved.get("broker") == getattr(self.broker, "name", ""):
+                        eq, pnl = float(saved.get("start_equity") or eq), float(saved.get("pnl") or 0.0)
+                        self.log(f"retomando o dia: resultado de hoje {pnl:+.2f} (saldo de referência {eq:.2f})", "start")
+                except Exception:  # noqa: BLE001
+                    pass
             with self.lock:
                 if self.st.day and self.st.day_braked:
                     self.log("novo dia: freio diário liberado", "start")
-                self.st.day, self.st.day_start_equity, self.st.day_pnl, self.st.day_braked = today, eq, 0.0, False
+                self.st.day, self.st.day_start_equity, self.st.day_pnl, self.st.day_braked = today, eq, pnl, False
+            self._save_day()
 
     def _daily_brake(self) -> bool:
         c, s = self.cfg, self.st
