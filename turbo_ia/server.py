@@ -134,10 +134,11 @@ def make_handler(app: App):
                 d = self._body()
                 p = urlparse(self.path).path
                 if p == "/api/ia/start":
-                    if d.get("mode", "reversao") != "reversao":     # só a estratégia que passou nos testes pode operar
-                        self._json({"ok": False, "error": "só o modo Reversão ouro está habilitado (os outros deram prejuízo nos testes)"})
+                    mode = d.get("mode", "reversao")
+                    if mode not in ("reversao", "cruzamento"):      # só estratégias que passaram nos testes podem operar
+                        self._json({"ok": False, "error": "modo não habilitado (só Reversão ouro e Cruzamento 9×20)"})
                     else:
-                        self._json(app.session.start(IAConfig.from_dict({**d, "mode": "reversao"})))
+                        self._json(app.session.start(IAConfig.from_dict(d)))
                 elif p == "/api/telegram/test":
                     n = app.session.notifier
                     if not n.enabled:

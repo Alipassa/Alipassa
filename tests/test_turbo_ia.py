@@ -702,7 +702,7 @@ class TestTelegram(unittest.TestCase):
         self.assertTrue(s._daily_brake())
         n.flush()
         texts = "\n".join(d["text"] for _, d in sent)
-        self.assertIn("❌ STOP #77: -120.00", texts)
+        self.assertIn("❌ PERDA #77: -120.00", texts)
         self.assertIn("FREIO DIÁRIO", texts)
         self.assertIn("DEMO PAPER", texts)
 
@@ -878,3 +878,94 @@ class TestCross(unittest.TestCase):
         self.assertGreater(sum(x[2] for x in r), 0)                  # em tendências longas o cruzamento ganha
         r_stop = simulate(c, "ema", 2.0, False, 0.0)
         self.assertTrue(all(x[1] >= -2.0 - 1e-9 for x in r_stop))   # stop de 2 ATR limita a perda
+
+
+class TestCrossMode(unittest.TestCase):
+    def wave(self, n=200, up_at=None):
+        import math
+        cl = [100 + 5 * math.sin(i / 12) for i in range(n)]
+        return [{"time": 1_700_000_000 + i * 3600, "open": p, "high": p + 0.5, "low": p - 0.5, "close": p} for i, p in enumerate(cl)]
+
+    def test_detects_cross_only_on_cross_bar(self):
+        from turbo_ia.analysis import analyze, ind
+        c = self.wave()
+        cl = [x["close"] for x in c]
+        f, s = ind.sma(cl, 9), ind.sma(cl, 20)
+        ups = [i for i in range(21, len(c)) if f[i - 1] <= s[i - 1] and f[i] > s[i]]
+        i = ups[0]
+        a = analyze(c[:i + 1], "cruzamento", sl_atr=2.0)
+        self.assertEqual(a.signal, "BUY")
+        self.assertAlmostEqual(a.price - a.sl, 2 * a.atr)
+        self.assertIsNone(a.tp)                                       # sai no cruzamento contrário, sem alvo
+        self.assertEqual(analyze(c[:i + 2], "cruzamento").signal, "NONE")   # vela seguinte: já cruzou
+
+    def test_reverses_on_opposite_cross_and_records_result(self):
+        from turbo_ia.analysis import Analysis
+        import turbo_ia.engine as eng
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        s = IASession(b, forward=ForwardLog(None))
+        s.cfg = IAConfig(mode="cruzamento", symbol="XAUUSD", timeframe="H1", risk_pct=2, sl_atr=2.0, rr=0, daily_loss_pct=0)
+        s.st.running, s.st.last_bar = True, 0
+        price = b.tick("XAUUSD")[0]
+        orig = eng.analyze
+        try:
+            eng.analyze = lambda *a, **k: Analysis("BUY", 100, price, 3.0, price - 6.0, None, mode="cruzamento", label="x")
+            s.step()
+            first = s.st.open_ticket
+            self.assertIsNotNone(first)
+            self.assertEqual(s.st.open_side, "BUY")
+            s.st.last_bar = 0
+            eng.analyze = lambda *a, **k: Analysis("SELL", 100, price, 3.0, price + 6.0, None, mode="cruzamento", label="x")
+            s.step()
+        finally:
+            eng.analyze = orig
+        self.assertEqual(s.st.open_side, "SELL")                     # virou a mão
+        self.assertNotEqual(s.st.open_ticket, first)
+        self.assertEqual(len(b._pos), 1)                              # nunca duas posições ao mesmo tempo
+        s._manage_open()
+        self.assertEqual(len(s.st.history), 1)                        # a compra fechada entrou no resultado
+        self.assertEqual(s.st.closing, [])
+
+    def test_same_side_signal_keeps_position(self):
+        from turbo_ia.analysis import Analysis
+        import turbo_ia.engine as eng
+        b = PaperBroker(seed=1, balance=1000)
+        b.connect()
+        s = IASession(b, forward=ForwardLog(None))
+        s.cfg = IAConfig(mode="cruzamento", symbol="XAUUSD", timeframe="H1", risk_pct=2, sl_atr=2.0, rr=0, daily_loss_pct=0)
+        s.st.running, s.st.last_bar = True, 0
+        price = b.tick("XAUUSD")[0]
+        orig = eng.analyze
+        try:
+            eng.analyze = lambda *a, **k: Analysis("BUY", 100, price, 3.0, price - 6.0, None, mode="cruzamento", label="x")
+            s.step()
+            s.st.last_bar = 0
+            s.step()
+        finally:
+            eng.analyze = orig
+        self.assertEqual(len(b._pos), 1)
+
+
+class TestValidateCross(unittest.TestCase):
+    def test_cross_thresholds_are_its_own(self):
+        from turbo_ia.validate import evaluate
+        now = 1_764_000_000
+        # o que o histórico 2016–2026 sugere: +0,065 R (em stop de 2 ATR), PF ~1,15
+        rs = ([1.4, -0.5, -0.5, -0.27] * 30)[:120]
+        rows = [{"r": r, "dist": 1.0, "kind": "stop", "exit_slip": 0.0, "fee_r": 0.0, "entry_slip_bar": 0.005} for r in rs]
+        rev = dict((n.split(" · ")[0], ok) for n, ok, _ in evaluate(rows, [], "1", now=now, mode="reversao"))
+        cru = dict((n.split(" · ")[0], ok) for n, ok, _ in evaluate(rows, [], "1", now=now, mode="cruzamento"))
+        self.assertFalse(rev["2"])           # +0,0325 R não serve para a reversão…
+        self.assertFalse(cru["2"])           # …nem para o cruzamento (precisa ≥ +0,05)
+        rs2 = ([1.6, -0.5, -0.5, -0.27] * 30)[:120]                  # +0,0825 R
+        rows2 = [{**r, "r": x} for r, x in zip(rows, rs2)]
+        cru2 = dict((n.split(" · ")[0], ok) for n, ok, _ in evaluate(rows2, [], "1", now=now, mode="cruzamento"))
+        rev2 = dict((n.split(" · ")[0], ok) for n, ok, _ in evaluate(rows2, [], "1", now=now, mode="reversao"))
+        self.assertTrue(cru2["2"])
+        self.assertFalse(rev2["2"])
+
+    def test_cross_presence_counts_all_weekday_hours(self):
+        from turbo_ia.validate import expected_windows
+        now = 1_764_000_000
+        self.assertGreater(len(expected_windows(now, hours=tuple(range(1, 21)))), 5 * len(expected_windows(now)))

@@ -65,6 +65,7 @@ def series(candles: list[dict], z_thr: float = 2.0) -> dict:
         "kc_up": up, "kc_mid": mid, "kc_lo": lo, "sar": sar, "sar_dir": sar_dir,
         "pivots": piv, "choch": ind.choch(candles, piv),
         "rev_mid": m20, "rev_up": rev_up, "rev_lo": rev_lo,
+        "sma9": ind.sma(closes, 9), "sma20": m20,
     }
 
 
@@ -125,8 +126,48 @@ def analyze_reversion(candles: list[dict], hours=REVERSION_HOURS, z_thr: float =
                     f"{'Alta' if side > 0 else 'Baixa'} · Reversão {'armada' if signal != 'NONE' else 'aguardando'}")
 
 
+# ---------------------------------------------------------------------------------------------------- CRUZAMENTO 9×20
+# Estratégia do usuário, validada em ~11 anos de XAUUSD H1 na Pepperstone (spread real, 26/11/2026):
+#   SMA 9 × SMA 20, sem filtro, stop 2 ATR, saída no cruzamento contrário (vira a mão):
+#   2016 −26R · 2017 +36 · 2018 −56 · 2019 −6 · 2020 +192 · 2021 +16 · 2022 +41 · 2023 +19 · 2024 +41 · 2025 +85 · 2026 +127
+#   → 8 de 11 anos positivos, 3.559 operações, +0,13 ATR por operação (R aqui = 1 ATR; o stop é 2 ATR).
+#   Ganha nos anos de tendência e perde nos laterais (2016, 2018): espere anos inteiros no vermelho.
+CROSS_FAST, CROSS_SLOW, CROSS_SL_ATR = 9, 20, 2.0
+
+
+def analyze_cross(candles: list[dict], sl_atr: float = CROSS_SL_ATR) -> Analysis:
+    """Cruzamento da SMA 9 com a SMA 20 na ÚLTIMA vela fechada. BUY/SELL só na vela do cruzamento; sem alvo
+    (a saída é o cruzamento contrário); stop = sl_atr × ATR(14)."""
+    mode = "cruzamento"
+    if len(candles) < CROSS_SLOW + 16:
+        p = float(candles[-1]["close"]) if candles else 0.0
+        return Analysis("NONE", 0.0, p, 0.0, None, None, blocked=["poucos candles"], mode=mode, label="Dados insuficientes")
+    closes = [float(c["close"]) for c in candles]
+    price = closes[-1]
+    f, sl_ = ind.sma(closes, CROSS_FAST), ind.sma(closes, CROSS_SLOW)
+    a = _last(ind.atr(candles, 14)) or 0.0
+    up = f[-2] <= sl_[-2] and f[-1] > sl_[-1]
+    dn = f[-2] >= sl_[-2] and f[-1] < sl_[-1]
+    trend = 1 if f[-1] > sl_[-1] else -1
+    votes = {"cruzamento": 1 if up else -1 if dn else 0, "tendencia_9x20": trend}
+    blocked = []
+    if not (up or dn):
+        blocked.append(f"sem cruzamento nesta vela (média 9 {'acima' if trend > 0 else 'abaixo'} da 20: "
+                       f"{'alta' if trend > 0 else 'baixa'} em curso)")
+    if a <= 0:
+        blocked.append("ATR zero")
+    signal = "NONE" if blocked else ("BUY" if up else "SELL")
+    sl = (price - sl_atr * a if up else price + sl_atr * a) if signal != "NONE" else None
+    reasons = [f"média 9 cruzou a 20 para {'cima' if up else 'baixo'}" if (up or dn) else "aguardando cruzamento",
+               f"9 = {f[-1]:.2f} · 20 = {sl_[-1]:.2f} · ATR {a:.2f}"]
+    label = f"{'Alta' if trend > 0 else 'Baixa'} · {'CRUZOU' if signal != 'NONE' else 'tendência 9×20'}"
+    return Analysis(signal, 100.0 if signal != "NONE" else 50.0, price, a, sl, None, votes, reasons, blocked, mode, label)
+
+
 def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5, utc_offset: float = 0.0,
             z_thr: Optional[float] = None) -> Analysis:
+    if mode == "cruzamento":
+        return analyze_cross(candles, sl_atr=sl_atr if sl_atr > 0 else CROSS_SL_ATR)
     if mode == "reversao":
         return analyze_reversion(candles, sl_atr=sl_atr, utc_offset=utc_offset, rr=rr,
                                  z_thr=REVERSION_Z if z_thr is None else z_thr)

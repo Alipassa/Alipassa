@@ -237,6 +237,22 @@ proteção desligada e limite de perda = metade do saldo. Simulação (60 dias d
 Supõe que a vantagem do histórico se repete — os horários saíram desses mesmos dados. Se a vantagem real for 0,2 R menor,
 o mês típico com 5 % fica perto do zero a zero e a queda no caminho continua grande. Confirme em DEMO antes.
 
+## 📈 Modo Cruzamento 9×20 ouro H1 (padrão desde 26/11/2026)
+
+Estratégia do usuário, a única que passou em ~11 anos de XAUUSD H1 na Pepperstone (spread real):
+SMA 9 cruza a SMA 20 para cima → compra; para baixo → venda; sai e vira a mão no cruzamento contrário; stop 2 ATR no
+servidor; sem alvo; opera o dia todo, só com velas fechadas.
+
+| Ano | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ATR | −26 | +36 | −56 | −6 | +192 | +16 | +41 | +19 | +41 | +85 | +127 |
+
+8 de 11 anos positivos · 3.559 operações · +0,13 ATR por operação (+0,065 R com stop de 2 ATR) · ~27 operações/mês.
+Ganha nos anos de tendência e perde nos laterais. Painel: risco 2 % (escolha do usuário; 1 ATR ≈ 1 % do saldo), freio
+diário 10 %, limite da sessão 50 %. Validação (`validate.py --modo cruzamento`, critérios fixados antes da demo):
+≥ 100 operações · média ≥ +0,05 R · primeiras/últimas 50 positivas · PF ≥ 1,10 · queda ≤ 30 R · custo ≤ backtest + 0,03 R ·
+IA ligada ≥ 90 % das horas dos dias úteis com ≤ 2 erros. Testes da estratégia: `python -m turbo_ia.cross --years`.
+
 ## Programa de validação (itens 2–7) — `program.py` e `costs.py`
 
 Regras escritas ANTES dos resultados. Dados divididos no tempo:

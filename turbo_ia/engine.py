@@ -86,6 +86,7 @@ class SessionState:
     open_bar: Optional[int] = None
     open_side: Optional[str] = None
     open_window: Optional[int] = None
+    closing: list = field(default_factory=list)           # posições fechadas pela IA aguardando o resultado no histórico
     window_stops: dict = field(default_factory=dict)     # "janela" e "janela|lado" → nº de stops (janela = hora UTC desde 1970)
     last_bar: Optional[int] = None
     last_analysis: Optional[dict] = None
@@ -131,7 +132,7 @@ class IASession:
         from .analysis import REVERSION_HOURS
         g = time.gmtime()
         key = f"{g.tm_year:04d}-{g.tm_mon:02d}-{g.tm_mday:02d} {g.tm_hour:02d}"
-        if g.tm_hour in REVERSION_HOURS and getattr(self, "_hb", "") != key:
+        if (g.tm_hour in REVERSION_HOURS or self.cfg.mode == "cruzamento") and getattr(self, "_hb", "") != key:
             self._hb = key
             self._event({"kind": "janela", "janela": key})
 
@@ -237,6 +238,17 @@ class IASession:
         a = analyze(closed, c.mode, c.rr, c.sl_atr, getattr(b, "utc_offset", 0.0), c.z_thr)
         with self.lock:
             self.st.last_analysis = a.to_dict()
+        if c.mode == "cruzamento" and self.st.open_ticket is not None and a.signal not in ("NONE", self.st.open_side):
+            t = self.st.open_ticket                       # cruzamento contrário: sai e (abaixo) vira a mão
+            r = b.close(t, "cruzamento")
+            if not r.get("ok"):
+                self.log(f"não consegui fechar #{t} no cruzamento contrário: {r.get('error')}", "error")
+                self.notify(f"⚠️ não fechou #{t} no cruzamento contrário: {r.get('error')}", dedup_key=f"close:{t}")
+                return
+            with self.lock:
+                self.st.closing.append({"ticket": t, "side": self.st.open_side, "window": self.st.open_window})
+                self.st.open_ticket = self.st.open_bar = self.st.open_side = self.st.open_window = None
+            self.log(f"cruzamento contrário: #{t} fechada, virando para {'COMPRA' if a.signal == 'BUY' else 'VENDA'}", "trade")
         if self.st.open_ticket is not None:
             return
         if a.signal == "NONE":
@@ -290,12 +302,13 @@ class IASession:
             acct = str(b.info().get("login", ""))
         except Exception:  # noqa: BLE001
             acct = ""
-        self.forward.add(c.symbol, c.timeframe, c.mode, a.signal, int(closed[-1]["time"]), float(closed[-1]["close"]), c.expiry_min, acct,
-                         getattr(b, "name", ""), sl=a.sl, tp=a.tp)
+        if c.mode != "cruzamento":                       # cruzamento não tem alvo fixo: o resultado vem do histórico do MT5
+            self.forward.add(c.symbol, c.timeframe, c.mode, a.signal, int(closed[-1]["time"]), float(closed[-1]["close"]), c.expiry_min, acct,
+                             getattr(b, "name", ""), sl=a.sl, tp=a.tp)
         self._log_execution({"t": time.time(), "ticket": res["ticket"], "symbol": c.symbol, "tf": c.timeframe, "side": a.signal,
                              "signal_close": float(closed[-1]["close"]), "signal_time": int(closed[-1]["time"]),
                              "bid": q_bid, "ask": q_ask, "fill": res.get("price"), "sl": res.get("sl"), "tp": res.get("tp"),
-                             "volume": res.get("volume"), "broker": getattr(b, "name", "")})
+                             "volume": res.get("volume"), "broker": getattr(b, "name", ""), "mode": c.mode})
         with self.lock:
             self.st.open_ticket, self.st.open_bar = res["ticket"], bar
             self.st.open_side, self.st.open_window = a.signal, window
@@ -307,6 +320,11 @@ class IASession:
                  f"força {a.strength:.0f}%{risk_note} · {', '.join(a.reasons[:3])}", "trade")
 
     def _manage_open(self) -> None:
+        for item in list(self.st.closing):                # fechadas pela própria IA (cruzamento contrário)
+            p = self.broker.closed_profit(item["ticket"])
+            if p is not None:
+                self.st.closing.remove(item)
+                self._record_result(item["ticket"], p, item["side"], item["window"])
         t = self.st.open_ticket
         if t is None:
             return
@@ -323,8 +341,13 @@ class IASession:
         profit = self.broker.closed_profit(t)
         if profit is None:
             return                                # histórico ainda não chegou: tenta no próximo ciclo
+        side, window = self.st.open_side, self.st.open_window
         with self.lock:
             self.st.open_ticket = self.st.open_bar = None
+        self._record_result(t, profit, side, window)
+
+    def _record_result(self, t: int, profit: float, side: Optional[str], window: Optional[int]) -> None:
+        with self.lock:
             self.st.pnl = round(self.st.pnl + profit, 2)
             self.st.day_pnl = round(self.st.day_pnl + profit, 2)
             self.st.peak = max(self.st.peak, self.st.pnl)
@@ -333,10 +356,10 @@ class IASession:
                 self.st.day_wins += 1
             else:
                 self.st.losses += 1
-                if self.st.open_window is not None:
-                    w, ws = self.st.open_window, self.st.window_stops
-                    ws[str(w)] = ws.get(str(w), 0) + 1
-                    ws[f"{w}|{self.st.open_side}"] = ws.get(f"{w}|{self.st.open_side}", 0) + 1
+                if window is not None:
+                    ws = self.st.window_stops
+                    ws[str(window)] = ws.get(str(window), 0) + 1
+                    ws[f"{window}|{side}"] = ws.get(f"{window}|{side}", 0) + 1
             self.st.history.append({"ticket": t, "profit": round(profit, 2), "t": time.time()})
         self._save_day()
         self.log(f"#{t} fechada: {profit:+.2f} · sessão {self.st.pnl:+.2f}", "win" if profit >= 0 else "loss")
@@ -344,7 +367,7 @@ class IASession:
             bal = f" · saldo {float(self.broker.info().get('balance') or 0):.2f}"
         except Exception:  # noqa: BLE001
             bal = ""
-        self.notify(f"{'✅ GANHO' if profit >= 0 else '❌ STOP'} #{t}: {profit:+.2f}\nhoje {self.st.day_pnl:+.2f} · sessão {self.st.pnl:+.2f}{bal}")
+        self.notify(f"{'✅ GANHO' if profit >= 0 else '❌ PERDA'} #{t}: {profit:+.2f}\nhoje {self.st.day_pnl:+.2f} · sessão {self.st.pnl:+.2f}{bal}")
 
     def _log_execution(self, rec: dict) -> None:
         """Item 6: cada entrada grava preço da vela (o que o backtest supõe) × bid/ask no envio × preço executado."""
