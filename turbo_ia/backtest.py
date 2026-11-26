@@ -32,7 +32,7 @@ WINDOW = 300
 def load_yahoo(symbol: str, tf: str) -> list[dict]:
     import requests
     iv = {"M1": "1m", "M2": "2m", "M5": "5m", "M15": "15m", "M30": "30m", "H1": "60m"}[tf]
-    rng = "7d" if tf == "M1" else "60d"
+    rng = "7d" if tf == "M1" else ("730d" if tf == "H1" else "60d")    # H1: 2 anos (inclui o período do cofre)
     r = requests.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}", params={"interval": iv, "range": rng},
                      headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
     r.raise_for_status()
@@ -156,7 +156,12 @@ def run(candles: list[dict], tf: str, mode: str, expiry_min: int = 10, payout: f
 
 
 # ---------------------------------------------------------------------------------------------------- alvo × stop
-SPREAD = {"GC=F": 0.30, "XAUUSD": 0.30, "EURUSD=X": 0.00012, "EURUSD": 0.00012}
+# spread típico em preço (medianas medidas na Pepperstone em 26/11/2026; símbolos do Yahoo usam o equivalente)
+SPREAD = {"GC=F": 0.30, "XAUUSD": 0.30, "EURUSD=X": 0.00012, "EURUSD": 0.00012,
+          "SI=F": 0.03, "XAGUSD": 0.03, "ES=F": 0.40, "US500": 0.40, "YM=F": 2.0, "US30": 2.0, "NQ=F": 1.3, "NAS100": 1.3,
+          "CL=F": 0.03, "SpotCrude": 0.03, "BTC-USD": 15.0, "BTCUSD": 15.0, "ETH-USD": 2.0, "ETHUSD": 2.0,
+          "GBPUSD=X": 0.00015, "GBPUSD": 0.00015, "USDJPY=X": 0.015, "USDJPY": 0.015, "AUDUSD=X": 0.00012, "AUDUSD": 0.00012,
+          "^GDAXI": 2.0, "GER40": 2.0}
 
 
 def signals(candles: list[dict], mode: str, utc_offset: float = 0.0, all_hours: bool = False) -> list[tuple[int, str, float]]:

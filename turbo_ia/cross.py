@@ -70,25 +70,29 @@ def simulate(c: list[dict], kind: str = "ema", stop_atr: Optional[float] = None,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="turbo_ia.cross")
     ap.add_argument("--source", choices=["mt5", "yahoo"], default="mt5")
-    ap.add_argument("--symbol", default="XAUUSD")
+    ap.add_argument("--symbol", default="XAUUSD", help="um ou vários, separados por vírgula")
     ap.add_argument("--tfs", default="M5,M15,H1")
     ap.add_argument("--bars", type=int, default=2_000_000)
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
-    spread_def = SPREAD.get(a.symbol, 0.30)
     print("CRUZAMENTO 9 × 20 + filtro ATR · saída no cruzamento contrário · spread descontado · 1 R = 1 ATR na entrada")
-    for tf in a.tfs.split(","):
+    summary_rows = []
+    for sym, tf in [(s_, t_) for s_ in a.symbol.split(",") for t_ in a.tfs.split(",")]:
+        spread_def = SPREAD.get(sym, 0.0)
         try:
-            c = load_mt5(a.symbol, tf, a.bars) if a.source == "mt5" else load_yahoo(a.symbol, tf)
+            c = load_mt5(sym, tf, a.bars) if a.source == "mt5" else load_yahoo(sym, tf)
         except Exception as e:  # noqa: BLE001
-            print(f"  {tf}: sem dados ({e})")
+            print(f"  {sym} {tf}: sem dados ({str(e)[:80]})")
+            continue
+        if len(c) < 600:
+            print(f"  {sym} {tf}: poucas velas ({len(c)})")
             continue
         n = len(c)
-        cut = next((i for i, x in enumerate(c) if x["time"] >= CUTOFF), 0) if a.source == "mt5" else 0
+        cut = next((i for i, x in enumerate(c) if x["time"] >= CUTOFF), 0)
         mid = cut + (n - cut) // 2
         days = lambda lo, hi: max((c[hi - 1]["time"] - c[lo]["time"]) / 86400, 1)  # noqa: E731
-        print(f"\n  {a.symbol} {tf} · {n} velas ≈ {days(0, n):.0f} dias" + (f" · cofre {days(0, cut):.0f} dias" if cut > 500 else ""))
+        print(f"\n  {sym} {tf} · spread {spread_def:g} · {n} velas ≈ {days(0, n):.0f} dias" + (f" · cofre {days(0, cut):.0f} dias" if cut > 500 else ""))
         print(f"    {'variação':30} {'ops':>5} {'acerto':>7} {'R/op':>7} {'pts/op':>7} {'R/mês':>7} {'PF':>5} {'queda':>6} │ A R/mês │ B R/mês" + (" │ COFRE R/mês" if cut > 500 else ""))
         for kind in ("ema", "sma"):
             for stop in (None, 2.0):
@@ -103,10 +107,22 @@ def main(argv=None) -> int:
                     rb = [x[1] for x in r if x[0] >= c[mid]["time"]]
                     line = (f"    {tag:30} {s['n']:5} {s['win']:7.1%} {s['exp']:+7.3f} {pts:+7.2f} {sum(rs) / days(cut, n) * 30:+7.1f} "
                             f"{(gp / gl if gl else 0):5.2f} {s['dd']:5.0f}R │ {sum(ra) / days(cut, mid) * 30:+7.1f} │ {sum(rb) / days(mid, n) * 30:+7.1f}")
+                    rc_m = None
                     if cut > 500:
                         rc = [x[1] for x in simulate(c, kind, stop, filt, spread_def, 0, cut)]
-                        line += f" │ {sum(rc) / days(0, cut) * 30:+7.1f} ({summary(rc)['exp']:+.3f}/op)"
+                        rc_m = sum(rc) / days(0, cut) * 30
+                        line += f" │ {rc_m:+7.1f} ({summary(rc)['exp']:+.3f}/op)"
                     print(line, flush=True)
+                    ok = (ra and rb and sum(ra) > 0 and sum(rb) > 0 and (rc_m is None or rc_m > 0) and s["n"] >= 30)
+                    summary_rows.append((sym, tf, tag, ok, s["exp"], rc_m))
+    good = [r for r in summary_rows if r[3]]
+    print("\nPOSITIVO EM TODOS OS PERÍODOS (A, B" + (" e cofre" if any(r[5] is not None for r in summary_rows) else "") + "):")
+    for sym, tf, tag, _, e, rc in good:
+        print(f"  ✔ {sym:10} {tf:4} {tag:30} {e:+.3f} R/op" + (f" · cofre {rc:+.1f} R/mês" if rc is not None else ""))
+    if not good:
+        print("  nenhum")
+    tested = len(summary_rows)
+    print(f"  ({tested} combinações testadas: espere ~{max(1, tested // 8)} 'aprovação' só por acaso — desconfie de casos isolados)")
     print("\nLeitura: R/op > 0 nas metades A e B (e no cofre) = vantagem que se repete. Spread pesa mais em gráficos curtos.")
     return 0
 
