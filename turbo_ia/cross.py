@@ -73,6 +73,7 @@ def main(argv=None) -> int:
     ap.add_argument("--symbol", default="XAUUSD", help="um ou vários, separados por vírgula")
     ap.add_argument("--tfs", default="M5,M15,H1")
     ap.add_argument("--bars", type=int, default=2_000_000)
+    ap.add_argument("--years", action="store_true", help="mostra o resultado ano a ano")
     a = ap.parse_args(argv)
     from .settings import load_env
     load_env()
@@ -90,8 +91,13 @@ def main(argv=None) -> int:
             continue
         n = len(c)
         cut = next((i for i, x in enumerate(c) if x["time"] >= CUTOFF), 0)
+        active = sorted({x["time"] // 86400 for x in c})                 # dias com velas (histórico antigo tem buracos)
         mid = cut + (n - cut) // 2
-        days = lambda lo, hi: max((c[hi - 1]["time"] - c[lo]["time"]) / 86400, 1)  # noqa: E731
+        def days(lo: int, hi: int) -> float:
+            """Dias corridos EQUIVALENTES aos dias com dados (5 dias de mercado = 7 corridos) — não infla o período com buracos."""
+            d0, d1 = c[lo]["time"] // 86400, c[hi - 1]["time"] // 86400
+            k = sum(1 for d in active if d0 <= d <= d1)
+            return max(k * 7 / 5, 1)
         print(f"\n  {sym} {tf} · spread {spread_def:g} · {n} velas ≈ {days(0, n):.0f} dias" + (f" · cofre {days(0, cut):.0f} dias" if cut > 500 else ""))
         print(f"    {'variação':30} {'ops':>5} {'acerto':>7} {'R/op':>7} {'pts/op':>7} {'R/mês':>7} {'PF':>5} {'queda':>6} │ A R/mês │ B R/mês" + (" │ COFRE R/mês" if cut > 500 else ""))
         for kind in ("ema", "sma"):
@@ -115,6 +121,24 @@ def main(argv=None) -> int:
                     print(line, flush=True)
                     ok = (ra and rb and sum(ra) > 0 and sum(rb) > 0 and (rc_m is None or rc_m > 0) and s["n"] >= 30)
                     summary_rows.append((sym, tf, tag, ok, s["exp"], rc_m))
+        if a.years:
+            print(f"    ano a ano ({sym} {tf}) — R por operação · total R · operações:")
+            import time as _t
+            yrs = sorted({_t.gmtime(x["time"]).tm_year for x in c})
+            print("      " + "".join(f"{y:>16}" for y in yrs))
+            for kind, stop, filt in (("sma", None, False), ("sma", 2.0, False), ("sma", None, True), ("ema", None, False)):
+                tag = f"{kind.upper()} 9×20 {'+ATR' if filt else 'sem filtro'}{' stop 2ATR' if stop else ''}"
+                r = simulate(c, kind, stop, filt, spread_def, 0, n)
+                cells = []
+                pos_years = 0
+                for y in yrs:
+                    ry = [x[1] for x in r if _t.gmtime(x[0]).tm_year == y]
+                    if ry:
+                        pos_years += sum(ry) > 0
+                        cells.append(f"{sum(ry) / len(ry):+.2f} {sum(ry):+5.0f} {len(ry):3}")
+                    else:
+                        cells.append("—")
+                print(f"      {tag:28}" + "".join(f"{x:>16}" for x in cells) + f"   → {pos_years}/{len([1 for x in cells if x != '—'])} anos positivos")
     good = [r for r in summary_rows if r[3]]
     print("\nPOSITIVO EM TODOS OS PERÍODOS (A, B" + (" e cofre" if any(r[5] is not None for r in summary_rows) else "") + "):")
     for sym, tf, tag, _, e, rc in good:
