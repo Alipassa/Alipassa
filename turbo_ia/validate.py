@@ -88,11 +88,18 @@ def evaluate(rows: list[dict], events: list[dict], login: str = "", now: Optiona
     mine = [e for e in events if not login or str(e.get("login", "")) in ("", login)]
     recent = [e for e in mine if e.get("t", 0) >= now - 14 * 86400]
     seen = {e.get("janela") for e in recent if e.get("kind") == "janela"}
-    exp = expected_windows(now)
+    start = min((e.get("t", now) for e in mine), default=None)     # o registro começa na 1ª marca desta conta
+    if start is None:
+        res.append(("7 · 2 semanas sem falhas", None, "registro ainda não começou (inicie a IA nesta versão)"))
+        return res
+    exp = [w for w in expected_windows(now) if calendar.timegm(time.strptime(w + ":59", "%Y-%m-%d %H:%M")) >= start - 3600]
     cover = len([w for w in exp if w in seen]) / len(exp) if exp else 0.0
     errs = len([e for e in recent if e.get("kind") == "error"])
-    res.append(("7 · 2 semanas sem falhas", cover >= 0.9 and errs <= 2 if exp else None,
-                f"ligada em {cover:.0%} das {len(exp)} janelas · {errs} erros"))
+    days_logged = (now - start) / 86400
+    ok = (cover >= 0.9 and errs <= 2) if days_logged >= 14 else None
+    res.append(("7 · 2 semanas sem falhas", ok,
+                f"ligada em {cover:.0%} das {len(exp)} janelas desde o início do registro · {errs} erros"
+                + (f" · {days_logged:.0f} de 14 dias" if days_logged < 14 else "")))
     return res
 
 

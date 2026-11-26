@@ -824,7 +824,8 @@ class TestValidate(unittest.TestCase):
 
     def events(self, now, cover=True, errors=0):
         from turbo_ia.validate import expected_windows
-        ev = [{"t": now - 3600, "kind": "janela", "janela": w, "login": "1"} for w in (expected_windows(now) if cover else [])]
+        ev = [{"t": now - 15 * 86400, "kind": "start", "login": "1"}]          # registro começou há 15 dias
+        ev += [{"t": now - 3600, "kind": "janela", "janela": w, "login": "1"} for w in (expected_windows(now) if cover else [])]
         ev += [{"t": now - 60, "kind": "error", "msg": "x", "login": "1"} for _ in range(errors)]
         return ev
 
@@ -845,6 +846,15 @@ class TestValidate(unittest.TestCase):
         self.assertFalse(checks["3"])
         self.assertFalse(checks["7"])                            # 5 erros
         self.assertIn("AINDA NÃO", report(evaluate(self.rows(rs), [], "1", now=now)))
+
+    def test_window_coverage_counts_only_since_logging_started(self):
+        from turbo_ia.validate import evaluate
+        now = 1_764_000_000
+        c7 = lambda ev: [(ok, d) for n, ok, d in evaluate(self.rows([1.0]), ev, "1", now=now) if n.startswith("7")][0]  # noqa: E731
+        self.assertIsNone(c7([])[0])                                   # sem registro: "ainda não começou", não ✗
+        ok, detail = c7([{"t": now - 2 * 86400, "kind": "start", "login": "1"}])
+        self.assertIsNone(ok)                                          # só 2 dias: ainda contando
+        self.assertIn("2 de 14 dias", detail)
 
     def test_cost_criterion_needs_20_logged_trades(self):
         from turbo_ia.validate import evaluate

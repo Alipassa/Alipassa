@@ -169,6 +169,7 @@ class IASession:
         self.log(f"IA iniciada · {cfg.symbol} {cfg.timeframe} · risco {cfg.risk_pct:g}%/op · saldo inicial {eq:.2f} · "
                  f"meta {('+%.2f' % lim['target']) if lim['target'] else 'nenhuma'} · "
                  f"limite de perda {('-%.2f' % lim['loss']) if lim['loss'] else 'nenhum'}", "start")
+        self._event({"kind": "start", "symbol": cfg.symbol, "tf": cfg.timeframe, "risk": cfg.risk_pct})
         brake_txt = f" · freio diário {cfg.daily_loss_pct:g}%" if cfg.daily_loss_pct > 0 else ""
         loss_txt = f" · para se perder {lim['loss']:.2f}" if lim["loss"] else ""
         self.notify(f"▶️ IA iniciada · {cfg.symbol} {cfg.timeframe}\nrisco {cfg.risk_pct:g}%/op · saldo {eq:.2f}{brake_txt}{loss_txt}")
@@ -185,6 +186,7 @@ class IASession:
                 self.st.running = False
                 self.st.stopped_reason = reason
                 self.log(f"IA parada: {reason}", "stop")
+                self._event({"kind": "stop", "reason": reason[:120]})
                 self.notify(f"⏹ IA parada: {reason}\nsessão {self.st.pnl:+.2f} · {self.st.trades} operações")
         return {"ok": True}
 
