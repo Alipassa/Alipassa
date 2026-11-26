@@ -253,6 +253,22 @@ diário 10 %, limite da sessão 50 %. Validação (`validate.py --modo cruzament
 ≥ 100 operações · média ≥ +0,05 R · primeiras/últimas 50 positivas · PF ≥ 1,10 · queda ≤ 30 R · custo ≤ backtest + 0,03 R ·
 IA ligada ≥ 90 % das horas dos dias úteis com ≤ 2 erros. Testes da estratégia: `python -m turbo_ia.cross --years`.
 
+### Tempo gráfico do Cruzamento (Pepperstone 2016–2026, SMA 9×20 stop 2 ATR, spread real)
+
+| Gráfico | Total ATR | Anos + | Pior ano | ATR/op | Ops/mês | ATR/mês (≈ %/mês a 2 %) |
+| --- | --- | --- | --- | --- | --- | --- |
+| M1 (2021–26) | −27.385 | 0/6 | −7.506 | −0,241 | 1.387 | −334 |
+| M2 | −18.778 | 1/11 | −3.055 | −0,195 | 614 | −120 |
+| M5 | −3.629 | 1/11 | −691 | −0,093 | 248 | −23 |
+| M10 | −481 | 3/11 | −227 | −0,025 | 124 | −3,1 |
+| M15 | +428 | 7/11 | −140 | +0,033 | 83 | +2,7 |
+| M30 | +435 | 7/11 | **−35** | +0,065 | 43 | +2,8 |
+| **H1** | **+469** | **8/11** | −56 | **+0,132** | 23 | **+3,0** |
+
+Abaixo de M15 o spread destrói a estratégia (centenas de cruzamentos por mês). H1 é o mais consistente, o de maior
+vantagem por operação (menos sensível a custo) e o de maior lucro mensal → continua o padrão. M30 é a alternativa com
+pior ano menor, mas com metade da vantagem por operação.
+
 ### Filtros de mercado lateral no Cruzamento (Pepperstone 2016–2026, regra de adoção fixada antes)
 
 | Filtro | Total | Anos + | Pior ano | R/op | Ops | Cofre | Desenv. |
