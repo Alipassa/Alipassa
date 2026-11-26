@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__
+from . import __version__, b3
 from .analysis import analyze, series
 from .broker import BrokerError, lot_for_risk, make_broker
 from .engine import IAConfig, IASession
@@ -35,7 +35,7 @@ class App:
                 info = self.broker.info()
             except BrokerError as e:
                 info = {"broker": self.broker.name, "error": str(e)}
-            return {"version": __version__, "account": info, "session": self.session.state(), "positions": self.broker.positions(),
+            return {"version": __version__, "preset": os.environ.get("TURBO_IA_PRESET", ""), "account": info, "session": self.session.state(), "positions": self.broker.positions(),
                     "telegram": self.session.notifier.status()}
 
     def chart(self, symbol: str, tf: str, n: int, mode: str, z_thr: Optional[float] = None) -> dict:
@@ -47,7 +47,13 @@ class App:
         s = series(candles, z_thr if z_thr else 2.0)
         a = analyze(candles[:-1], mode, utc_offset=self.broker.utc_offset, z_thr=z_thr) if len(candles) > 1 else None
         return {"symbol": symbol, "tf": tf, "candles": candles, "series": s, "analysis": a.to_dict() if a else None,
-                "bid": bid, "ask": ask, "digits": digits, "positions": self.broker.positions(symbol)}
+                "bid": bid, "ask": ask, "digits": digits, "positions": self._chart_positions(symbol)}
+
+    def _chart_positions(self, symbol: str) -> list:
+        root = b3.root_of(symbol)
+        if not root:
+            return self.broker.positions(symbol)
+        return [p for p in self.broker.positions() if b3.root_of(p["symbol"]) == root]   # WIN@ no gráfico, posição no contrato
 
     def manual_order(self, d: dict) -> dict:
         symbol, side = d.get("symbol"), str(d.get("side", "")).upper()
@@ -60,6 +66,17 @@ class App:
         dist = float(d.get("sl_atr", 1.5)) * (a.atr or 0)
         sl = (price - dist if side == "BUY" else price + dist) if dist else None
         tp = (price + float(d.get("rr", 1.5)) * dist if side == "BUY" else price - float(d.get("rr", 1.5)) * dist) if dist else None
+        root = b3.root_of(symbol or "")
+        if root and b3.is_continuous(symbol) and hasattr(self.broker, "contracts"):   # B3: WIN@ não é negociável → contrato vigente
+            import time as _time
+            tsym = b3.pick_contract(root, self.broker.contracts(root), _time.time())
+            bid, ask = self.broker.tick(tsym)
+            fill = ask if side == "BUY" else bid
+            if sl:
+                sl = fill - abs(price - sl) if side == "BUY" else fill + abs(price - sl)
+            if tp:
+                tp = fill + abs(tp - price) if side == "BUY" else fill - abs(tp - price)
+            symbol, price = tsym, fill
         volume = float(d.get("volume") or 0.01)
         risk_pct = float(d.get("risk_pct") or 0)
         if risk_pct > 0:                                   # mesmo cálculo da IA: lote para perder risk_pct % no stop
@@ -136,8 +153,13 @@ def make_handler(app: App):
                 p = urlparse(self.path).path
                 if p == "/api/ia/start":
                     mode = d.get("mode", "reversao")
+                    if mode == "b3":                           # WIN M15 swing: o mesmo cruzamento, aprovado na robustez da B3
+                        if b3.root_of(str(d.get("symbol", ""))) not in ("WIN", "IND"):
+                            return self._json({"ok": False, "error": "modo B3 só no mini índice: escolha WIN@ (o WDO reprovou nos testes)"})
+                        d = {**d, "mode": "cruzamento", "timeframe": "M15", "fast": 9, "slow": 20, "sl_atr": 2.0, "rr": 0}
+                        mode = "cruzamento"
                     if mode not in ("reversao", "cruzamento", "ensemble"):   # só estratégias que passaram nos testes
-                        self._json({"ok": False, "error": "modo não habilitado (Reversão ouro, Cruzamento 9×20 ou Ensemble E3)"})
+                        self._json({"ok": False, "error": "modo não habilitado (Reversão ouro, Cruzamento 9×20, Ensemble E3 ou B3 WIN M15)"})
                     elif app.session.st.running:
                         self._json({"ok": False, "error": "IA já está rodando"})
                     else:

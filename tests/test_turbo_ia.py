@@ -268,6 +268,158 @@ class TestMT5Broker(unittest.TestCase):
         self.assertEqual(m.sent, [])
 
 
+class TestB3Rules(unittest.TestCase):
+    def test_roots_and_expiry(self):
+        import datetime as dt
+        from turbo_ia import b3
+        self.assertEqual(b3.root_of("WIN@"), "WIN")
+        self.assertEqual(b3.root_of("WINZ26"), "WIN")
+        self.assertEqual(b3.root_of("WDO$N"), "WDO")
+        self.assertIsNone(b3.root_of("XAUUSD"))
+        self.assertTrue(b3.is_continuous("WIN@"))
+        self.assertFalse(b3.is_continuous("WINZ26"))
+        d = dt.datetime.fromtimestamp(b3.expiry_guess("WINZ26"), tz=b3.BRT).date()
+        self.assertEqual(d, dt.date(2026, 12, 16))              # quarta-feira mais próxima do dia 15
+        d = dt.datetime.fromtimestamp(b3.expiry_guess("WINQ26"), tz=b3.BRT).date()
+        self.assertEqual(d, dt.date(2026, 8, 12))               # 15/08/2026 é sábado → quarta 12
+
+    def test_pick_contract_rolls_before_expiry(self):
+        import datetime as dt
+        from turbo_ia import b3
+        ts = lambda *a: dt.datetime(*a, tzinfo=b3.BRT).timestamp()  # noqa: E731
+        lst = [("WINZ26", b3.expiry_guess("WINZ26")), ("WING27", b3.expiry_guess("WING27")), ("WIN@", 0)]
+        self.assertEqual(b3.pick_contract("WIN", lst, ts(2026, 11, 26, 10)), "WINZ26")
+        self.assertEqual(b3.pick_contract("WIN", lst, ts(2026, 12, 14, 10)), "WING27")   # faltam 2 dias: já é o próximo
+        self.assertEqual(b3.pick_contract("WIN", [], ts(2026, 11, 26, 10)), "WINZ26")    # sem lista: calendário
+        self.assertTrue(b3.needs_roll("WINZ26", lst, ts(2026, 12, 14, 10)))
+        self.assertFalse(b3.needs_roll("WINZ26", lst, ts(2026, 11, 26, 10)))
+
+    def test_session_window(self):
+        import datetime as dt
+        from turbo_ia import b3
+        ts = lambda *a: dt.datetime(*a, tzinfo=b3.BRT).timestamp()  # noqa: E731
+        self.assertTrue(b3.session_open(ts(2026, 11, 26, 10, 0)))      # quinta 10h
+        self.assertFalse(b3.session_open(ts(2026, 11, 26, 9, 0)))      # leilão de abertura
+        self.assertFalse(b3.session_open(ts(2026, 11, 26, 18, 20)))
+        self.assertFalse(b3.session_open(ts(2026, 11, 28, 11, 0)))     # sábado
+
+    def test_b3_mode_is_the_cross(self):
+        c = trend(200)
+        self.assertEqual(analyze(c, "b3").to_dict()["mode"], "cruzamento")
+
+
+class TestB3Execution(unittest.TestCase):
+    def setUp(self):
+        import datetime as dt
+        from turbo_ia import b3
+        self.b3 = b3
+        self.T = lambda *a: dt.datetime(*a, tzinfo=b3.BRT).timestamp()  # noqa: E731
+        b = PaperBroker(seed=3, balance=100_000)
+        b.syms = {"WIN@": (150_000.0, 0.0002, 0), "WINZ26": (150_000.0, 0.0002, 0), "WING27": (152_000.0, 0.0002, 0)}
+        b.connect()
+        b.contracts = lambda root: [("WINZ26", b3.expiry_guess("WINZ26")), ("WING27", b3.expiry_guess("WING27"))]
+        self.b = b
+        s = IASession(b, forward=ForwardLog(None))
+        s.cfg = IAConfig(mode="cruzamento", symbol="WIN@", timeframe="M15", risk_pct=2, sl_atr=2.0, rr=0, daily_loss_pct=0, loss_pct=0)
+        s.st.running, s.st.last_bar = True, 0
+        self.s = s
+
+    def step_with(self, side, now):
+        from turbo_ia.analysis import Analysis
+        import turbo_ia.engine as eng
+        price = self.b.candles("WIN@", "M15", 2)[-2]["close"]
+        sl = price - 400 if side == "BUY" else price + 400
+        self.s._now = lambda: now
+        orig = eng.analyze
+        try:
+            eng.analyze = lambda *a, **k: Analysis(side, 100, price, 200.0, sl, None, mode="cruzamento", label="x")
+            self.s.step()
+        finally:
+            eng.analyze = orig
+
+    def test_orders_go_to_current_contract_with_same_stop_distance(self):
+        self.step_with("BUY", self.T(2026, 11, 26, 10, 30))
+        pos = self.b.positions()
+        self.assertEqual(len(pos), 1)
+        p = pos[0]
+        self.assertEqual(p["symbol"], "WINZ26")
+        self.assertAlmostEqual(p["price_open"] - p["sl"], 400, delta=10)      # distância do stop preservada no contrato
+        self.assertEqual(self.s.state()["trade_symbol"], "WINZ26")
+
+    def test_waits_outside_session_without_spending_the_bar(self):
+        self.step_with("BUY", self.T(2026, 11, 26, 20, 0))
+        self.assertEqual(self.b.positions(), [])
+        self.assertEqual(self.s.st.last_bar, 0)                                 # o candle será analisado na abertura
+
+    def test_rolls_to_next_contract(self):
+        self.step_with("BUY", self.T(2026, 11, 26, 10, 30))
+        old = self.b.positions()[0]
+        self.s.st.last_bar = None
+        self.s._contracts_cache = (0.0, [])
+        self.step_with("BUY", self.T(2026, 12, 14, 10, 30))                    # faltam 2 dias para o WINZ26
+        pos = self.b.positions()
+        self.assertEqual([p["symbol"] for p in pos], ["WING27"])
+        self.assertEqual(pos[0]["side"], "BUY")
+        self.assertEqual(pos[0]["volume"], old["volume"])
+        self.assertEqual(self.s.st.open_ticket, pos[0]["ticket"])
+        self.assertEqual([c["ticket"] for c in self.s.st.closing], [old["ticket"]])
+        self.s._manage_open()
+        self.assertEqual(len(self.s.st.history), 1)                            # o resultado do contrato velho foi registrado
+        self.assertEqual(self.s.st.trades, 1)                                  # rolagem não conta como operação nova
+
+    def test_netting_foreign_position_blocks_entry(self):
+        self.b.foreign_volume = lambda sym: 1.0
+        self.step_with("BUY", self.T(2026, 11, 26, 10, 30))
+        self.assertEqual(self.b.positions(), [])
+
+    def test_restart_adopts_position_on_contract(self):
+        self.step_with("BUY", self.T(2026, 11, 26, 10, 30))
+        t = self.s.st.open_ticket
+        s2 = IASession(self.b, forward=ForwardLog(None))
+        s2.start(IAConfig(mode="cruzamento", symbol="WIN@", timeframe="M15", risk_pct=2, daily_loss_pct=0), spawn=False, quiet=True)
+        self.assertEqual(s2.st.open_ticket, t)
+
+
+class FakeMT5B3(FakeMT5):
+    TRADE_RETCODE_INVALID_FILL = 10030
+
+    def __init__(self, reject_fill=None):
+        super().__init__()
+        self.reject_fill = reject_fill
+
+    def symbol_info(self, s):
+        return SimpleNamespace(digits=0, volume_min=1, volume_step=1, volume_max=500, trade_contract_size=1, point=1.0,
+                               trade_tick_size=5.0, trade_tick_value=1.0, trade_stops_level=0, filling_mode=1)
+
+    def symbol_info_tick(self, s):
+        return SimpleNamespace(bid=150_000.0, ask=150_005.0)
+
+    def order_send(self, req):
+        self.sent.append(req)
+        if req["type_filling"] == self.reject_fill:
+            return SimpleNamespace(retcode=10030, order=0, price=0, comment="Unsupported filling mode")
+        return SimpleNamespace(retcode=10009, order=77, price=req["price"], comment="done")
+
+
+class TestMT5BrokerB3(unittest.TestCase):
+    def test_stop_rounded_to_tick_away_from_price(self):
+        m = FakeMT5B3()
+        b = MT5Broker(mt5=m)
+        b.open("WINZ26", "BUY", 2, sl=149_612.3)
+        self.assertEqual(m.sent[-1]["sl"], 149_610)
+        b.open("WINZ26", "SELL", 2, sl=150_387.0)
+        self.assertEqual(m.sent[-1]["sl"], 150_390)
+        b.open("WINZ26", "BUY", 2, sl=149_600.0)
+        self.assertEqual(m.sent[-1]["sl"], 149_600)                            # já múltiplo de 5: não mexe
+        self.assertEqual(b.spec("WINZ26")["value_per_unit"], 0.2)              # WIN: R$ 0,20 por ponto por contrato
+
+    def test_filling_fallback(self):
+        m = FakeMT5B3(reject_fill=FakeMT5.ORDER_FILLING_FOK)
+        r = MT5Broker(mt5=m).open("WINZ26", "BUY", 1, sl=149_600)
+        self.assertTrue(r["ok"])
+        self.assertEqual([q["type_filling"] for q in m.sent], [FakeMT5.ORDER_FILLING_FOK, FakeMT5.ORDER_FILLING_RETURN])
+
+
 if __name__ == "__main__":
     unittest.main()
 

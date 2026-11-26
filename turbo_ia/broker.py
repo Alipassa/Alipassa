@@ -356,6 +356,7 @@ class MT5Broker:
         i = self._select(symbol)
         return {"digits": i.digits, "volume_min": i.volume_min, "volume_step": i.volume_step, "volume_max": i.volume_max,
                 "contract_size": getattr(i, "trade_contract_size", 1.0), "point": i.point,
+                "tick_size": getattr(i, "trade_tick_size", 0) or i.point,   # WIN: 5 pontos — stop precisa ser múltiplo
                 "stops_level": getattr(i, "trade_stops_level", 0), "filling_mode": getattr(i, "filling_mode", 0),
                 # quanto 1 lote ganha/perde na moeda da conta quando o preço anda 1,0 (ouro: ~100 USD por lote = 100 oz)
                 "value_per_unit": (i.trade_tick_value / i.trade_tick_size) if getattr(i, "trade_tick_size", 0) else
@@ -397,17 +398,50 @@ class MT5Broker:
                 tp = max(tp, ask + min_dist) if buy else min(tp, bid - min_dist)
             vol = self.normalize_volume(volume, spec)
             d = spec["digits"]
+            ts = float(spec.get("tick_size") or 0)
+            if ts > point * 1.5:                       # B3: preço em múltiplos do tick (WIN 5 pts); stop arredondado para LONGE do preço
+                if sl:
+                    sl = math.floor(sl / ts + 1e-9) * ts if buy else math.ceil(sl / ts - 1e-9) * ts
+                if tp:
+                    tp = round(tp / ts) * ts
             req = {"action": self.mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": vol,
                    "type": self.mt5.ORDER_TYPE_BUY if buy else self.mt5.ORDER_TYPE_SELL, "price": price,
                    "sl": round(sl, d) if sl else 0.0, "tp": round(tp, d) if tp else 0.0, "deviation": self.deviation,
                    "magic": int(magic), "comment": comment[:31], "type_time": self.mt5.ORDER_TIME_GTC, "type_filling": self._filling(spec)}
-            res = self.mt5.order_send(req)
+            res = self._send(req)
             if res is None:
                 return {"ok": False, "error": f"order_send None: {self.mt5.last_error()}"}
             if res.retcode != self.mt5.TRADE_RETCODE_DONE:
                 return {"ok": False, "error": f"corretora recusou: {res.comment} (retcode {res.retcode})", "request": {k: v for k, v in req.items() if k != 'type_filling'}}
             return {"ok": True, "ticket": int(getattr(res, "order", 0)), "price": float(getattr(res, "price", price)), "volume": vol,
                     "sl": req["sl"], "tp": req["tp"]}
+
+    def _send(self, req: dict) -> Any:
+        """order_send; se a corretora recusar o tipo de preenchimento (retcode 10030, comum na B3), tenta os outros."""
+        res = self.mt5.order_send(req)
+        invalid_fill = getattr(self.mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
+        if res is None or res.retcode != invalid_fill:
+            return res
+        for f in (self.mt5.ORDER_FILLING_RETURN, self.mt5.ORDER_FILLING_IOC, self.mt5.ORDER_FILLING_FOK):
+            if f == req.get("type_filling"):
+                continue
+            res = self.mt5.order_send({**req, "type_filling": f})
+            if res is None or res.retcode != invalid_fill:
+                return res
+        return res
+
+    def contracts(self, root: str) -> list[tuple[str, float]]:
+        """B3: contratos do ativo (ex.: WINZ26, WING27…) com o vencimento informado pelo MT5 (UTC)."""
+        out = []
+        for s in self.mt5.symbols_get(group=f"{root}*") or []:
+            exp = float(getattr(s, "expiration_time", 0) or 0)
+            out.append((s.name, server_to_utc(int(exp), self.utc_offset) if exp else 0.0))
+        return out
+
+    def foreign_volume(self, symbol: str) -> float:
+        """Volume aberto no símbolo que NÃO é da IA (conta netting: uma ordem da IA se somaria a ele)."""
+        ps = self.mt5.positions_get(symbol=symbol) or []
+        return float(sum(p.volume for p in ps if getattr(p, "magic", 0) not in MAGICS))
 
     def positions(self, symbol: Optional[str] = None) -> list[dict]:
         ps = (self.mt5.positions_get(symbol=symbol) if symbol else self.mt5.positions_get()) or []
@@ -432,7 +466,7 @@ class MT5Broker:
                    "type": self.mt5.ORDER_TYPE_SELL if buy else self.mt5.ORDER_TYPE_BUY, "price": bid if buy else ask,
                    "deviation": self.deviation, "magic": int(p.get("magic", MAGIC)), "comment": f"TurboIA {reason}"[:31],
                    "type_time": self.mt5.ORDER_TIME_GTC, "type_filling": self._filling(spec)}
-            res = self.mt5.order_send(req)
+            res = self._send(req)
             ok = res is not None and res.retcode == self.mt5.TRADE_RETCODE_DONE
             return {"ok": ok, "ticket": ticket, "profit": p["profit"], "error": None if ok else f"{getattr(res, 'comment', self.mt5.last_error())}"}
 

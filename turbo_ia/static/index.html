@@ -93,6 +93,7 @@
           <option value="ensemble" selected>🧩 Ensemble E3 · 3 cruzamentos ouro</option>
           <option value="cruzamento">📈 Cruzamento 9×20 ouro H1</option>
           <option value="reversao">🧪 Reversão ouro (não passou no cofre)</option>
+          <option value="b3">🇧🇷 B3 · WIN M15 cruzamento 9×20 (swing)</option>
         </select></div>
     </div>
     <div class="hint" id="modeHint">Mais negociações, menos precisão</div>
@@ -206,10 +207,11 @@ const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
 const MODE_HINT = {veloz:'Mais negociações, menos precisão', equilibrado:'Equilíbrio entre frequência e precisão', preciso:'Menos negociações, mais confirmação',
   ensemble:'TESTE EM DEMO · ouro (XAUUSD) · 3 sistemas de cruzamento dividindo o MESMO risco: 9×20 H1 + 20×50 H1 + 9×20 M30 (cada um 1/3 do risco) · stop 2 ATR, vira a mão no cruzamento contrário · Pepperstone 2016–2026: +412 ATR, pior ano −12 (o 9×20 sozinho: −56), maior queda 64 (× 94) · precisa de conta maior: lote mínimo × stop de 2 ATR',
   cruzamento:'TESTE EM DEMO · ouro (XAUUSD) H1 · média 9 cruza a 20: para cima COMPRA, para baixo VENDE · sai e vira a mão no cruzamento contrário · stop 2 ATR, sem alvo · opera o dia todo (~27 ops/mês) · Pepperstone 2016–2026: 8 de 11 anos positivos, +0,13 ATR/op · espere anos laterais no vermelho (2018: −56 ATR)',
+  b3:'TESTE EM DEMO · B3 mini índice (WIN@ na XP) M15 · média 9 cruza a 20: COMPRA/VENDE e vira a mão no cruzamento contrário · stop 2 ATR, sem alvo · SWING: a posição pode dormir (margem cheia) · ordens no contrato vigente, rolagem automática 3 dias antes do vencimento · só das 09h05 às 18h15 de Brasília · XP 2022–2026: +229 ATR, 4 de 5 anos positivos, pior ano −27 · robustez 22 de 25',
   reversao:'NÃO PASSOU NO COFRE (jan–mai/2026: −0,07 R/op) ·  · ouro (XAUUSD) M2 · só às HL1 e às HL2 no seu relógio (16h e 20h UTC) · entra com o preço > 2 ATR da média 20 · alvo 3× o stop (1 ATR) · Pepperstone: ~63 ops/mês, ~34% de acerto, +0,30 R/op · espere 8+ stops seguidos'};
 
 async function refreshForward() {
-  const isCross = ['cruzamento', 'ensemble'].includes($('mode').value);
+  const isCross = ['cruzamento', 'ensemble', 'b3'].includes($('mode').value);
   $('fwdCard').style.display = isCross ? 'none' : '';      // sem alvo fixo: o acompanhamento é o relatório 11 (MT5)
   if (isCross) return;
   const rr = +$('rr').value || 0;
@@ -256,7 +258,7 @@ function renderChart(d) {
   lsma.setData(show.lsma ? toLine(c, s.lsma) : []);
   kcU.setData(show.kc ? toLine(c, s.kc_up) : []); kcM.setData(show.kc ? toLine(c, s.kc_mid) : []); kcL.setData(show.kc ? toLine(c, s.kc_lo) : []);
   sar.setData(show.sar ? toLine(c, s.sar) : []);
-  const cross = ['cruzamento', 'ensemble'].includes($('mode').value);
+  const cross = ['cruzamento', 'ensemble', 'b3'].includes($('mode').value);
   const showRev = show.rev && !cross;
   revM.setData(showRev ? toLine(c, s.rev_mid) : []); revU.setData(showRev ? toLine(c, s.rev_up) : []); revL.setData(showRev ? toLine(c, s.rev_lo) : []);
   ma9.setData(cross && show.rev ? toLine(c, s.sma9) : []); ma20.setData(cross && show.rev ? toLine(c, s.sma20) : []);
@@ -325,7 +327,7 @@ async function refreshChart() {
   } catch(e) { $('tSub').textContent = 'servidor indisponível'; }
 }
 
-const UI_VERSION = '1.1.0';               // precisa bater com turbo_ia.__version__ (servidor)
+const UI_VERSION = '1.2.0';               // precisa bater com turbo_ia.__version__ (servidor)
 let versionWarned = false;
 async function refreshStatus() {
   let d; try { d = await api('/api/status'); } catch(e) { return; }
@@ -346,10 +348,11 @@ async function refreshStatus() {
   if (running && !window._cfgShown && s.config) {     // página aberta com a IA já rodando: mostra a configuração REAL dela
     window._cfgShown = true;
     const c = s.config, set = (id, v) => { if (v !== undefined && v !== null) $(id).value = v; };
-    set('mode', c.mode); set('tf', c.timeframe); set('riskpct', c.risk_pct); set('volume', c.volume); set('target', c.target_pct);
+    set('mode', c.mode === 'cruzamento' && /^(WIN|IND)/i.test(c.symbol || '') ? 'b3' : c.mode); set('tf', c.timeframe); set('riskpct', c.risk_pct); set('volume', c.volume); set('target', c.target_pct);
     set('loss', c.loss_pct); set('pafter', c.protect_after_pct); set('pkeep', c.protect_keep_pct); set('rr', c.rr); set('slatr', c.sl_atr); set('dur', c.duration_candles); set('zthr', c.z_thr); set('stopblock', c.stop_block); set('dailyloss', c.daily_loss_pct);
     $('protect').checked = !!c.protect;
-    if ([...$('symbol').options].some(o => o.value === c.symbol)) $('symbol').value = c.symbol;
+    if (![...$('symbol').options].some(o => o.value === c.symbol)) $('symbol').add(new Option(c.symbol, c.symbol));
+    $('symbol').value = c.symbol;
   }
   $('iaBtn').textContent = running ? '■ Parar IA' : '▶ Iniciar IA';
   $('iaBtn').classList.toggle('on', running);
@@ -357,7 +360,7 @@ async function refreshStatus() {
   $('sessPnl').textContent = `${s.pnl>=0?'+':''}${fmt(s.pnl)} (${s.trades} ops · ${s.wins}G/${s.losses}P)`;
   $('sessPnl').className = 'pnl' + (s.pnl < 0 ? ' neg' : '');
   const lim = s.limits || {};
-  $('iaStatus').textContent = running ? `IA operando ${s.config.symbol} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}` +
+  $('iaStatus').textContent = running ? `IA operando ${s.config.symbol}${s.trade_symbol && s.trade_symbol !== s.config.symbol ? ' → ordens em ' + s.trade_symbol : ''} ${s.config.timeframe} · ${s.open_ticket ? 'posição #' + s.open_ticket + ' aberta' : 'procurando entrada'}` +
       (s.systems ? ' · ' + s.systems.map(x => `${x.label}: ${x.open ? (x.side === 'BUY' ? '🟢' : '🔴') : '·'}`).join('  ') : '') +
       (s.day_braked ? ` · FREIO DIÁRIO ativo (hoje ${fmt(s.day_pnl)}) — volta amanhã` : (lim.daily ? ` · hoje ${fmt(s.day_pnl)} (freio em -${fmt(lim.daily)})` : '')) + (lim.loss ? ` · para se perder ${fmt(lim.loss)}` : '') + (lim.target ? ` · meta +${fmt(lim.target)}` : '')
                                       : (s.stopped_reason ? 'Parada: ' + s.stopped_reason : 'IA parada');
@@ -410,6 +413,7 @@ $('mode').onchange = () => {
   $('modeHint').textContent = MODE_HINT[$('mode').value].replace('HL1', lh(16)).replace('HL2', lh(20));
   $('stratName').textContent = $('mode').value === 'reversao' ? 'Reversão à média 20 (esticada mín. em ATR) · 16h/20h UTC'
                               : $('mode').value === 'ensemble' ? 'Ensemble: SMA 9×20 H1 + 20×50 H1 + 9×20 M30 · risco dividido'
+                              : $('mode').value === 'b3' ? 'B3: SMA 9 × SMA 20 no WIN M15 · stop 2 ATR · swing · contrato vigente com rolagem'
                               : 'Cruzamento SMA 9 × SMA 20 · stop 2 ATR · vira a mão no cruzamento contrário';
   if (['cruzamento', 'ensemble'].includes($('mode').value)) {         // configuração validada em 2016–2026 (escolha do usuário: 2 %)
     $('tf').value = 'H1'; $('dur').value = 0; $('slatr').value = 2; $('rr').value = 0;
@@ -418,6 +422,15 @@ $('mode').onchange = () => {
     $('loss').value = 50; $('dailyloss').value = 10;
     const gold = [...$('symbol').options].find(o => /^(XAUUSD|GOLD)/i.test(o.value));
     if (gold) $('symbol').value = gold.value;
+  }
+  if ($('mode').value === 'b3') {                 // configuração aprovada na B3 (XP 2022–2026, robustez 22/25)
+    $('tf').value = 'M15'; $('dur').value = 0; $('slatr').value = 2; $('rr').value = 0;
+    $('riskpct').value = 2; $('target').value = 0; $('protect').checked = false; $('stopblock').value = '';
+    syncRisk();
+    $('loss').value = 50; $('dailyloss').value = 10;
+    let win = [...$('symbol').options].find(o => /^WIN(@|\$)/i.test(o.value));
+    if (!win) { win = new Option('WIN@', 'WIN@'); $('symbol').add(win); }   // a série contínua da XP; o MT5 habilita ao pedir
+    $('symbol').value = win.value;
   }
   if ($('mode').value === 'reversao') {           // configuração com que a regra foi testada
     $('tf').value = 'M2'; $('dur').value = 0; $('slatr').value = 1; $('rr').value = 3;   // ganho 3×, perda 1×
@@ -439,6 +452,7 @@ $('riskpct').oninput = () => { syncRisk(); const r = +$('riskpct').value || 0; i
 
 (async () => {
   await loadSymbols(); await refreshStatus();
+  try { const st0 = await api('/api/status'); if (!running && st0.preset === 'b3') $('mode').value = 'b3'; } catch(e) {}   // pacote B3 (.env)
   if (!running) $('mode').onchange();                 // abre já na Reversão ouro com a configuração testada
   await refreshChart();
   setInterval(refreshChart, 2000); setInterval(refreshStatus, 1500); refreshForward(); setInterval(refreshForward, 5000);

@@ -15,6 +15,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
+from . import b3
 from .analysis import analyze
 from .broker import MAGIC, lot_for_risk
 from .forward import ForwardLog
@@ -112,6 +113,81 @@ class IASession:
         self._stop = threading.Event()
         self.block_entries = False          # ensemble: freio diário da carteira bloqueia novas entradas
         self.summary_enabled = True         # ensemble: o resumo do dia sai uma vez só, pela carteira
+        self._contracts_cache: tuple[float, list] = (0.0, [])
+
+    # ------------------------------------------------------------------ B3: contrato vigente e pregão
+    def _now(self) -> float:
+        return float(getattr(self.broker, "clock", time.time)())
+
+    def _contracts(self, root: str) -> list:
+        t, lst = self._contracts_cache
+        if not lst or time.time() - t > 600:
+            fn = getattr(self.broker, "contracts", None)
+            try:
+                lst = list(fn(root)) if fn else []
+            except Exception:  # noqa: BLE001
+                lst = []
+            self._contracts_cache = (time.time(), lst)
+        return lst
+
+    def trade_symbol(self) -> str:
+        """Onde a ordem vai: o próprio símbolo, ou — na série contínua da B3 (WIN@) — o contrato vigente (ex.: WINZ26)."""
+        c = self.cfg
+        root = b3.root_of(c.symbol)
+        if not root or not b3.is_continuous(c.symbol) or not hasattr(self.broker, "contracts"):
+            return c.symbol
+        try:
+            return b3.pick_contract(root, self._contracts(root), self._now())
+        except Exception:  # noqa: BLE001
+            return c.symbol
+
+    def _pos_filter(self) -> Optional[str]:
+        """Símbolo para listar as posições da IA (None = todos: na B3 a posição está no contrato, não no WIN@)."""
+        return None if b3.root_of(self.cfg.symbol) else self.cfg.symbol
+
+    def _b3_roll(self) -> None:
+        """Faltando poucos dias para o vencimento: fecha no contrato velho e reabre no novo, mesmo lado e mesma distância de stop."""
+        t, c, b = self.st.open_ticket, self.cfg, self.broker
+        root = b3.root_of(c.symbol)
+        if t is None or not root or not b3.is_continuous(c.symbol):
+            return
+        pos = next((p for p in b.positions(None) if p["ticket"] == t), None)
+        if not pos or not b3.needs_roll(pos["symbol"], self._contracts(root), self._now()):
+            return
+        new = self.trade_symbol()
+        if new.upper() == pos["symbol"].upper():
+            return
+        side = pos["side"]
+        try:
+            bid, ask = b.tick(pos["symbol"])
+            dist = abs((bid if side == "BUY" else ask) - pos["sl"]) if pos.get("sl") else 0.0
+        except Exception:  # noqa: BLE001
+            dist = 0.0
+        if not dist:
+            atr = float((self.st.last_analysis or {}).get("atr") or 0)
+            dist = c.sl_atr * atr
+        r = b.close(t, "rolagem")
+        if not r.get("ok"):
+            self.log(f"rolagem: não consegui fechar #{t} em {pos['symbol']}: {r.get('error')}", "error")
+            self.notify(f"⚠️ rolagem: não fechou #{t} em {pos['symbol']}: {r.get('error')}", dedup_key=f"roll:{t}")
+            return
+        with self.lock:
+            self.st.closing.append({"ticket": t, "side": side, "window": self.st.open_window})
+            self.st.open_ticket = self.st.open_bar = self.st.open_side = None
+        nb, na = b.tick(new)
+        fill = na if side == "BUY" else nb
+        sl = (fill - dist if side == "BUY" else fill + dist) if dist else None
+        res = b.open(new, side, pos["volume"], sl, None, "TurboIA rolagem", magic=c.magic)
+        if not res.get("ok"):
+            self.log(f"rolagem: #{t} fechada em {pos['symbol']}, mas a reabertura em {new} falhou: {res.get('error')} — "
+                     "fica fora até o próximo cruzamento", "error")
+            self.notify(f"⚠️ rolagem: fechou {pos['symbol']}, não reabriu em {new}: {res.get('error')}", dedup_key=f"roll2:{t}")
+            return
+        with self.lock:
+            self.st.open_ticket, self.st.open_side, self.st.open_bar = res["ticket"], side, self.st.last_bar
+        self.log(f"ROLAGEM {pos['symbol']} → {new}: {'COMPRA' if side == 'BUY' else 'VENDA'} #{res['ticket']} {res['volume']} @ "
+                 f"{res['price']} · SL {res['sl']}", "trade")
+        self.notify(f"🔁 Rolagem {pos['symbol']} → {new}\n{'COMPRA' if side == 'BUY' else 'VENDA'} {res['volume']} @ {res['price']} · stop {res['sl']}")
 
     # ------------------------------------------------------------------ controle
     def log(self, msg: str, kind: str = "info") -> None:
@@ -162,7 +238,7 @@ class IASession:
             from . import indicators as ind
             cs = self.broker.candles(c.symbol, c.timeframe, 60)
             a = [x for x in ind.atr(cs, 14) if x][-1]
-            spec = self.broker.spec(c.symbol)
+            spec = self.broker.spec(self.trade_symbol())
             eq = float(self.broker.info().get("equity") or 0)
         except Exception:  # noqa: BLE001
             return ""
@@ -191,7 +267,8 @@ class IASession:
             self.st = SessionState(running=True, started_at=time.time(), start_equity=eq)
             self._stop.clear()
             try:
-                mine = sorted([p for p in self.broker.positions(cfg.symbol) if p.get("magic", MAGIC) == cfg.magic],
+                mine = sorted([p for p in self.broker.positions(self._pos_filter()) if p.get("magic", MAGIC) == cfg.magic
+                               and (p["symbol"] == cfg.symbol or b3.root_of(p["symbol"]) == (b3.root_of(cfg.symbol) or "-"))],
                               key=lambda p: p.get("time", 0))
             except Exception:  # noqa: BLE001
                 mine = []
@@ -199,6 +276,10 @@ class IASession:
                 p = mine[-1]
                 self.st.open_ticket, self.st.open_side = p["ticket"], p["side"]
         lim = self.limits()
+        tsym = self.trade_symbol()
+        if tsym != cfg.symbol:
+            self.log(f"B3: análise em {cfg.symbol}, ordens no contrato vigente {tsym} (rolagem automática {b3.ROLL_DAYS:g} dias antes "
+                     f"do vencimento) · ordens só das 09h05 às 18h15 de Brasília", "start")
         self.log(f"IA iniciada · {cfg.symbol} {cfg.timeframe} · risco {cfg.risk_pct:g}%/op · saldo inicial {eq:.2f} · "
                  f"meta {('+%.2f' % lim['target']) if lim['target'] else 'nenhuma'} · "
                  f"limite de perda {('-%.2f' % lim['loss']) if lim['loss'] else 'nenhum'}", "start")
@@ -234,6 +315,10 @@ class IASession:
             d = asdict(self.st)
             d["config"] = asdict(self.cfg)
             d["limits"] = self.limits()
+            try:
+                d["trade_symbol"] = self.trade_symbol() if self.st.running else self.cfg.symbol
+            except Exception:  # noqa: BLE001
+                d["trade_symbol"] = self.cfg.symbol
             return d
 
     # ------------------------------------------------------------------ laço
@@ -261,6 +346,10 @@ class IASession:
         self._daily_summary()
         if self._check_limits():
             return
+        if b3.root_of(c.symbol):                          # B3: só no pregão (fora dele o candle não é "gasto")
+            if not b3.session_open(self._now()):
+                return
+            self._b3_roll()
         candles = b.candles(c.symbol, c.timeframe, 300)
         if len(candles) < 2:
             return
@@ -309,13 +398,33 @@ class IASession:
         if why:
             self.log(f"sem entrada ({why})", "skip")
             return
+        tsym = self.trade_symbol()
+        if tsym != c.symbol and a.sl:                     # B3: stop com a mesma distância, no preço do contrato
+            try:
+                tb, ta = b.tick(tsym)
+                fill0 = ta if a.signal == "BUY" else tb
+                dist = abs(a.price - a.sl)
+                a.sl = fill0 - dist if a.signal == "BUY" else fill0 + dist
+            except Exception as e:  # noqa: BLE001
+                self.log(f"sem preço de {tsym}: {e}", "error")
+                return
+        fv = getattr(b, "foreign_volume", None)
+        if b3.root_of(c.symbol) and fv:
+            try:
+                other = fv(tsym)
+            except Exception:  # noqa: BLE001
+                other = 0.0
+            if other:
+                self.log(f"há {other:g} contrato(s) em {tsym} que não são da IA — conta netting: a ordem se misturaria. Entrada pulada", "error")
+                self.notify(f"⚠️ posição manual em {tsym}: a IA não entra (conta netting)", dedup_key=f"foreign:{tsym}")
+                return
         volume, risk_note = c.volume, ""
         if c.risk_pct > 0:
             if not a.sl:
                 self.log("risco % exige stop — operação pulada", "error")
                 return
             eq = float(b.info().get("equity") or 0)
-            bid, ask = b.tick(c.symbol)
+            bid, ask = b.tick(tsym)
             fill = ask if a.signal == "BUY" else bid
             if (a.signal == "BUY" and fill <= a.sl) or (a.signal == "SELL" and fill >= a.sl):
                 self.log(f"preço já passou do stop ({fill} × SL {a.sl}) — operação pulada", "skip")
@@ -323,16 +432,16 @@ class IASession:
             if (ask - bid) > 0.3 * abs(fill - a.sl):
                 self.log(f"spread anormal agora ({ask - bid:.2f} > 30 % do stop {abs(fill - a.sl):.2f}) — operação pulada", "skip")
                 return
-            volume, risk_money, note = lot_for_risk(b.spec(c.symbol), fill, a.sl, eq, min(c.risk_pct, 10.0))
+            volume, risk_money, note = lot_for_risk(b.spec(tsym), fill, a.sl, eq, min(c.risk_pct, 10.0))
             if not volume:
                 self.log(note, "skip")
                 return
             risk_note = f" · risco {risk_money:.2f} ({risk_money / eq:.1%} do saldo {eq:.2f})"
         try:
-            q_bid, q_ask = b.tick(c.symbol)                 # preço no instante do envio (para medir custo real)
+            q_bid, q_ask = b.tick(tsym)                     # preço no instante do envio (para medir custo real)
         except Exception:  # noqa: BLE001
             q_bid = q_ask = None
-        res = b.open(c.symbol, a.signal, volume, a.sl, a.tp, f"TurboIA {c.label or c.mode}", magic=c.magic)
+        res = b.open(tsym, a.signal, volume, a.sl, a.tp, f"TurboIA {c.label or c.mode}", magic=c.magic)
         if not res.get("ok"):
             self.log(f"ordem recusada: {res.get('error')}", "error")
             self.notify(f"⚠️ ordem recusada: {res.get('error')}", dedup_key=f"ref:{str(res.get('error'))[:60]}")
@@ -346,7 +455,7 @@ class IASession:
         if c.mode != "cruzamento":                       # cruzamento não tem alvo fixo: o resultado vem do histórico do MT5
             self.forward.add(c.symbol, c.timeframe, c.mode, a.signal, int(closed[-1]["time"]), float(closed[-1]["close"]), c.expiry_min, acct,
                              getattr(b, "name", ""), sl=a.sl, tp=a.tp)
-        self._log_execution({"t": time.time(), "ticket": res["ticket"], "symbol": c.symbol, "tf": c.timeframe, "side": a.signal,
+        self._log_execution({"t": time.time(), "ticket": res["ticket"], "symbol": tsym, "tf": c.timeframe, "side": a.signal,
                              "signal_close": float(closed[-1]["close"]), "signal_time": int(closed[-1]["time"]),
                              "bid": q_bid, "ask": q_ask, "fill": res.get("price"), "sl": res.get("sl"), "tp": res.get("tp"),
                              "volume": res.get("volume"), "broker": getattr(b, "name", ""), "mode": c.mode})
@@ -355,7 +464,7 @@ class IASession:
             self.st.open_side, self.st.open_window = a.signal, window
             self.st.trades += 1
             self.st.day_trades += 1
-        self.notify(f"{'🟢 COMPRA' if a.signal == 'BUY' else '🔴 VENDA'} {c.symbol} {res['volume']} @ {res['price']}\n"
+        self.notify(f"{'🟢 COMPRA' if a.signal == 'BUY' else '🔴 VENDA'} {tsym} {res['volume']} @ {res['price']}\n"
                     f"stop {res['sl']} · alvo {res['tp']}{risk_note.replace(' · ', chr(10), 1) if risk_note else ''}")
         self.log(f"{'COMPRA' if a.signal == 'BUY' else 'VENDA'} #{res['ticket']} {res['volume']} @ {res['price']} · SL {res['sl']} · TP {res['tp']} · "
                  f"força {a.strength:.0f}%{risk_note} · {', '.join(a.reasons[:3])}", "trade")
@@ -370,7 +479,7 @@ class IASession:
         if t is None:
             return
         c = self.cfg
-        open_now = [p for p in self.broker.positions(c.symbol) if p["ticket"] == t]
+        open_now = [p for p in self.broker.positions(self._pos_filter()) if p["ticket"] == t]
         if open_now and c.duration_candles > 0 and self.st.open_bar is not None:
             sec = TF_SECONDS.get(c.timeframe, 60)
             last = self.broker.candles(c.symbol, c.timeframe, 2)[-1]["time"]

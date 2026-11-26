@@ -319,6 +319,36 @@ onde está o lucro (2020: +192 sem filtro × +74 com ADX > 20). O "lado da SMA 2
 positivos, o dobro de R por operação), mas teve pior ano mais fundo e menos lucro no período recente — fica como
 candidato a reavaliar com os dados da demo, não como regra.
 
+## 🇧🇷 Modo B3 · WIN M15 cruzamento 9×20 (swing) — desde 26/11/2026
+
+Mesma regra do cruzamento (SMA 9 × SMA 20, stop 2 ATR, sem alvo, vira a mão no cruzamento contrário), no **mini índice M15**,
+com a posição podendo dormir (swing). Dados da XP 2022–2026, custo B3 completo (13 pontos por operação):
+
+| Teste | Resultado |
+|---|---|
+| WIN M15 swing 9×20 | +229 ATR · 4 de 5 anos positivos · pior ano −27 · +0,09 ATR/op |
+| Robustez WIN M15 swing (25 pares de médias) | **22 de 25 positivas** — regra fixada antes: ≥ 18 e o 9×20 positivo → **aprovado** |
+| Robustez WIN M15 day trade (zera 17h50) | 17 de 25 — reprovado |
+| WIN M30 / H1 swing | −21 / −39 — reprovado |
+| WDO (todos os gráficos, swing e day trade) | negativo — reprovado (o painel recusa WDO no modo B3) |
+| Ensembles na B3 | todos negativos |
+
+Ressalva: foram 64 combinações de ativo × gráfico × regime testadas na B3 e só o WIN M15 swing passou; o resultado precisa
+se confirmar em dados novos (demo) antes de qualquer conta real.
+
+Execução (`b3.py` + `engine.py`):
+- **análise** na série contínua `WIN@` (XP); **ordens** no contrato vigente (ex.: `WINZ26`), escolhido pelo vencimento do MT5
+  (sem a data, usa o calendário: quarta-feira mais próxima do dia 15 dos meses pares);
+- **rolagem**: faltando 3 dias para o vencimento, fecha no contrato velho e reabre no novo, mesmo lado e mesma distância de stop
+  (não conta como operação nova; o resultado do contrato velho entra no histórico);
+- **pregão**: ordens só das 09h05 às 18h15 de Brasília; fora disso a IA espera e analisa o candle na abertura seguinte;
+- **netting**: se houver posição manual (ou de outro robô) no contrato, a IA não entra (a ordem se somaria a ela);
+- stop arredondado para múltiplos de 5 pontos, para longe do preço; preenchimento FOK → RETURN/IOC se a corretora recusar;
+- lote pelo risco: WIN vale R$ 0,20 por ponto por contrato (stop de 2 ATR no M15 ≈ 300–500 pontos ≈ R$ 60–100 por contrato);
+- swing exige a **margem cheia** do contrato (a de day trade é bem menor) — confirme com a XP;
+- ordem manual no `WIN@` também vai para o contrato vigente; conta real bloqueada sem `TURBO_IA_ALLOW_REAL=1`;
+- pacote B3: `.env` com `MT5_PATH` da XP, `TURBO_IA_UTC_OFFSET=-3` e `TURBO_IA_PRESET=b3` (o painel abre no modo B3).
+
 ## Programa de validação (itens 2–7) — `program.py` e `costs.py`
 
 Regras escritas ANTES dos resultados. Dados divididos no tempo:

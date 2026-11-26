@@ -166,7 +166,7 @@ def analyze_cross(candles: list[dict], sl_atr: float = CROSS_SL_ATR, fast: int =
 
 def analyze(candles: list[dict], mode: str = "veloz", rr: float = 1.5, sl_atr: float = 1.5, utc_offset: float = 0.0,
             z_thr: Optional[float] = None, fast: int = CROSS_FAST, slow: int = CROSS_SLOW) -> Analysis:
-    if mode == "cruzamento":
+    if mode in ("cruzamento", "b3"):                  # b3 = o mesmo cruzamento, no WIN M15 (painel)
         return analyze_cross(candles, sl_atr=sl_atr if sl_atr > 0 else CROSS_SL_ATR, fast=fast, slow=slow)
     if mode == "reversao":
         return analyze_reversion(candles, sl_atr=sl_atr, utc_offset=utc_offset, rr=rr,

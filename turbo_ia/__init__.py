@@ -4,7 +4,7 @@
     python -m turbo_ia --broker mt5    # usa o terminal MT5 aberto/logado (conta DEMO por padrão)
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # No Windows, com a saída redirecionada para arquivo, o Python usa cp1252 e quebra em "×", "≈", "✔"…: força UTF-8.
 import sys as _sys
