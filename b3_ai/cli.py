@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import sys
 from datetime import datetime
 
@@ -190,6 +191,88 @@ def cmd_opiniao(args: argparse.Namespace) -> int:
     return 0 if r.get("ok") else 1
 
 
+def _env_set(values: dict[str, str], path: str = ".env") -> None:
+    """Grava/atualiza CHAVE=valor no .env sem mexer nas outras linhas."""
+    lines = open(path, encoding="utf-8").read().splitlines() if os.path.exists(path) else []
+    done = set()
+    for i, line in enumerate(lines):
+        k = line.split("=", 1)[0].strip()
+        if "=" in line and not line.lstrip().startswith("#") and k in values:
+            lines[i] = f"{k}={values[k]}"
+            done.add(k)
+    lines += [f"{k}={v}" for k, v in values.items() if k not in done]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    for k, v in values.items():
+        os.environ[k] = v
+
+
+def _tg(token: str, method: str, **params) -> dict:
+    import json
+    import urllib.parse
+    import urllib.request
+    data = urllib.parse.urlencode(params).encode() if params else None
+    with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/{method}", data=data, timeout=15) as r:
+        return json.loads(r.read())
+
+
+def cmd_telegram(args: argparse.Namespace) -> int:
+    """Configura o aviso no celular: valida o token do bot, descobre o seu chat sozinho e grava no .env."""
+    from . import alerts
+    if args.resumo:
+        e = _engine(args)
+        s = e.cycle()
+        msg = e.preopen_text(s.get("ativos") or {}, s.get("agenda") or {}, time.time())
+        print(msg or "sem dados para o resumo")
+        ok = bool(msg) and alerts.send_telegram(msg)
+        print("enviado ao Telegram" if ok else "NÃO enviado: confira a configuração (rode configurar_telegram.bat)")
+        return 0 if ok else 1
+    token, chat = alerts.telegram_config()
+    if args.teste:
+        ok = alerts.send_telegram("✅ B3 AI — teste: os avisos do painel vão chegar aqui.")
+        print("mensagem de teste enviada" if ok else "falhou: token ou chat não configurados (ou sem internet)")
+        return 0 if ok else 1
+    print("Configuração do aviso no celular (Telegram)\n")
+    print("1) No Telegram, abra a conversa com @BotFather, mande /newbot e siga as instruções (nome e usuário do robô).")
+    print("2) O BotFather responde com um TOKEN parecido com 123456789:AAxxxx... — copie e cole aqui.\n")
+    t = input(f"Token do robô{' (Enter mantém o atual)' if token else ''}: ").strip() or token
+    if not t:
+        print("sem token: nada foi alterado")
+        return 1
+    try:
+        me = _tg(t, "getMe")
+    except Exception as e:  # noqa: BLE001
+        print(f"token recusado pelo Telegram ou sem internet ({e})")
+        return 1
+    user = me.get("result", {}).get("username", "")
+    print(f"\nRobô encontrado: @{user}")
+    print(f"3) Agora, no Telegram, abra https://t.me/{user} , toque em INICIAR e mande qualquer mensagem (ex.: oi).")
+    print("   Aguardando a sua mensagem (até 3 minutos)...")
+    found = ""
+    for _ in range(60):
+        try:
+            ups = _tg(t, "getUpdates").get("result", [])
+        except Exception:  # noqa: BLE001
+            ups = []
+        for u in reversed(ups):
+            m = u.get("message") or u.get("edited_message") or {}
+            if m.get("chat", {}).get("id"):
+                found = str(m["chat"]["id"])
+                break
+        if found:
+            break
+        time.sleep(3)
+    if not found:
+        print("nenhuma mensagem chegou: rode de novo e mande a mensagem para o robô")
+        return 1
+    _env_set({"TELEGRAM_BOT_TOKEN": t, "TELEGRAM_CHAT_ID": found})
+    ok = alerts.send_telegram("✅ B3 AI conectado. Você vai receber aqui: 🎯 gap forte, 🏦 Banco Central, ⚡ movimento brusco, "
+                              "📊 dado divulgado, 🚨 alerta de 90% e, em dia de pregão, o resumo antes da abertura (8h20).")
+    print("\nPronto: configuração gravada no arquivo .env e mensagem de confirmação enviada." if ok else "\ngravado, mas o envio de teste falhou")
+    print("Reinicie o painel para ele passar a enviar os avisos.")
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="b3_ai", description="B3 AI — mercado brasileiro × exterior, probabilidades do mini índice e do mini dólar")
     p.add_argument("--dados", default="dados", help="pasta do banco local (padrão: dados)")
@@ -233,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
     hz = sub.add_parser("horizontes", help="qual prazo acerta mais: 5 min, 10 min, 30 min ou 1 hora")
     hz.add_argument("--saida", default="relatorios")
     hz.set_defaults(func=cmd_horizontes)
+    tg = sub.add_parser("telegram", help="configura o aviso no celular pelo Telegram (descobre o chat sozinho)")
+    tg.add_argument("--teste", action="store_true", help="só envia uma mensagem de teste")
+    tg.add_argument("--resumo", action="store_true", help="lê o mercado e envia agora o resumo de antes da abertura")
+    tg.set_defaults(func=cmd_telegram)
     op = sub.add_parser("opiniao", help="opinião do painel sobre os dados atuais (local, sem custo)")
     op.set_defaults(func=cmd_opiniao)
     args = p.parse_args(argv)

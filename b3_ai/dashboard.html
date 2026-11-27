@@ -90,6 +90,17 @@ ul.read{margin:0;padding-left:18px} ul.read li{margin:6px 0}
 canvas{width:100%;height:100%;display:block}
 #tip{position:fixed;pointer-events:none;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:12px;display:none;z-index:9;box-shadow:0 4px 14px rgba(0,0,0,.3)}
 input,select{font:inherit;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+#opView{display:none}
+body.op #opView{display:grid}
+body.op .wrap>.grid:not(#opView),body.op .wrap>section:not(#opView){display:none}
+.opbig{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}
+.opbig>div{border-radius:10px;padding:10px;text-align:center}
+.opbig b{display:block;font-size:34px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.opsig{font-size:20px;font-weight:800;padding:10px 12px;border-radius:10px;border:2px solid var(--border);margin:6px 0}
+.opsig.u{color:var(--up);border-color:var(--up);background:var(--up-bg)} .opsig.d{color:var(--down);border-color:var(--down);background:var(--down-bg)}
+.calc{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.calc label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.calc input{width:100%;box-sizing:border-box;font-size:15px}
 .warnbox{background:var(--surface);border:1px solid var(--warn);color:var(--warn);border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:13px}
 .alert{border-radius:10px;padding:7px 12px;margin-bottom:6px;border:1px solid;display:flex;gap:10px;align-items:flex-start}
 .alert .ic{font-size:18px;line-height:1.3} .alert b{font-size:14px} .alert .small{opacity:.9}
@@ -115,12 +126,27 @@ footer{margin-top:20px;color:var(--muted);font-size:12px}
   <span id="status" class="pill closed">carregando…</span>
   <span id="upd" class="small muted"></span>
   <span class="sp"></span>
+  <button id="btnModo" title="Mostra só o que tem vantagem medida: gap forte, abertura e fecho, choques, Banco Central e a calculadora de risco">Modo operação</button>
   <button id="btnNotif" title="Avisar com notificação e som quando surgir um ALERTA">Ativar alertas sonoros</button>
   <button id="btnRefresh">Atualizar agora</button>
   <a class="btn" href="/relatorio" target="_blank">Gerar relatório</a>
 </header>
 <div id="alerts"></div>
 <div id="warn"></div>
+
+<section id="opView" class="grid g2">
+  <div class="card"><h2>Gap forte — mini índice</h2><div id="opGap" class="small"></div></div>
+  <div class="card"><h2 id="opPrevT">Previsão</h2><div id="opPrev"></div></div>
+  <div class="card"><h2>Calculadora de risco — gap forte</h2>
+    <div class="calc">
+      <label>Capital para operar (R$)<input id="rkCap" type="number" min="0" step="500" inputmode="decimal"></label>
+      <label>Risco máximo por operação (% do capital)<input id="rkPct" type="number" min="0.1" max="20" step="0.5" inputmode="decimal"></label>
+      <label>Limite de perda no mês (% do capital)<input id="rkMes" type="number" min="1" max="50" step="1" inputmode="decimal"></label>
+    </div>
+    <div id="rkOut" class="small" style="margin-top:10px"></div>
+  </div>
+  <div class="card"><h2>Hoje — agenda e avisos que valem</h2><div id="opHoje" class="small"></div></div>
+</section>
 
 <div class="grid g-hero">
   <div class="card">
@@ -391,7 +417,7 @@ function render(){
   // ---- leitura
   $("read").innerHTML=(S.leitura||[]).map(x=>`<li>${esc(x)}</li>`).join("");
   paintLive();
-  renderAlerts(); renderSynth(); renderAI(); renderBC(); renderAgenda(); renderAnalysts();
+  renderAlerts(); renderOp(); renderSynth(); renderAI(); renderBC(); renderAgenda(); renderAnalysts();
   renderNews(); renderIntl(); renderB3Summary();
   $("foot").textContent=S.aviso_legal;
 }
@@ -421,8 +447,77 @@ function themeImpact(t){
 }
 let seenAlerts=new Set(),notifOn=false;
 function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=880;g.gain.value=.15;o.start();setTimeout(()=>{o.frequency.value=660},250);setTimeout(()=>{o.stop();c.close()},600)}catch(e){}}
+let opMode=false;try{opMode=localStorage.getItem("b3ai.op")==="1"}catch(e){}
+function applyMode(){document.body.classList.toggle("op",opMode);const b=$("btnModo");b.classList.toggle("on",opMode);b.textContent=opMode?"Voltar ao painel completo":"Modo operação"}
+$("btnModo").onclick=()=>{opMode=!opMode;save("op",opMode?"1":"0");applyMode();if(S&&S.ok){renderAlerts();if(!opMode)drawChart()}window.scrollTo({top:0})};
+applyMode();
+const RK={cap:10000,pct:2,mes:6};
+try{const j=JSON.parse(localStorage.getItem("b3ai.risco")||"{}");Object.assign(RK,j)}catch(e){}
+[["rkCap","cap"],["rkPct","pct"],["rkMes","mes"]].forEach(([id,k])=>{$(id).value=RK[k];$(id).addEventListener("input",()=>{const v=parseFloat($(id).value);if(!isNaN(v)&&v>=0){RK[k]=v;try{localStorage.setItem("b3ai.risco",JSON.stringify(RK))}catch(e){}}renderRisk()})});
+const rs=v=>v==null||isNaN(v)?"—":"R$ "+nf(v,0);
+function gapStop(){const A=S&&S.ativos&&S.ativos.WIN;if(!A)return null;const G=A.gap||{};
+  if(G.hoje&&G.hoje.stop_rs)return G.hoje.stop_rs;
+  if(G.pre&&G.pre.stop_pts)return G.pre.stop_pts*0.2;
+  return A.sigma_dia_pct?A.sigma_dia_pct/100*A.preco*2*0.2:null}
+function renderRisk(){
+  if(!S||!S.ok||!S.ativos.WIN){$("rkOut").textContent="aguardando dados";return}
+  const G=S.ativos.WIN.gap||{},F=(G.forte&&G.forte.n)?G.forte:(G.historico||{}),stop=gapStop();
+  if(!stop){$("rkOut").textContent="sem dados de volatilidade para calcular o stop";return}
+  const cap=RK.cap||0,riscoRS=cap*RK.pct/100,n=Math.floor(riscoRS/stop),mes=cap*RK.mes/100,p=F.acerto_bruto;
+  const seq3=p!=null?Math.pow(1-p,3)*100:null;
+  let h=`<div class="opsig ${n>0?"u":""}" style="text-align:center">${n>0?n+" contrato"+(n>1?"s":""):"Nem 1 contrato cabe nesse risco"}</div>`;
+  h+=`<div class="kv" style="margin-top:6px">
+    <div><b>${rs(stop)}</b><span>risco por contrato: stop de proteção a 2 desvios diários</span></div>
+    <div><b>${rs(riscoRS)}</b><span>o máximo que você aceita perder numa operação (${nf(RK.pct,1)}% do capital)</span></div>
+    <div><b class="${cls(F.liq_medio)}">${F.liq_medio!=null?rs(F.liq_medio*Math.max(n,1)):"—"}</b><span>ganho médio histórico por operação com ${Math.max(n,1)} contrato${Math.max(n,1)>1?"s":""} (já com custo)</span></div>
+    <div><b class="down">${F.pior_queda!=null?rs(F.pior_queda*Math.max(n,1)):"—"}</b><span>pior queda acumulada do histórico com ${Math.max(n,1)} contrato${Math.max(n,1)>1?"s":""}</span></div>
+  </div>`;
+  if(n<1)h+=`<p>1 contrato arrisca ${rs(stop)}, que é <b>${nf(stop/Math.max(cap,1)*100,1)}%</b> do capital — acima dos ${nf(RK.pct,1)}% escolhidos. Aumente o capital ou aceite mais risco por operação, com consciência.</p>`;
+  h+=`<p><b>Quando pausar a estratégia:</b> se a perda no mês chegar a <b>${rs(mes)}</b> (${nf(RK.mes,0)}% do capital), ou se vierem <b>3 perdas seguidas</b> no sinal forte`+
+     (seq3!=null&&F.n>=20&&p<1?` — com ${nf(p*100,0)}% de acerto, 3 erros seguidos acontecem em só ${nf(seq3,1)}% das vezes: é sinal de que o mercado mudou.`:".")+`</p>`;
+  h+=`<p class="muted">O stop de 2 desvios é só proteção: no histórico, stops mais curtos pioraram o resultado. A operação abre e fecha no mesmo dia (day trade): confira a margem exigida pela corretora. Resultado passado não garante o futuro.</p>`;
+  $("rkOut").innerHTML=h;
+}
+function renderOp(){
+  if(!S||!S.ok)return;
+  const W=S.ativos.WIN,G=(W&&W.gap)||{},T=G.hoje,PR=G.pre,F=(G.forte&&G.forte.n)?G.forte:null,d0=v=>nf(v,0);
+  let g="";
+  if(T&&T.operar&&G.comprovado){
+    g+=`<div class="opsig ${T.lado>0?"u":"d"}">🎯 SINAL FORTE HOJE: ${T.lado>0?"▲ COMPRA":"▼ VENDA"} até o fechamento</div>
+      <div class="kv"><div><b>${d0(T.abertura)}</b><span>entrada: abertura (até 1 h depois deu o mesmo resultado)</span></div>
+      <div><b>${d0(T.stop_preco)}</b><span>stop só de proteção (≈ ${rs(T.stop_rs)} por contrato)</span></div>
+      <div><b>${d0(T.meio_gap)} / ${d0(T.fech_ant)}</b><span>metade do gap / gap fechado</span></div>
+      <div><b class="${cls(T.resultado_rs)}">${T.resultado_rs!=null?rs(T.resultado_rs):"—"}</b><span>resultado agora por contrato (antes do custo)</span></div></div>`;
+  }else if(T&&T.operar){
+    g+=`<div class="opsig">Sinal forte pelas regras: ${T.lado>0?"▲ compra":"▼ venda"} — mas sem lucro comprovado</div><p>Gap de ${pct(T.gap_pct)}, fora da faixa de ontem e na mesma direção de ontem. O histórico que este computador tem ainda não comprova lucro (poucas operações): não opere com base nele. Com o MetaTrader, o histórico é maior.</p>`;
+  }else if(T){
+    g+=`<div class="opsig">Hoje não há sinal forte</div><p>Gap de ${pct(T.gap_pct)} (${nf(Math.abs(T.z),1)} desvio${T.grande?", grande":", pequeno"})`+
+      (T.grande?` · ${T.contextos} de 2 contextos (${T.fora_da_faixa?"abriu fora":"abriu dentro"} da faixa de ontem, ontem ${T.vespera_na_direcao?"na mesma direção":"contra o gap"})`:"")+`. Fique de fora.</p>`;
+  }else if(PR){
+    g+=`<div class="opsig ${PR.lado>0?"u":"d"}">Próxima abertura: só ${PR.lado>0?"▲ COMPRA":"▼ VENDA"} se abrir ${PR.dia_de_alta?"ACIMA":"ABAIXO"} de ${d0(PR.gatilho)}</div>
+      <p>Último pregão de ${PR.dia_de_alta?"alta":"queda"}, fechamento ${d0(PR.fechamento)}: o gatilho é um gap de ${pct(PR.gap_necessario_pct)}.`+
+      (PR.situacao?` Pelo exterior agora, o gap esperado é de ${pct(PR.gap_esperado_pct)}: sinal forte <b>${esc(PR.situacao)}</b>.`:"")+`</p>`;
+  }else g+='<p class="muted">sem dados do gap ainda</p>';
+  if(F)g+=`<p class="muted">Histórico do sinal forte: ${F.n} operações · ${nf(F.acerto_bruto*100,0)}% de acerto · média <b class="${cls(F.liq_medio)}">${rs(F.liq_medio)}</b> por contrato (com custo).</p>`;
+  const pl=(S.placar||[]).find(x=>x.ativo==="WIN"&&x.horizonte==="Gap sinal forte");
+  g+=`<p class="muted">Placar ao vivo (operações de papel desde que o painel roda): ${pl&&pl.n?`${pl.n} operações, ${nf(pl.acerto*100,0)}% de acerto`:"nenhuma operação encerrada ainda"}${pl&&pl.pendentes?` · ${pl.pendentes} em andamento`:""}.</p>`;
+  if(!G.comprovado&&G.historico)g+='<span class="chip">⚪ sem lucro comprovado no histórico atual: não gera sinal</span>';
+  $("opGap").innerHTML=g;
+  const hzn=S.mercado_aberto?"Fecho de hoje":"Abertura";
+  $("opPrevT").textContent=S.mercado_aberto?"Fecho de hoje — fecha acima ou abaixo do preço de agora?":"Abertura — abre acima ou abaixo do último fechamento?";
+  $("opPrev").innerHTML=Object.values(S.ativos).map(A=>{const R=A.prob.find(r=>r.horizonte===hzn);if(!R)return `<p class="muted">${esc(A.nome)}: sem previsão de ${esc(hzn.toLowerCase())}</p>`;
+    return `<h3>${esc(A.nome)}</h3><div class="opbig"><div style="background:var(--up-bg)"><span class="up small">▲ ALTA</span><b class="up">${Math.round(R.p_alta*100)}%</b></div><div style="background:var(--down-bg)"><span class="down small">▼ QUEDA</span><b class="down">${Math.round(R.p_queda*100)}%</b></div></div>
+      <div class="small muted">${R.validado?"✔ validado":"⚪ não validado"}${R.oos_acerto!=null?" · acerto medido "+nf(R.oos_acerto*100,0)+"%":""}${R.oos_n?" em "+nf(R.oos_n)+" previsões":""}${R.oos_acerto_conv!=null?" · "+nf(R.oos_acerto_conv*100,0)+"% quando passa de 55/45":""}</div>`}).join("");
+  const ev=((S.agenda||{}).eventos||[]).filter(e=>e.dias<=1&&(e.impacto==="alto"||e.impacto==="muito alto"));
+  const av=(S.alertas||[]).filter(a=>["BANCO CENTRAL","MOVIMENTO BRUSCO","DADO DIVULGADO","ALERTA"].includes(a.nivel));
+  $("opHoje").innerHTML=(ev.length?"<ul class='read'>"+ev.slice(0,8).map(e=>`<li><b>${esc(e.quando)}</b> ${esc(e.hora||"")} · ${esc(e.evento)} <span class="faint">(${esc(e.impacto)})</span></li>`).join("")+"</ul>":"<p class='muted'>Nenhum evento de impacto alto hoje ou amanhã.</p>")+
+    (av.length?"<h3>Avisos agora</h3><ul class='read'>"+av.map(a=>`<li><b class="${cls(a.lado)}">${esc(a.nivel)}</b> · ${esc(a.titulo)}</li>`).join("")+"</ul>":"<p class='muted'>Sem choque, intervenção do Banco Central ou dado divulgado agora.</p>")+
+    `<p class="muted">Ficam fora desta tela as previsões de 5 min a 1 hora, os extremos, o MACD e as médias: no teste, não tiveram vantagem. Estão no painel completo.</p>`;
+  renderRisk();
+}
 function renderAlerts(){
-  const A=S.alertas||[],L=S.limiares||{alerta:.9,atencao:.75};
+  const OPN=["ALERTA","ESTRATÉGIA","BANCO CENTRAL","MOVIMENTO BRUSCO","DADO DIVULGADO"];
+  const A=(S.alertas||[]).filter(a=>!opMode||OPN.includes(a.nivel)),L=S.limiares||{alerta:.9,atencao:.75};
   const open=new Set([...document.querySelectorAll("#alerts details[open]")].map(e=>e.dataset.k));
   $("alerts").innerHTML=A.map(a=>`<div class="alert ${a.lado>0?"u":a.lado<0?"d":"n"} ${["ALERTA","ESTRATÉGIA","BANCO CENTRAL","MOVIMENTO BRUSCO","DADO DIVULGADO"].includes(a.nivel)?"hot":""}" role="alert"><span class="ic">${a.nivel==="ALERTA"?"🚨":a.nivel==="AGENDA"?"📅":a.nivel==="REVERSÃO"?"🔄":a.nivel==="ESTRATÉGIA"?"🎯":a.nivel==="BANCO CENTRAL"?"🏦":a.nivel==="MOVIMENTO BRUSCO"?"⚡":a.nivel==="DADO DIVULGADO"?"📊":"⚠️"}</span><details data-k="${esc(a.chave)}" ${open.has(a.chave)||a.nivel==="ESTRATÉGIA"?"open":""}><summary><b class="${a.lado>0?"up":a.lado<0?"down":""}">${esc(a.nivel)} · ${a.lado>0?"▲ ":a.lado<0?"▼ ":""}${esc(a.titulo)}</b></summary><div class="small">${esc(a.texto)}${a.lado?" Probabilidade histórica, não garantia.":""}</div></details></div>`).join("");
   document.title=(A.some(a=>a.nivel==="ALERTA")?"🚨 ALERTA · ":"")+"B3 AI — Mini Índice";

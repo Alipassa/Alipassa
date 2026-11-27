@@ -212,3 +212,19 @@ Dois botões no painel, os dois usando só o que já está na tela:
 Probabilidade não é garantia. Direção de curto prazo é quase um cara-ou-coroa; uma vantagem de poucos pontos
 percentuais só aparece em muitas operações e some com custos mal controlados. Use o painel como apoio à decisão, junto
 com gestão de risco. Não é recomendação de investimento.
+
+
+## Modo operação, calculadora de risco e aviso no celular
+
+- **Modo operação** (botão no topo do painel): mostra só o que tem vantagem medida — o gap forte (gatilho antes da abertura,
+  sinal do dia com entrada, stop de proteção e resultado ao vivo, histórico e placar de papel), a previsão da abertura ou do
+  fecho de hoje, a agenda de impacto alto e os avisos de Banco Central, movimento brusco, dado divulgado e alerta de 90 %.
+  Os alertas do topo também ficam só com esses. A escolha fica gravada no navegador.
+- **Calculadora de risco do gap forte**: com o capital, o risco máximo por operação e o limite de perda no mês, sugere o número
+  de contratos (risco por contrato = stop de proteção de 2 desvios diários), mostra o ganho médio e a pior queda do histórico
+  na mesma quantidade e quando pausar (limite do mês ou 3 perdas seguidas, que com ~80 % de acerto acontecem em <1 % das vezes).
+- **Telegram**: `configurar_telegram.bat` (`python -m b3_ai telegram`) valida o token do robô criado no @BotFather, descobre o
+  chat sozinho quando você manda uma mensagem ao robô e grava no `.env`. O painel envia 🎯 ESTRATÉGIA, 🏦 BANCO CENTRAL,
+  ⚡ MOVIMENTO BRUSCO, 📊 DADO DIVULGADO e 🚨 ALERTA (restrinja com `B3AI_TELEGRAM_NIVEIS`), e em dia de pregão, entre 8h20
+  (`B3AI_TELEGRAM_PREABERTURA`) e 9h, o resumo antes da abertura: previsão da abertura, gatilho do gap forte e eventos do dia.
+  `testar_telegram.bat` (`python -m b3_ai --fonte mt5 telegram --resumo`) envia esse resumo na hora.

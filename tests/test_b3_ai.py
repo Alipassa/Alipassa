@@ -920,3 +920,37 @@ class HorizonsTest(unittest.TestCase):
         self.assertIn("acima do acaso", mom5["veredito"])
         ten = next(r for r in rows if r["prazo"] == "10 min" and r["regra"] == "momento")
         self.assertEqual(ten["n"] <= mom5["n"], True)                         # sem sobreposição: menos previsões em prazos maiores
+
+
+class TelegramPreopenTest(unittest.TestCase):
+    def test_preopen_text_has_trigger_and_opening(self):
+        from b3_ai.engine import Engine
+        row = {"horizonte": "Abertura", "p_alta": 0.72, "p_queda": 0.28, "oos_acerto": 0.85}
+        ativos = {"WIN": {"nome": "Mini Índice (WIN)", "prob": [row],
+                          "gap": {"comprovado": True, "pre": {"dia_de_alta": True, "gatilho": 129150.0, "gap_necessario_pct": 0.45,
+                                                              "fechamento": 128570.0, "lado": -1, "situacao": "possível", "gap_esperado_pct": 0.3},
+                                  "forte": {"n": 30, "acerto_bruto": 0.83, "liq_medio": 1217.5}}}}
+        agenda = {"eventos": [{"dias": 0, "impacto": "muito alto", "hora": "10:30", "evento": "Payroll"}]}
+        t = Engine.preopen_text(ativos, agenda, 1_764_000_000)
+        self.assertIn("ACIMA de 129.150", t)
+        self.assertIn("VENDA", t)
+        self.assertIn("72%", t)
+        self.assertIn("R$ 1.217,50", t)
+        self.assertIn("83% de acerto", t)
+        self.assertIn("Payroll", t)
+
+    def test_env_set_updates_and_appends(self):
+        import os
+        import tempfile
+        from b3_ai.cli import _env_set
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, ".env")
+        open(p, "w", encoding="utf-8").write("# comentario\nTELEGRAM_BOT_TOKEN=velho\nB3AI_ALERTA=0.9\n")
+        _env_set({"TELEGRAM_BOT_TOKEN": "novo", "TELEGRAM_CHAT_ID": "123"}, p)
+        txt = open(p, encoding="utf-8").read()
+        self.assertIn("TELEGRAM_BOT_TOKEN=novo", txt)
+        self.assertNotIn("velho", txt)
+        self.assertIn("TELEGRAM_CHAT_ID=123", txt)
+        self.assertIn("B3AI_ALERTA=0.9", txt)
+        os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        os.environ.pop("TELEGRAM_CHAT_ID", None)

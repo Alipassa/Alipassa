@@ -977,10 +977,7 @@ class Engine:
                                     "do quadro tendem a ser estreitas demais nesse dia." + extra,
                            "chave": f"agenda|{e['tipo']}|{e['data']}"})
         state["agenda"] = agenda
-        for x in al:
-            if x["nivel"] == "ALERTA" and x["chave"] not in self._alerts_sent:
-                self._alerts_sent.add(x["chave"])
-                alerts.send_telegram(f"🚨 B3 AI — {x['titulo']}\n{x['texto']}\nProbabilidade histórica, não garantia.")
+        tg_ativos, tg_open, tg_agenda = ativos, is_open, agenda
         for ev in self.mem.bc_events(10):
             age = now - ev["ts"]
             if age > 15 * 60 or ev["origem"].startswith("dado econômico"):
@@ -1006,6 +1003,10 @@ class Engine:
         state["bc_eventos"] = self.mem.bc_events(15)
         state["bc_resumo"] = bc_watch.summary(self.mem.bc_events(500))
         state["alertas"] = al
+        try:
+            self._telegram(al, tg_ativos, tg_agenda, now, tg_open)
+        except Exception:  # noqa: BLE001 — aviso nunca derruba o ciclo
+            pass
         state["limiares"] = {"alerta": alerts.ALERTA, "atencao": alerts.ATENCAO, "telegram": all(alerts.telegram_config())}
         state["sintese"] = self._synthesis(state)
         state["leitura"] = self._narrative(state)
@@ -1016,6 +1017,57 @@ class Engine:
             print(f"[b3-ai] primeira leitura concluída em {time.time() - t0:.0f}s", flush=True)
         self.ciclos += 1
         return state
+
+    # Telegram: os avisos que valem a pena receber no celular (os de vantagem medida e os de risco), e um resumo antes da abertura.
+    TG_NIVEIS = {"ESTRATÉGIA": "🎯", "BANCO CENTRAL": "🏦", "MOVIMENTO BRUSCO": "⚡", "DADO DIVULGADO": "📊", "ALERTA": "🚨"}
+
+    def _telegram(self, al: list[dict], ativos: dict, agenda: dict, now: float, is_open: bool) -> None:
+        if not all(alerts.telegram_config()):
+            return
+        niveis = {x.strip().upper() for x in os.environ.get("B3AI_TELEGRAM_NIVEIS", "").split(",") if x.strip()} or set(self.TG_NIVEIS)
+        for x in al:
+            ic = self.TG_NIVEIS.get(x["nivel"])
+            if not ic or x["nivel"] not in niveis or x["chave"] in self._alerts_sent:
+                continue
+            self._alerts_sent.add(x["chave"])
+            alerts.send_telegram(f"{ic} B3 AI — {x['nivel']}\n{x['titulo']}\n\n{x['texto']}"
+                                 + ("\n\nProbabilidade histórica, não garantia. O painel não envia ordens." if x.get("lado") else ""))
+        t = brt(now)
+        mins = t.hour * 60 + t.minute
+        ini = int(os.environ.get("B3AI_TELEGRAM_PREABERTURA", "8:20").split(":")[0]) * 60 + int(os.environ.get("B3AI_TELEGRAM_PREABERTURA", "8:20").split(":")[1])
+        key = "preabertura|" + t.date().isoformat()
+        if not is_open and cal.is_b3_day(t.date()) and ini <= mins < 9 * 60 and key not in self._alerts_sent:
+            msg = self.preopen_text(ativos, agenda, now)
+            if msg and alerts.send_telegram(msg):
+                self._alerts_sent.add(key)
+
+    @staticmethod
+    def preopen_text(ativos: dict, agenda: dict, now: float) -> str:
+        """Resumo antes da abertura: previsão da abertura, gatilho do gap forte e eventos do dia."""
+        L = [f"☀️ B3 AI — antes da abertura ({brt(now).strftime('%d/%m')})", ""]
+        for k in ("WIN", "WDO"):
+            a = ativos.get(k)
+            r = next((x for x in (a or {}).get("prob", []) if x["horizonte"] == "Abertura"), None)
+            if a and r:
+                up = r["p_alta"] >= 0.5
+                ac = f" · acerto medido {r['oos_acerto'] * 100:.0f}%" if r.get("oos_acerto") is not None else ""
+                L.append(f"{a['nome']}: abertura {'▲ ALTA' if up else '▼ QUEDA'} {max(r['p_alta'], r['p_queda']) * 100:.0f}%{ac}")
+        g = ((ativos.get("WIN") or {}).get("gap") or {})
+        pre, fo = g.get("pre"), g.get("forte") or {}
+        if pre and g.get("comprovado"):
+            d = lambda v: f"{v:,.0f}".replace(",", ".")  # noqa: E731
+            L += ["", f"🎯 Gap forte hoje: só se o mini índice abrir {'ACIMA' if pre['dia_de_alta'] else 'ABAIXO'} de {d(pre['gatilho'])} "
+                      f"(gap de {pre['gap_necessario_pct']:+.2f}% sobre {d(pre['fechamento'])}) → {'VENDA' if pre['lado'] < 0 else 'COMPRA'} até o fechamento."]
+            if pre.get("situacao"):
+                L.append(f"Pelo exterior agora: gap esperado de {pre.get('gap_esperado_pct') or 0:+.2f}% — sinal forte {pre['situacao']}.")
+            if fo.get("n"):
+                rs = f"{fo['liq_medio']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                L.append(f"Histórico do sinal forte: {fo['n']} operações, {fo['acerto_bruto'] * 100:.0f}% de acerto, média R$ {rs} por contrato.")
+        hoje = [e for e in agenda.get("eventos", []) if e.get("dias") == 0 and e.get("impacto") in ("alto", "muito alto")]
+        if hoje:
+            L += ["", "📅 Hoje: " + "; ".join(f"{e.get('hora', '')} {e['evento']}" for e in hoje[:6])]
+        L += ["", "Probabilidades históricas, não garantia. O painel não envia ordens."]
+        return "\n".join(L) if len(L) > 4 else ""
 
     def _brasil_ny(self, quotes: list[dict]) -> list[dict]:
         q = {x["key"]: x for x in quotes}
