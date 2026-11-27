@@ -642,6 +642,10 @@ class GapFiltersTest(unittest.TestCase):
         self.assertEqual(F["escolhido"], "abriu FORA da faixa da véspera")
         self.assertTrue(F["melhorou"])
         self.assertGreater(F["resultado"]["acerto_bruto"], 0.9)
+        W = S["ampliar"]                                        # tabela "para aparecer mais vezes"
+        self.assertTrue(W and W[0]["nome"].startswith("sinal forte ATUAL"))
+        self.assertTrue(all("por_ano" in r for r in W))
+        self.assertGreaterEqual(W[-1]["n"], W[0]["n"])          # ampliar nunca tem menos operações que o atual
 
 
 class GapAssetsTest(unittest.TestCase):

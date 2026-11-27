@@ -297,7 +297,7 @@ function render(){
   // ---- destaque
   // 5 min a 1 hora: a direção é cara ou coroa (48–50 % de acerto medido), mas a faixa de 80 % acerta ~80 %.
   // Nesses horizontes o destaque mostra a FAIXA (máximo e mínimo prováveis), que serve para alvo e stop.
-  const faixa=R.tipo==="intraday"&&Math.abs(R.p_alta-.5)<.05&&R.f80_min!=null;
+  const faixa=false;   // o usuário prefere ver sempre a porcentagem; a faixa de 80% continua no quadro abaixo do destaque
   const dd=asset==="WIN"?0:1;
   $("pUp").classList.toggle("range",faixa); $("pDown").classList.toggle("range",faixa);
   if(faixa){
@@ -372,7 +372,7 @@ function render(){
   // ---- quadro
   $("boardName").textContent=A.nome;
   $("board").innerHTML=rows.map(r=>`<button class="hz ${r.horizonte===hz?"sel":""}" data-h="${esc(r.horizonte)}"><div class="t">${esc(r.horizonte)}</div><div class="a">${esc(r.alvo)}</div>
-    ${r.tipo==="intraday"&&Math.abs(r.p_alta-.5)<.05&&r.f80_min!=null
+    ${false
       ?`<div class="n rng"><b class="up">▲ ${nf(r.f80_max,dec())}</b><b class="down">▼ ${nf(r.f80_min,dec())}</b></div>
         <div class="s">faixa de 80% · acertou ${r.f80_cobertura!=null?nf(r.f80_cobertura*100,0):"~80"}% · direção 50/50</div>`
       :`<div class="n"><b class="up">▲${Math.round(r.p_alta*100)}%</b><b class="down">▼${Math.round(r.p_queda*100)}%</b></div>

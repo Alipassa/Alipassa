@@ -143,6 +143,12 @@ R$ 214,14 em 39 operações (79 %), só um R$ 43,94 (68 %), nenhum R$ 9,07 (43 %
 contextos ("sinal forte"); com um, "sinal fraco" sem alerta; com nenhum, "melhor ficar de fora". Tamanho do gap, exterior,
 confirmação nos primeiros 15 minutos e dia da semana não se sustentaram.
 
+Para o sinal forte aparecer mais vezes (série pública de 2 anos, 60 min): o atual dá ~20 por ano (79 %, R$ 214 por operação).
+Afrouxar as regras chega a ~32 por ano, mas as operações ACRESCENTADAS rendem quase nada sozinhas (fora da faixa a favor da
+tendência: 68 %, R$ 18; ontem na direção e dentro da faixa: 65 %, R$ 37; os dois contextos com gap de 0,5 a 0,75 desvio:
+43 %, R$ −131). O ganho por ano fica igual (~R$ 4.200 por contrato) com mais operações e menor acerto: o painel mantém a regra
+atual. A tabela "Para o sinal forte aparecer mais vezes" de `python -m b3_ai gap` repete o teste com os dados do MetaTrader.
+
 A devolução de gap do mini índice é a única com evidência de lucro; o painel mostra o gap do dia, dispara o alerta 🎯 ESTRATÉGIA
 quando ele é grande e registra cada ocorrência como operação de papel no placar ao vivo. Ressalvas: ~14 meses de histórico,
 várias estratégias testadas (uma pode passar por sorte), abertura com escorregamento maior que o simulado e, sem stop, perda

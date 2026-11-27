@@ -380,7 +380,7 @@ def run_extremes(engine: "Engine") -> str:
 
 
 # ============================================================================= estudo da devolução de gap
-def gap_trades(bars: list[tuple], min_sessions: int = 40, leader: Optional[list[tuple]] = None) -> list[dict]:
+def gap_trades(bars: list[tuple], min_sessions: int = 40, leader: Optional[list[tuple]] = None, limiar: Optional[float] = None) -> list[dict]:
     """Uma ficha por pregão com gap grande: tudo o que é preciso para testar variações da estratégia.
     `leader`: barras do S&P (micro S&P da B3 ou contrato de 24 h) para medir quanto do gap o exterior explica."""
     ss = [x for x in M.sessions_gap(bars, 2 * 3600) if len(x) >= 5]
@@ -394,7 +394,7 @@ def gap_trades(bars: list[tuple], min_sessions: int = 40, leader: Optional[list[
         s = ss[k]
         op, prev = s[0][1], ss[k - 1][-1][4]
         gap = op / prev - 1
-        if abs(gap) < GAP_LIMIAR * gsd:
+        if abs(gap) < (GAP_LIMIAR if limiar is None else limiar) * gsd or gap == 0:
             continue
         side = -1 if gap > 0 else 1
         closes20 = [ss[j][-1][4] for j in range(k - 20, k)]
@@ -511,6 +511,33 @@ def gap_best_filter(asset: str, T: list[dict]) -> dict:
     return out
 
 
+def gap_widen(asset: str, bars: list[tuple], leader: Optional[list[tuple]] = None) -> list[dict]:
+    """Variações para o sinal forte aparecer mais vezes. As linhas "só as novas" mostram o que as operações ACRESCENTADAS
+    renderiam sozinhas: se elas não dão lucro, ampliar só dilui o acerto."""
+    T = gap_trades(bars, leader=leader, limiar=0.0)
+    if not T:
+        return []
+    anos = max(0.25, (T[-1]["ts"] - T[0]["ts"]) / (365.25 * 86400))
+    fora = lambda t: not t["dentro"]                                                     # noqa: E731
+    vesp = lambda t: t["prev_ret"] * t["gap"] > 0                                        # noqa: E731
+    tend = lambda t: t["trend"] * t["gap"] > 0                                           # gap a favor da tendência de 20 pregões  # noqa: E731
+    forte = lambda t: t["z"] >= GAP_LIMIAR and fora(t) and vesp(t)                       # noqa: E731
+    var = [("sinal forte ATUAL (gap ≥ 0,75 desvio + os dois contextos)", forte),
+           ("só as novas: os dois contextos com gap de 0,5 a 0,75 desvio", lambda t: 0.5 <= t["z"] < GAP_LIMIAR and fora(t) and vesp(t)),
+           ("só as novas: os dois contextos com gap menor que 0,5 desvio", lambda t: t["z"] < 0.5 and fora(t) and vesp(t)),
+           ("só as novas: fora da faixa + gap a favor da tendência de 20 pregões (gap ≥ 0,5)", lambda t: not forte(t) and t["z"] >= 0.5 and fora(t) and tend(t)),
+           ("só as novas: ontem na direção do gap, dentro da faixa (gap ≥ 0,5)", lambda t: t["z"] >= 0.5 and vesp(t) and not fora(t)),
+           ("ampliado: atual + fora da faixa a favor da tendência", lambda t: forte(t) or (t["z"] >= 0.5 and fora(t) and tend(t))),
+           ("ampliado: os dois contextos com qualquer tamanho de gap", lambda t: fora(t) and vesp(t))]
+    out = []
+    for nm, f in var:
+        sub = [t for t in T if f(t)]
+        r = _row(f"{nm} — {len(sub) / anos:.0f} por ano", asset, sub)
+        r["por_ano"] = len(sub) / anos
+        out.append(r)
+    return out
+
+
 def gap_study(asset: str, bars: list[tuple], leader: Optional[list[tuple]] = None) -> dict:
     T = gap_trades(bars, leader=leader)
     if len(T) < 30:
@@ -541,6 +568,7 @@ def gap_study(asset: str, bars: list[tuple], leader: Optional[list[tuple]] = Non
     S["calor"] = {"ganhadoras": len(wins), "mae_mediana": q(wins, 0.5), "mae_p80": q(wins, 0.8), "mae_p90": q(wins, 0.9),
                   "perda_mediana": q(loss, 0.5), "perda_p90": q(loss, 0.9), "pior_perda": loss[-1] if loss else None,
                   "mae_todas_p90": q(allm, 0.9), "desvio_diario_rs": st.mean([t["dsd"] * t["op"] for t in T]) * POINT[asset]}
+    S["ampliar"] = gap_widen(asset, bars, leader)
     S["por_mes"] = round(len(T) / max(1, (T[-1]["ts"] - T[0]["ts"]) / (30 * 86400)), 1)
     return S
 
@@ -555,7 +583,7 @@ def run_gap(engine: "Engine") -> str:
          f"e sai no fechamento. 1 mini contrato; custo por operação: WIN {r(cost('WIN'))} · WDO {r(cost('WDO'))}. Cada tabela muda UMA coisa da "
          "regra. A coluna \"2ª metade\" mostra o ganho médio só na metade mais recente: uma variação só é confiável se for boa nas duas.", ""]
     titles = [("base", "Regra base"), ("contexto", "Por contexto do gap (a regra do sinal no painel)"), ("tamanho", "Por tamanho do gap"), ("direcao", "Por direção do gap"),
-              ("tendencia", "Em relação à tendência"), ("saida", "Quando sair"), ("stop", "Com stop"), ("entrada", "Quando entrar"),
+              ("tendencia", "Em relação à tendência"), ("ampliar", "Para o sinal forte aparecer mais vezes"), ("saida", "Quando sair"), ("stop", "Com stop"), ("entrada", "Quando entrar"),
               ("semana", "Por dia da semana")]
     for k in ("WIN", "WDO"):
         S = gap_study(k, intr.get((k, "15")) or [], leader=intr.get(("ES", "15")))
